@@ -85,3 +85,11 @@ workflows:
   #       params:
   #         channel: "#engineering"
   #         text: "Daily Health Report:\n{{steps.analysis.review}}"
+
+  # Auto-respond to PR review comments
+  # - name: respond-reviews
+  #   template: respond-to-reviews
+  #   trigger:
+  #     source: github-poll
+  #     event: pull_request_review.submitted
+  #     repo: "my-org/my-repo"

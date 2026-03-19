@@ -6,24 +6,6 @@ integrations:
     webhookSecret: ${GITHUB_WEBHOOK_SECRET}
     token: ${GITHUB_TOKEN}
 workflows:
-  - name: review-my-repo
-    template: ai-pr-review
-    trigger:
-      event: pull_request.opened
-      repo: Tjemmmic/test-app
-  - name: enforce-repo-rules
-    template: enforce-rules
-    trigger:
-      event: pull_request.opened
-      repo: Tjemmmic/test-app
-  - name: log-pr-events
-    trigger:
-      source: github
-      event: pull_request.opened
-    steps:
-      - action: log
-        params:
-          message: 'PR opened: {{event.payload.pull_request.title}} by {{event.payload.pull_request.user.login}}'
   - name: manual-pr-review
     description: On-demand AI review for any pull request
     template: ai-pr-review
@@ -34,3 +16,28 @@ workflows:
         label: Pull Request
         type: github-pr
         required: true
+  - name: auto-pr-review
+    description: Automatically review every new PR
+    template: ai-pr-review
+    trigger:
+      source: gh-cli
+      event:
+        - pull_request.opened
+        - pull_request.synchronize
+      author: Tjemmmic
+  - name: fix-github-issue
+    description: Clone the repo, use Claude Code to fix the bug, open a PR
+    template: fix-github-issue
+    trigger:
+      source: manual
+    inputs:
+      - name: issue
+        label: Issue
+        type: github-issue
+        required: true
+issueActions:
+  - id: fix-issue
+    name: Fix Issue
+    description: Use Claude Code to fix this bug and open a PR
+    icon: "🔧"
+    workflow: fix-github-issue
