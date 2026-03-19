@@ -1,0 +1,18 @@
+# Log Events
+#
+# Simple event logger — logs a message whenever an event fires.
+#
+# Usage:
+#   - name: log-everything
+#     template: log-events
+#     trigger:
+#       event: push
+
+trigger:
+  source: github
+  event: push
+
+steps:
+  - action: log
+    params:
+      message: "[{{event.source}}] {{event.event}} on {{event.metadata.repo}}"

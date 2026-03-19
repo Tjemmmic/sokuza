@@ -1,0 +1,36 @@
+server:
+  port: 3500
+  host: 0.0.0.0
+integrations:
+  github:
+    webhookSecret: ${GITHUB_WEBHOOK_SECRET}
+    token: ${GITHUB_TOKEN}
+workflows:
+  - name: review-my-repo
+    template: ai-pr-review
+    trigger:
+      event: pull_request.opened
+      repo: Tjemmmic/test-app
+  - name: enforce-repo-rules
+    template: enforce-rules
+    trigger:
+      event: pull_request.opened
+      repo: Tjemmmic/test-app
+  - name: log-pr-events
+    trigger:
+      source: github
+      event: pull_request.opened
+    steps:
+      - action: log
+        params:
+          message: 'PR opened: {{event.payload.pull_request.title}} by {{event.payload.pull_request.user.login}}'
+  - name: manual-pr-review
+    description: On-demand AI review for any pull request
+    template: ai-pr-review
+    trigger:
+      source: manual
+    inputs:
+      - name: pr
+        label: Pull Request
+        type: github-pr
+        required: true

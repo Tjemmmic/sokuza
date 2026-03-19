@@ -1,0 +1,89 @@
+# Enforce Repository Rules
+#
+# Clones the repo, has Claude read your rules/guidelines, checks compliance,
+# and optionally creates a follow-up PR with fixes.
+#
+# This template expects your repo to have one or more of:
+#   - .github/RULES.md, .github/CONTRIBUTING.md, .github/guidelines/
+#   - CONTRIBUTING.md, RULES.md, docs/guidelines/
+#
+# Usage:
+#   - name: check-rules
+#     template: enforce-rules
+#     trigger:
+#       event: pull_request.opened
+#       repo: "my-org/my-repo"
+
+trigger:
+  source: github
+  event: pull_request.opened
+
+steps:
+  # 1. Clone the repo
+  - id: repo
+    action: github-clone-repo
+    params: {}
+
+  # 2. Claude reads the rules and checks for compliance
+  - id: analysis
+    action: ai-agent
+    params:
+      workdir: "{{steps.repo.path}}"
+      prompt: |
+        You have access to a repository. Do the following:
+
+        1. Look for project rules and guidelines. Check common locations:
+           - .github/RULES.md, .github/CONTRIBUTING.md, .github/guidelines/
+           - CONTRIBUTING.md, RULES.md, docs/guidelines/
+           - Any rule or guideline files you find
+
+        2. Read and understand those rules.
+
+        3. Check the current state of the codebase against those rules.
+           Identify any violations or missing items.
+
+        4. Produce a structured report:
+           - VIOLATIONS: List any rule violations found
+           - MISSING_ACTIONS: Things the rules say should exist but don't
+           - CHANGES_NEEDED: "true" if a follow-up PR should fix these, "false" otherwise
+           - SUMMARY: A concise summary of findings
+
+  # 3. If fixes are needed, have Claude make the changes
+  - id: fix
+    action: ai-agent
+    condition: "{{steps.analysis.changes_needed}}"
+    params:
+      workdir: "{{steps.repo.path}}"
+      prompt: |
+        Based on the rules and guidelines in this repo,
+        implement the missing actions and fix any violations.
+        Make clean, minimal changes.
+      allowed_tools:
+        - Read
+        - Grep
+        - Glob
+        - LS
+        - Edit
+        - Write
+
+  # 4. Create a PR with the fixes (Sokuza controls the push)
+  - action: github-create-pr
+    condition: "{{steps.analysis.changes_needed}}"
+    params:
+      workdir: "{{steps.repo.path}}"
+      title: "🤖 Auto-fix: Rule compliance updates"
+      body: |
+        ## Automated fixes by Sokuza
+
+        {{steps.analysis.review}}
+
+  # 5. Post a compliance report on the original PR
+  - action: github-comment
+    params:
+      body: |
+        ## 📋 Rule Compliance Report
+
+        {{steps.analysis.review}}
+
+        ---
+        _Analyzed by Sokuza AI_

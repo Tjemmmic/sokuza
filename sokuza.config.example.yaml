@@ -1,0 +1,87 @@
+# ─── Sokuza Configuration ────────────────────────────────────────────────────
+# Copy this file to sokuza.config.yaml and fill in your values.
+
+server:
+  port: 3500
+  host: "0.0.0.0"
+
+# ─── Integrations ────────────────────────────────────────────────────────────
+# Enable the integrations you need. Each one auto-registers its actions.
+
+integrations:
+  # GitHub — receives webhooks at /webhooks/github
+  github:
+    webhookSecret: "${GITHUB_WEBHOOK_SECRET}"
+    token: "${GITHUB_TOKEN}"
+
+  # Slack — receives events at /webhooks/slack/events
+  #         receives slash commands at /webhooks/slack/commands
+  # slack:
+  #   botToken: "${SLACK_BOT_TOKEN}"
+  #   signingSecret: "${SLACK_SIGNING_SECRET}"
+
+  # Generic webhooks — receives JSON at /webhooks/custom/:name
+  # webhook:
+  #   endpoints:
+  #     deploy-hook:
+  #       secret: "${DEPLOY_HOOK_SECRET}"
+  #     monitoring-alert: {}
+
+  # Cron — time-based triggers (no webhook needed)
+  # cron: {}
+
+# ─── Workflows ───────────────────────────────────────────────────────────────
+# Each workflow has a trigger (which integration + event) and steps (actions).
+# Use a template for common patterns, or define custom steps.
+
+workflows:
+  # Simple AI PR review using a template
+  - name: review-prs
+    template: ai-pr-review
+    trigger:
+      event: pull_request.opened
+      repo: "my-org/my-repo"
+
+  # Cross-source: review PR + notify Slack
+  # - name: review-and-notify
+  #   template: review-notify-slack
+  #   trigger:
+  #     event: pull_request.opened
+  #     repo: "my-org/my-repo"
+
+  # Agentic: clone repo, check rules, auto-fix, report
+  # - name: enforce-rules
+  #   template: enforce-rules
+  #   trigger:
+  #     event: pull_request.opened
+  #     repo: "my-org/my-repo"
+
+  # Custom workflow with steps
+  # - name: deploy-notification
+  #   trigger:
+  #     source: webhook
+  #     event: deploy-hook
+  #   steps:
+  #     - action: slack-send-message
+  #       params:
+  #         channel: "#deploys"
+  #         text: "Deployed {{event.payload.version}} to {{event.payload.environment}}"
+
+  # Scheduled workflow
+  # - name: daily-health
+  #   trigger:
+  #     source: cron
+  #     event: daily
+  #   steps:
+  #     - id: repo
+  #       action: github-clone-repo
+  #       params:
+  #         repo: "my-org/my-repo"
+  #     - action: ai-agent
+  #       params:
+  #         workdir: "{{steps.repo.path}}"
+  #         prompt: "Check for vulnerabilities and outdated dependencies"
+  #     - action: slack-send-message
+  #       params:
+  #         channel: "#engineering"
+  #         text: "Daily Health Report:\n{{steps.analysis.review}}"

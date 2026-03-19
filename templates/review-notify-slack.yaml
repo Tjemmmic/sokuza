@@ -1,0 +1,53 @@
+# PR Review with Slack Notification
+#
+# Reviews a PR using AI and posts the result to both GitHub and Slack.
+# Demonstrates cross-source workflows — a single trigger from one
+# source can fire actions across multiple platforms.
+#
+# Usage:
+#   - name: review-and-notify
+#     template: review-notify-slack
+#     trigger:
+#       event: pull_request.opened
+#       repo: "my-org/my-repo"
+#     # Override the default Slack channel:
+#     # steps:
+#     #   - action: github-fetch-diff
+#     #   - action: ai-review
+#     #   - action: github-comment
+#     #   - action: slack-send-message
+#     #     params:
+#     #       channel: "#my-custom-channel"
+
+trigger:
+  source: github
+  event: pull_request.opened
+
+steps:
+  - id: fetch_diff
+    action: github-fetch-diff
+    params: {}
+
+  - id: review
+    action: ai-review
+    params:
+      prompt: >
+        Review this pull request diff for bugs, security issues,
+        performance problems, and code quality. Be concise and actionable.
+
+  - action: github-comment
+    params:
+      body: |
+        ## 🤖 AI Code Review
+
+        {{steps.review.review}}
+
+        ---
+        _Reviewed by Sokuza AI ({{steps.review.model}}, via {{steps.review.provider}})_
+
+  - action: slack-send-message
+    params:
+      channel: "#code-reviews"
+      text: |
+        🔍 *New PR Review* on `{{event.metadata.repo}}#{{event.metadata.prNumber}}`
+        {{steps.review.review}}
