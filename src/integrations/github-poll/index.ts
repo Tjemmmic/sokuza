@@ -50,6 +50,8 @@ interface PollState {
     lastBranchShas: Map<string, Map<string, string>>;
     /** Last-seen comment IDs per repo */
     lastCommentIds: Map<string, Set<number>>;
+    /** Last-seen PR review IDs per repo */
+    lastReviewIds: Map<string, Set<number>>;
     /** Whether initial seed has completed (skip first batch) */
     seeded: boolean;
 }
@@ -65,6 +67,7 @@ const SUPPORTED_EVENTS = [
     'issues.opened',
     'issues.closed',
     'issue_comment.created',
+    'pull_request_review.submitted',
 ];
 
 export class GitHubPollIntegration implements Integration {
@@ -80,6 +83,7 @@ export class GitHubPollIntegration implements Integration {
         lastIssueStates: new Map(),
         lastBranchShas: new Map(),
         lastCommentIds: new Map(),
+        lastReviewIds: new Map(),
         seeded: false,
     };
     private timer: ReturnType<typeof setInterval> | null = null;
@@ -160,6 +164,11 @@ export class GitHubPollIntegration implements Integration {
         // Poll comments
         if (this.enabledEvents.has('issue_comment.created')) {
             await this.pollComments(owner, repo);
+        }
+
+        // Poll PR reviews
+        if (this.enabledEvents.has('pull_request_review.submitted')) {
+            await this.pollPullRequestReviews(owner, repo);
         }
     }
 
@@ -364,6 +373,48 @@ export class GitHubPollIntegration implements Integration {
         }
 
         this.state.lastCommentIds.set(key, newIds);
+    }
+
+    // ─── PR Review Polling ──────────────────────────────────────────────
+
+    private async pollPullRequestReviews(owner: string, repo: string): Promise<void> {
+        const key = `${owner}/${repo}`;
+
+        // Get open PRs to check reviews on
+        const prsUrl = `${GITHUB_API}/repos/${owner}/${repo}/pulls?state=open&sort=updated&direction=desc&per_page=10`;
+        const prs = await this.apiGet(prsUrl) as Array<Record<string, unknown>>;
+
+        const oldIds = this.state.lastReviewIds.get(key) ?? new Set<number>();
+        const newIds = new Set<number>(oldIds);
+
+        for (const pr of prs) {
+            const prNum = pr.number as number;
+            const reviewsUrl = `${GITHUB_API}/repos/${owner}/${repo}/pulls/${prNum}/reviews`;
+
+            let reviews: Array<Record<string, unknown>>;
+            try {
+                reviews = await this.apiGet(reviewsUrl) as Array<Record<string, unknown>>;
+            } catch {
+                continue; // Skip PRs we can't fetch reviews for
+            }
+
+            for (const review of reviews) {
+                const id = review.id as number;
+                newIds.add(id);
+
+                if (!this.state.seeded) continue;
+                if (oldIds.has(id)) continue;
+
+                // Emit event for new reviews
+                await this.emit('pull_request_review.submitted', owner, repo, {
+                    action: 'submitted',
+                    review,
+                    pull_request: pr,
+                });
+            }
+        }
+
+        this.state.lastReviewIds.set(key, newIds);
     }
 
     // ─── Helpers ────────────────────────────────────────────────────────

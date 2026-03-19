@@ -22,6 +22,7 @@ import { githubFetchDiffAction } from './actions/fetch-diff.js';
 import { githubCommentAction } from './actions/comment.js';
 import { githubCloneRepoAction } from './actions/clone-repo.js';
 import { githubCreatePrAction } from './actions/create-pr.js';
+import { githubFetchReviewsAction } from './actions/github-fetch-reviews.js';
 
 interface GitHubConfig {
     webhookSecret: string;
@@ -37,6 +38,7 @@ export class GitHubIntegration implements Integration {
         'github-comment': githubCommentAction,
         'github-clone-repo': githubCloneRepoAction,
         'github-create-pr': githubCreatePrAction,
+        'github-fetch-reviews': githubFetchReviewsAction,
     };
 
     private config: GitHubConfig = { webhookSecret: '' };
