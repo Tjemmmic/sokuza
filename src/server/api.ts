@@ -3,7 +3,7 @@ import type { Logger } from 'pino';
 import { readFile, writeFile, readdir } from 'node:fs/promises';
 import { join, basename, extname } from 'node:path';
 import yaml from 'js-yaml';
-import type { SokuzaConfig } from '../core/types.js';
+import type { SokuzaConfig, WorkflowRunRecord } from '../core/types.js';
 
 interface ApiDeps {
     logger: Logger;
@@ -13,7 +13,9 @@ interface ApiDeps {
     getRecentEvents: () => EventEntry[];
     addEventSubscriber: (cb: (event: unknown) => void) => () => void;
     getRegisteredActions: () => string[];
-    runWorkflow: (name: string, inputs: Record<string, unknown>) => Promise<{ ok: boolean; error?: string }>;
+    runWorkflow: (name: string, inputs: Record<string, unknown>) => Promise<{ ok: boolean; error?: string; runId?: string }>;
+    rerunWorkflow: (runId: string) => Promise<{ ok: boolean; error?: string; runId?: string }>;
+    getRunHistory: (workflowName?: string) => WorkflowRunRecord[];
     getConfig: () => SokuzaConfig;
 }
 
@@ -166,6 +168,207 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
             return reply.status(404).send({ error: `Workflow "${name}" not found` });
         }
         return { workflow };
+    });
+
+    // ─── Run History ────────────────────────────────────────────────────
+
+    server.get('/api/runs', async (request) => {
+        const { workflow } = (request.query ?? {}) as { workflow?: string };
+        return { runs: deps.getRunHistory(workflow) };
+    });
+
+    server.get('/api/workflows/:name/runs', async (request) => {
+        const { name } = request.params as { name: string };
+        return { runs: deps.getRunHistory(name) };
+    });
+
+    server.post('/api/runs/:id/rerun', async (request, reply) => {
+        const { id } = request.params as { id: string };
+        logger.info({ runId: id }, 'Rerun triggered via dashboard');
+
+        try {
+            const result = await deps.rerunWorkflow(id);
+            if (!result.ok) {
+                return reply.status(404).send({ error: result.error });
+            }
+            return { ok: true, runId: result.runId, message: 'Workflow rerun started' };
+        } catch (err: any) {
+            logger.error({ runId: id, err }, 'Rerun failed');
+            return reply.status(500).send({ error: err.message ?? 'Rerun failed' });
+        }
+    });
+
+    // ─── My PRs (gh CLI powered) ────────────────────────────────────────
+
+    server.get('/api/my-prs', async (_request, reply) => {
+        try {
+            // Dynamic import to avoid hard dependency
+            const { GhCliIntegration } = await import('../integrations/gh-cli/index.js');
+            const prs = await GhCliIntegration.listMyPrs();
+            return { prs };
+        } catch (err: any) {
+            logger.warn({ err }, 'Failed to list PRs via gh CLI');
+            return reply.status(503).send({
+                error: 'gh CLI not available. Install and authenticate: https://cli.github.com/',
+                prs: [],
+            });
+        }
+    });
+
+    server.get('/api/prs/:owner/:repo/:number', async (request, reply) => {
+        const { owner, repo, number } = request.params as { owner: string; repo: string; number: string };
+        try {
+            const { GhCliIntegration } = await import('../integrations/gh-cli/index.js');
+            const pr = await GhCliIntegration.getPrDetails(`${owner}/${repo}`, Number(number));
+            return { pr };
+        } catch (err: any) {
+            logger.warn({ err, owner, repo, number }, 'Failed to fetch PR details');
+            return reply.status(503).send({ error: err.message ?? 'Failed to fetch PR' });
+        }
+    });
+
+    // ─── My Issues (gh CLI powered) ──────────────────────────────────────
+
+    server.get('/api/my-issues', async (_request, reply) => {
+        try {
+            const { GhCliIntegration } = await import('../integrations/gh-cli/index.js');
+            const issues = await GhCliIntegration.listMyIssues();
+            return { issues };
+        } catch (err: any) {
+            logger.warn({ err }, 'Failed to list issues via gh CLI');
+            return reply.status(503).send({
+                error: 'gh CLI not available. Install and authenticate: https://cli.github.com/',
+                issues: [],
+            });
+        }
+    });
+
+    server.get('/api/issues/:owner/:repo/:number', async (request, reply) => {
+        const { owner, repo, number } = request.params as { owner: string; repo: string; number: string };
+        try {
+            const { GhCliIntegration } = await import('../integrations/gh-cli/index.js');
+            const issue = await GhCliIntegration.getIssueDetails(`${owner}/${repo}`, Number(number));
+            return { issue };
+        } catch (err: any) {
+            logger.warn({ err, owner, repo, number }, 'Failed to fetch issue details');
+            return reply.status(503).send({ error: err.message ?? 'Failed to fetch issue' });
+        }
+    });
+
+    // ─── Issue Actions (config-based quick actions) ─────────────────────
+
+    server.get('/api/issue-actions', async () => {
+        const raw = await readFile(deps.getConfigPath(), 'utf-8');
+        const parsed = yaml.load(raw) as Record<string, unknown>;
+        const actions = (parsed.issueActions as unknown[]) ?? [];
+        return { actions };
+    });
+
+    server.post('/api/issue-actions', async (request, reply) => {
+        const action = request.body as Record<string, unknown>;
+        if (!action?.id || !action?.name) {
+            return reply.status(400).send({ error: 'Issue action must have id and name' });
+        }
+
+        const raw = await readFile(deps.getConfigPath(), 'utf-8');
+        const parsed = yaml.load(raw) as Record<string, unknown>;
+        const actions = ((parsed.issueActions as unknown[]) ?? []) as Record<string, unknown>[];
+
+        if (actions.some((a) => a.id === action.id)) {
+            return reply.status(409).send({ error: `Issue action "${action.id}" already exists` });
+        }
+
+        actions.push(action);
+        parsed.issueActions = actions;
+
+        const yamlStr = yaml.dump(parsed, { lineWidth: 120, noRefs: true });
+        await writeFile(deps.getConfigPath(), yamlStr, 'utf-8');
+        logger.info({ action: action.id }, 'Issue action created via dashboard');
+        return { ok: true, action };
+    });
+
+    server.put('/api/issue-actions/:id', async (request, reply) => {
+        const { id } = request.params as { id: string };
+        const update = request.body as Record<string, unknown>;
+
+        const raw = await readFile(deps.getConfigPath(), 'utf-8');
+        const parsed = yaml.load(raw) as Record<string, unknown>;
+        const actions = ((parsed.issueActions as unknown[]) ?? []) as Record<string, unknown>[];
+
+        const idx = actions.findIndex((a) => a.id === id);
+        if (idx === -1) {
+            return reply.status(404).send({ error: `Issue action "${id}" not found` });
+        }
+
+        actions[idx] = { ...update, id: update.id ?? id };
+        parsed.issueActions = actions;
+
+        const yamlStr = yaml.dump(parsed, { lineWidth: 120, noRefs: true });
+        await writeFile(deps.getConfigPath(), yamlStr, 'utf-8');
+        logger.info({ action: id }, 'Issue action updated via dashboard');
+        return { ok: true, action: actions[idx] };
+    });
+
+    server.delete('/api/issue-actions/:id', async (request, reply) => {
+        const { id } = request.params as { id: string };
+
+        const raw = await readFile(deps.getConfigPath(), 'utf-8');
+        const parsed = yaml.load(raw) as Record<string, unknown>;
+        const actions = ((parsed.issueActions as unknown[]) ?? []) as Record<string, unknown>[];
+
+        const filtered = actions.filter((a) => a.id !== id);
+        if (filtered.length === actions.length) {
+            return reply.status(404).send({ error: `Issue action "${id}" not found` });
+        }
+
+        parsed.issueActions = filtered;
+        const yamlStr = yaml.dump(parsed, { lineWidth: 120, noRefs: true });
+        await writeFile(deps.getConfigPath(), yamlStr, 'utf-8');
+        logger.info({ action: id }, 'Issue action deleted via dashboard');
+        return { ok: true };
+    });
+
+    server.post('/api/issue-actions/:id/run', async (request, reply) => {
+        const { id } = request.params as { id: string };
+        const body = request.body as { owner: string; repo: string; issueNumber: number };
+
+        if (!body?.owner || !body?.repo || !body?.issueNumber) {
+            return reply.status(400).send({ error: 'Missing owner, repo, or issueNumber' });
+        }
+
+        const raw = await readFile(deps.getConfigPath(), 'utf-8');
+        const parsed = yaml.load(raw) as Record<string, unknown>;
+        const actions = ((parsed.issueActions as unknown[]) ?? []) as Record<string, unknown>[];
+        const action = actions.find((a) => a.id === id);
+
+        if (!action) {
+            return reply.status(404).send({ error: `Issue action "${id}" not found` });
+        }
+
+        const workflowName = action.workflow as string | undefined;
+        if (!workflowName) {
+            return reply.status(400).send({ error: `Issue action "${id}" has no workflow configured` });
+        }
+
+        logger.info({ actionId: id, workflow: workflowName, issue: body.issueNumber }, 'Issue action triggered');
+
+        try {
+            const result = await deps.runWorkflow(workflowName, {
+                issue: {
+                    number: body.issueNumber,
+                    owner: body.owner,
+                    repo: body.repo,
+                    url: `https://github.com/${body.owner}/${body.repo}/issues/${body.issueNumber}`,
+                },
+            });
+            if (!result.ok) {
+                return reply.status(500).send({ error: result.error });
+            }
+            return { ok: true, message: `Action "${action.name}" started for issue #${body.issueNumber}` };
+        } catch (err: any) {
+            logger.error({ actionId: id, err }, 'Issue action failed');
+            return reply.status(500).send({ error: err.message ?? 'Action execution failed' });
+        }
     });
 
     // ─── Templates ──────────────────────────────────────────────────────

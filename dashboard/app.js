@@ -38,6 +38,13 @@ const eventCatalog = {
         { value: 'issues.closed', label: 'Issue Closed', desc: 'Detected via polling' },
         { value: 'issue_comment.created', label: 'Comment Created', desc: 'Detected via polling' },
     ],
+    'gh-cli': [
+        { value: 'pull_request.opened', label: 'Pull Request Opened', desc: 'Detected via gh CLI polling' },
+        { value: 'pull_request.closed', label: 'Pull Request Closed', desc: 'Detected via gh CLI polling' },
+        { value: 'pull_request.synchronize', label: 'Pull Request Updated', desc: 'Detected via gh CLI polling' },
+        { value: 'pull_request_review.submitted', label: 'Review Submitted', desc: 'Detected via gh CLI polling' },
+        { value: 'issue_comment.created', label: 'Comment Created', desc: 'Detected via gh CLI polling' },
+    ],
     slack: [
         { value: 'message', label: 'Message Received', desc: 'A message is posted in a channel' },
         { value: 'app_mention', label: 'App Mentioned', desc: 'Your app is @mentioned' },
@@ -243,6 +250,8 @@ async function renderPage() {
     try {
         switch (currentPage) {
             case 'dashboard': await renderDashboard(el); break;
+            case 'my-prs': await renderMyPrs(el); break;
+            case 'issues': await renderIssues(el); break;
             case 'workflows': await renderWorkflows(el); break;
             case 'templates': await renderTemplates(el); break;
             case 'integrations': await renderIntegrations(el); break;
@@ -331,13 +340,522 @@ async function renderDashboard(el) {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
+// MY PRS (gh CLI powered)
+// ═════════════════════════════════════════════════════════════════════════════
+async function renderMyPrs(el) {
+    let prsData;
+    try {
+        prsData = await api.get('/api/my-prs');
+    } catch {
+        el.innerHTML = `
+            <div class="page-header">
+                <div class="page-header-left">
+                    <h1 class="page-title">My Pull Requests</h1>
+                    <p class="page-subtitle">Powered by gh CLI</p>
+                </div>
+            </div>
+            <div class="empty-state">
+                <div class="empty-icon">🔗</div>
+                <p class="empty-text">GitHub CLI not available</p>
+                <p style="color:var(--text-secondary);font-size:13px;margin-top:8px">
+                    Install <a href="https://cli.github.com/" target="_blank" style="color:var(--accent)">gh CLI</a> and run <code>gh auth login</code> to enable this feature.
+                </p>
+            </div>`;
+        return;
+    }
+
+    const prs = prsData.prs || [];
+    const wfData = await api.get('/api/workflows');
+    const allWorkflows = wfData.workflows || [];
+
+    // Find review & respond workflows
+    const reviewWf = allWorkflows.find(w => w.template === 'ai-pr-review') ?? allWorkflows.find(w => w.name.toLowerCase().includes('review'));
+    const respondWf = allWorkflows.find(w => w.template === 'respond-to-reviews') ?? allWorkflows.find(w => w.name.toLowerCase().includes('respond'));
+
+    el.innerHTML = `
+        <div class="page-header">
+            <div class="page-header-left">
+                <h1 class="page-title">My Pull Requests</h1>
+                <p class="page-subtitle">${prs.length} open PR${prs.length !== 1 ? 's' : ''} across all repositories</p>
+            </div>
+            <button class="btn btn-ghost" onclick="navigate('my-prs')" title="Refresh">↻ Refresh</button>
+        </div>
+
+        ${prs.length > 0 ? `
+            <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(420px,1fr));gap:16px">
+                ${prs.map(pr => {
+                    const repoName = pr.repository?.nameWithOwner ?? 'unknown';
+                    const [owner, repo] = repoName.split('/');
+                    const labels = (pr.labels ?? []).map(l => `<span class="badge badge-action" style="font-size:10px;margin-right:4px">${esc(l.name)}</span>`).join('');
+                    const ago = timeAgo(pr.updatedAt);
+
+                    return `<div class="card" style="padding:20px;border-radius:12px;background:var(--card-bg);border:1px solid var(--border)">
+                        <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:12px">
+                            <div style="flex:1;min-width:0">
+                                <a href="${esc(pr.url)}" target="_blank" style="font-size:15px;font-weight:600;color:var(--accent-hover);text-decoration:none;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(pr.title)}">
+                                    #${pr.number} ${esc(pr.title)}
+                                </a>
+                                <div style="font-size:12px;color:var(--text-muted);margin-top:4px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+                                    <span title="Repository">${esc(repoName)}</span>
+                                    <span>·</span>
+                                    <span title="Last updated">${ago}</span>
+                                    ${pr.isDraft ? '<span class="badge" style="background:rgba(139,92,246,0.15);color:#a78bfa;border:1px solid rgba(139,92,246,0.3);font-size:10px">Draft</span>' : ''}
+                                </div>
+                            </div>
+                        </div>
+
+                        ${labels ? `<div style="margin-bottom:12px">${labels}</div>` : ''}
+
+                        <div class="btn-group" style="flex-wrap:wrap">
+                            ${reviewWf ? `<button class="btn btn-primary btn-sm" onclick="runWorkflowForPr('${esc(reviewWf.name)}', '${esc(owner)}', '${esc(repo)}', ${pr.number})" title="Run AI code review on this PR">🔍 Review</button>` : ''}
+                            ${respondWf ? `<button class="btn btn-ghost btn-sm" onclick="runWorkflowForPr('${esc(respondWf.name)}', '${esc(owner)}', '${esc(repo)}', ${pr.number})" title="Respond to review comments">💬 Respond</button>` : ''}
+                            <button class="btn btn-ghost btn-sm" onclick="openRunModalForPr('${esc(owner)}', '${esc(repo)}', ${pr.number})" title="Run any workflow against this PR">▶ Run Workflow</button>
+                            <a href="${esc(pr.url)}" target="_blank" class="btn btn-ghost btn-sm" title="Open on GitHub">↗ GitHub</a>
+                        </div>
+                    </div>`;
+                }).join('')}
+            </div>
+        ` : `
+            <div class="empty-state">
+                <div class="empty-icon">🎉</div>
+                <p class="empty-text">No open pull requests</p>
+                <p style="color:var(--text-secondary);font-size:13px">You have no open PRs. Create one on GitHub to see it here.</p>
+            </div>
+        `}
+    `;
+}
+
+// Run a specific workflow against a PR
+window.runWorkflowForPr = async function (workflowName, owner, repo, prNumber) {
+    const btn = event?.target;
+    if (btn) { btn.disabled = true; const orig = btn.textContent; btn.textContent = '⏳'; }
+    try {
+        const result = await api.post('/api/workflows/run', {
+            name: workflowName,
+            inputs: {
+                pull_request: { number: prNumber },
+                owner,
+                repo: `${owner}/${repo}`,
+                repoName: repo,
+                prNumber,
+            },
+        });
+        if (result.error) {
+            toast(result.error, 'error');
+        } else {
+            toast(`Workflow "${workflowName}" started for PR #${prNumber}`);
+        }
+    } catch (err) {
+        toast('Failed: ' + (err.message || 'Unknown error'), 'error');
+    } finally {
+        if (btn) { btn.disabled = false; }
+        setTimeout(() => navigate('my-prs'), 1000);
+    }
+};
+
+// Open the generic run modal pre-filled with PR context
+window.openRunModalForPr = function (owner, repo, prNumber) {
+    // Find all workflows that could run against a PR
+    const prWorkflows = workflows.filter(wf => {
+        const events = Array.isArray(wf.trigger?.event) ? wf.trigger.event : [wf.trigger?.event];
+        return events.some(e => e?.startsWith('pull_request'));
+    });
+
+    if (prWorkflows.length === 0) {
+        toast('No PR workflows configured. Create one from the Workflows page.', 'error');
+        return;
+    }
+
+    const options = prWorkflows.map(wf => `<option value="${esc(wf.name)}">${esc(wf.name)}${wf.template ? ` (${esc(wf.template)})` : ''}</option>`).join('');
+
+    openModal('Run Workflow on PR #' + prNumber, `
+        <div style="margin-bottom:16px">
+            <label style="display:block;font-size:13px;font-weight:500;margin-bottom:6px;color:var(--text-secondary)">Select Workflow</label>
+            <select id="pr-wf-select" style="width:100%;padding:10px 12px;border-radius:8px;background:var(--input-bg);border:1px solid var(--border);color:var(--text-primary);font-size:14px">
+                ${options}
+            </select>
+        </div>
+        <div style="padding:12px;border-radius:8px;background:rgba(99,102,241,0.1);border:1px solid rgba(99,102,241,0.2);margin-bottom:16px">
+            <div style="font-size:12px;color:var(--text-secondary)">
+                <strong>Target:</strong> ${esc(owner)}/${esc(repo)} #${prNumber}
+            </div>
+        </div>
+        <div style="display:flex;justify-content:flex-end;gap:8px">
+            <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
+            <button class="btn btn-primary" onclick="runSelectedPrWorkflow('${esc(owner)}', '${esc(repo)}', ${prNumber})">▶ Run</button>
+        </div>
+    `);
+};
+
+window.runSelectedPrWorkflow = function (owner, repo, prNumber) {
+    const select = document.getElementById('pr-wf-select');
+    if (!select) return;
+    closeModal();
+    window.runWorkflowForPr(select.value, owner, repo, prNumber);
+};
+
+// ═════════════════════════════════════════════════════════════════════════════
+// ISSUES
+// ═════════════════════════════════════════════════════════════════════════════
+
+let issueActions = [];
+let issueRepoFilter = 'all';
+
+async function renderIssues(el) {
+    let issuesData;
+    try {
+        [issuesData] = await Promise.all([
+            api.get('/api/my-issues'),
+        ]);
+    } catch {
+        el.innerHTML = `
+            <div class="page-header">
+                <div class="page-header-left">
+                    <h1 class="page-title">Issues</h1>
+                    <p class="page-subtitle">Manage and act on GitHub issues</p>
+                </div>
+            </div>
+            <div class="empty-state">
+                <div class="empty-icon">🔗</div>
+                <p class="empty-text">GitHub CLI not available</p>
+                <p style="color:var(--text-secondary);font-size:13px;margin-top:8px">
+                    Install <a href="https://cli.github.com/" target="_blank" style="color:var(--accent)">gh CLI</a> and run <code>gh auth login</code> to enable this feature.
+                </p>
+            </div>`;
+        return;
+    }
+
+    const issues = issuesData.issues || [];
+
+    // Load issue actions and workflows
+    let actionsData, wfData;
+    try { actionsData = await api.get('/api/issue-actions'); } catch { actionsData = { actions: [] }; }
+    try { wfData = await api.get('/api/workflows'); } catch { wfData = { workflows: [] }; }
+    issueActions = actionsData.actions || [];
+    workflows = wfData.workflows || [];
+
+    // Build repo list for filter tabs
+    const repos = [...new Set(issues.map(i => i.repository?.nameWithOwner).filter(Boolean))];
+
+    // Filter issues by selected repo
+    const filtered = issueRepoFilter === 'all' ? issues : issues.filter(i => i.repository?.nameWithOwner === issueRepoFilter);
+
+    el.innerHTML = `
+        <div class="page-header">
+            <div class="page-header-left">
+                <h1 class="page-title">Issues</h1>
+                <p class="page-subtitle">${issues.length} open issue${issues.length !== 1 ? 's' : ''} assigned to you</p>
+            </div>
+            <div class="btn-group">
+                <button class="btn btn-ghost" onclick="navigate('issues')" title="Refresh">↻ Refresh</button>
+                <button class="btn btn-primary" onclick="openIssueActionEditor()" title="Configure issue actions">⚙ Actions</button>
+            </div>
+        </div>
+
+        ${repos.length > 1 ? `
+        <div class="issue-repo-tabs" style="display:flex;gap:6px;margin-bottom:20px;flex-wrap:wrap">
+            <button class="btn btn-sm ${issueRepoFilter === 'all' ? 'btn-primary' : 'btn-ghost'}" onclick="setIssueRepoFilter('all')">All (${issues.length})</button>
+            ${repos.map(r => {
+                const count = issues.filter(i => i.repository?.nameWithOwner === r).length;
+                return `<button class="btn btn-sm ${issueRepoFilter === r ? 'btn-primary' : 'btn-ghost'}" onclick="setIssueRepoFilter('${esc(r)}')">${esc(r.split('/')[1] || r)} (${count})</button>`;
+            }).join('')}
+        </div>` : ''}
+
+        ${issueActions.length > 0 ? `
+        <div class="card" style="padding:12px 16px;margin-bottom:20px;display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+            <span style="font-size:12px;color:var(--text-muted);font-weight:600">CONFIGURED ACTIONS:</span>
+            ${issueActions.map(a => `
+                <span class="badge badge-action" style="font-size:11px;display:flex;align-items:center;gap:4px">
+                    ${a.icon ? `<span>${esc(a.icon)}</span>` : ''}${esc(a.name)}
+                    ${a.workflow ? `<span style="font-size:9px;color:var(--text-muted)">→ ${esc(a.workflow)}</span>` : ''}
+                </span>
+            `).join('')}
+            <button class="btn btn-ghost btn-sm" onclick="openIssueActionEditor()" style="margin-left:auto;font-size:11px">Edit</button>
+        </div>` : ''}
+
+        ${filtered.length > 0 ? `
+            <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(420px,1fr));gap:16px">
+                ${filtered.map(issue => {
+                    const repoName = issue.repository?.nameWithOwner ?? 'unknown';
+                    const [owner, repo] = repoName.split('/');
+                    const labels = (issue.labels ?? []).map(l => {
+                        const bg = l.color ? `#${l.color}` : 'rgba(99,102,241,0.15)';
+                        const textColor = l.color ? getContrastColor(l.color) : 'var(--accent)';
+                        return `<span class="badge" style="background:${bg};color:${textColor};border:1px solid ${l.color ? `#${l.color}40` : 'rgba(99,102,241,0.3)'};font-size:10px;margin-right:4px">${esc(l.name)}</span>`;
+                    }).join('');
+                    const assignees = (issue.assignees ?? []).map(a => a.login).join(', ');
+                    const ago = timeAgo(issue.updatedAt);
+
+                    return `<div class="card" style="padding:20px;border-radius:12px;background:var(--card-bg);border:1px solid var(--border)">
+                        <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:12px">
+                            <div style="flex:1;min-width:0">
+                                <a href="${esc(issue.url)}" target="_blank" style="font-size:15px;font-weight:600;color:var(--accent-hover);text-decoration:none;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(issue.title)}">
+                                    #${issue.number} ${esc(issue.title)}
+                                </a>
+                                <div style="font-size:12px;color:var(--text-muted);margin-top:4px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+                                    <span title="Repository">${esc(repoName)}</span>
+                                    <span>·</span>
+                                    <span title="Last updated">${ago}</span>
+                                    ${assignees ? `<span>·</span><span title="Assignees">👤 ${esc(assignees)}</span>` : ''}
+                                    <span class="badge" style="background:rgba(34,197,94,0.15);color:#22c55e;border:1px solid rgba(34,197,94,0.3);font-size:10px">${esc(issue.state)}</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        ${labels ? `<div style="margin-bottom:12px">${labels}</div>` : ''}
+
+                        <div class="btn-group" style="flex-wrap:wrap">
+                            ${issueActions.map(a => `<button class="btn btn-primary btn-sm" onclick="runIssueAction('${esc(a.id)}', '${esc(owner)}', '${esc(repo)}', ${issue.number})" title="${esc(a.description || a.name)}">${a.icon ? esc(a.icon) + ' ' : ''}${esc(a.name)}</button>`).join('')}
+                            <button class="btn btn-ghost btn-sm" onclick="openIssueWorkflowModal('${esc(owner)}', '${esc(repo)}', ${issue.number})" title="Run any workflow against this issue">▶ Run Workflow</button>
+                            <a href="${esc(issue.url)}" target="_blank" class="btn btn-ghost btn-sm" title="Open on GitHub">↗ GitHub</a>
+                        </div>
+                    </div>`;
+                }).join('')}
+            </div>
+        ` : `
+            <div class="empty-state">
+                <div class="empty-icon">${issues.length > 0 ? '🔍' : '🎉'}</div>
+                <p class="empty-text">${issues.length > 0 ? 'No issues match this filter' : 'No open issues assigned to you'}</p>
+                <p style="color:var(--text-secondary);font-size:13px">${issues.length > 0 ? 'Try selecting a different repository tab.' : 'Issues assigned to you on GitHub will appear here.'}</p>
+            </div>
+        `}
+    `;
+}
+
+// Helper: get readable text color from hex background
+function getContrastColor(hex) {
+    hex = hex.replace('#', '');
+    const r = parseInt(hex.substr(0, 2), 16);
+    const g = parseInt(hex.substr(2, 2), 16);
+    const b = parseInt(hex.substr(4, 2), 16);
+    const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+    return luminance > 0.5 ? '#1a1a2e' : '#ffffff';
+}
+
+// Issue repo filter
+window.setIssueRepoFilter = function (repo) {
+    issueRepoFilter = repo;
+    renderPage();
+};
+
+// Run a configured issue action
+window.runIssueAction = async function (actionId, owner, repo, issueNumber) {
+    const btn = event?.target;
+    if (btn) { btn.disabled = true; const orig = btn.textContent; btn.textContent = '⏳'; }
+    try {
+        const result = await api.post(`/api/issue-actions/${encodeURIComponent(actionId)}/run`, {
+            owner,
+            repo,
+            issueNumber,
+        });
+        if (result.error) {
+            toast(result.error, 'error');
+        } else {
+            toast(result.message || `Action started for issue #${issueNumber}`);
+        }
+    } catch (err) {
+        toast('Failed: ' + (err.message || 'Unknown error'), 'error');
+    } finally {
+        if (btn) { btn.disabled = false; }
+        setTimeout(() => navigate('issues'), 1000);
+    }
+};
+
+// Open modal to pick and run any workflow against an issue
+window.openIssueWorkflowModal = function (owner, repo, issueNumber) {
+    // Find workflows that could work with issues (have issue inputs or issue events)
+    const issueWorkflows = workflows.filter(wf => {
+        const events = Array.isArray(wf.trigger?.event) ? wf.trigger.event : [wf.trigger?.event];
+        const hasIssueInput = (wf.inputs ?? []).some(i => i.type === 'github-issue');
+        return events.some(e => e?.startsWith('issues')) || hasIssueInput;
+    });
+
+    // Also include all manual workflows
+    const manualWorkflows = workflows.filter(wf => {
+        const sources = Array.isArray(wf.trigger?.source) ? wf.trigger.source : [wf.trigger?.source];
+        return sources.includes('manual');
+    });
+
+    const allWorkflows = [...new Map([...issueWorkflows, ...manualWorkflows].map(w => [w.name, w])).values()];
+
+    if (allWorkflows.length === 0 && workflows.length > 0) {
+        // Fall back to all workflows if no issue-specific ones
+        allWorkflows.push(...workflows);
+    }
+
+    if (allWorkflows.length === 0) {
+        toast('No workflows configured. Create one from the Workflows page.', 'error');
+        return;
+    }
+
+    const options = allWorkflows.map(wf => `<option value="${esc(wf.name)}">${esc(wf.name)}${wf.template ? ` (${esc(wf.template)})` : ''}</option>`).join('');
+
+    openModal('Run Workflow on Issue #' + issueNumber, `
+        <div style="margin-bottom:16px">
+            <label style="display:block;font-size:13px;font-weight:500;margin-bottom:6px;color:var(--text-secondary)">Select Workflow</label>
+            <select id="issue-wf-select" style="width:100%;padding:10px 12px;border-radius:8px;background:var(--input-bg);border:1px solid var(--border);color:var(--text-primary);font-size:14px">
+                ${options}
+            </select>
+        </div>
+        <div style="padding:12px;border-radius:8px;background:rgba(99,102,241,0.1);border:1px solid rgba(99,102,241,0.2);margin-bottom:16px">
+            <div style="font-size:12px;color:var(--text-secondary)">
+                <strong>Target:</strong> ${esc(owner)}/${esc(repo)} #${issueNumber}
+            </div>
+        </div>
+        <div style="display:flex;justify-content:flex-end;gap:8px">
+            <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
+            <button class="btn btn-primary" onclick="runSelectedIssueWorkflow('${esc(owner)}', '${esc(repo)}', ${issueNumber})">▶ Run</button>
+        </div>
+    `);
+};
+
+window.runSelectedIssueWorkflow = async function (owner, repo, issueNumber) {
+    const select = document.getElementById('issue-wf-select');
+    if (!select) return;
+    const workflowName = select.value;
+    closeModal();
+
+    const btn = event?.target;
+    if (btn) { btn.disabled = true; btn.textContent = '⏳'; }
+
+    try {
+        const result = await api.post('/api/workflows/run', {
+            name: workflowName,
+            inputs: {
+                issue: { number: issueNumber },
+                owner,
+                repo: `${owner}/${repo}`,
+                repoName: repo,
+                issueNumber,
+            },
+        });
+        if (result.error) {
+            toast(result.error, 'error');
+        } else {
+            toast(`Workflow "${workflowName}" started for issue #${issueNumber}`);
+        }
+    } catch (err) {
+        toast('Failed: ' + (err.message || 'Unknown error'), 'error');
+    }
+};
+
+// ─── Issue Action Editor ────────────────────────────────────────────────────
+
+window.openIssueActionEditor = async function (editId) {
+    // Load current actions and workflows
+    let actionsData, wfData;
+    try { actionsData = await api.get('/api/issue-actions'); } catch { actionsData = { actions: [] }; }
+    try { wfData = await api.get('/api/workflows'); } catch { wfData = { workflows: [] }; }
+    const actions = actionsData.actions || [];
+    const availWf = wfData.workflows || [];
+
+    const editing = editId ? actions.find(a => a.id === editId) : null;
+
+    openModal(editing ? `Edit Action: ${editing.name}` : 'Issue Actions', `
+        ${!editing ? `
+        <div style="margin-bottom:20px">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+                <span style="font-size:13px;font-weight:600;color:var(--text-secondary)">CONFIGURED ACTIONS</span>
+            </div>
+            ${actions.length > 0 ? actions.map(a => `
+                <div class="card" style="padding:12px 16px;margin-bottom:8px;display:flex;align-items:center;gap:12px">
+                    <span style="font-size:20px">${esc(a.icon || '⚡')}</span>
+                    <div style="flex:1;min-width:0">
+                        <div style="font-weight:600;font-size:14px">${esc(a.name)}</div>
+                        <div style="font-size:11px;color:var(--text-muted)">${esc(a.description || '')} ${a.workflow ? `→ ${esc(a.workflow)}` : ''}</div>
+                    </div>
+                    <div class="btn-group">
+                        <button class="btn btn-ghost btn-sm" onclick="closeModal();openIssueActionEditor('${esc(a.id)}')">Edit</button>
+                        <button class="btn btn-danger-outline btn-sm" onclick="deleteIssueAction('${esc(a.id)}')">Delete</button>
+                    </div>
+                </div>
+            `).join('') : '<div style="font-size:13px;color:var(--text-muted);padding:12px 0">No actions configured. Add one below.</div>'}
+        </div>
+        <hr style="border:none;border-top:1px solid var(--border);margin:16px 0">
+        <h3 style="font-size:15px;font-weight:600;margin-bottom:12px">Add New Action</h3>
+        ` : ''}
+
+        <div class="panel" style="margin-bottom:0">
+            <div class="panel-body">
+                <div class="form-group">
+                    <label class="form-label">Name</label>
+                    <input type="text" class="form-input" id="ia-name" value="${esc(editing?.name ?? '')}" placeholder="Fix Issue">
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Description</label>
+                    <input type="text" class="form-input" id="ia-desc" value="${esc(editing?.description ?? '')}" placeholder="Use Claude Code to fix this bug">
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label class="form-label">Icon (emoji)</label>
+                        <input type="text" class="form-input" id="ia-icon" value="${esc(editing?.icon ?? '🔧')}" placeholder="🔧" style="width:80px">
+                    </div>
+                    <div class="form-group" style="flex:1">
+                        <label class="form-label">Workflow</label>
+                        <select class="form-select" id="ia-workflow">
+                            <option value="">— Select a workflow —</option>
+                            ${availWf.map(w => `<option value="${esc(w.name)}" ${editing?.workflow === w.name ? 'selected' : ''}>${esc(w.name)}${w.template ? ` (${esc(w.template)})` : ''}</option>`).join('')}
+                        </select>
+                        <div class="form-hint">The workflow to run when this action is triggered on an issue</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    `, `
+        <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
+        <button class="btn btn-primary" onclick="saveIssueAction('${esc(editId ?? '')}')">${editing ? 'Update' : 'Add'} Action</button>
+    `);
+};
+
+window.saveIssueAction = async function (editId) {
+    const name = document.getElementById('ia-name')?.value?.trim();
+    const desc = document.getElementById('ia-desc')?.value?.trim();
+    const icon = document.getElementById('ia-icon')?.value?.trim() || '⚡';
+    const workflow = document.getElementById('ia-workflow')?.value;
+
+    if (!name) { toast('Name is required', 'error'); return; }
+    if (!workflow) { toast('Select a workflow', 'error'); return; }
+
+    const id = editId || name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+    const data = { id, name, description: desc, icon, workflow };
+
+    try {
+        if (editId) {
+            await api.put(`/api/issue-actions/${encodeURIComponent(editId)}`, data);
+            toast(`Action "${name}" updated`);
+        } else {
+            await api.post('/api/issue-actions', data);
+            toast(`Action "${name}" created`);
+        }
+        closeModal();
+        navigate('issues');
+    } catch (err) {
+        toast('Failed: ' + (err.message || 'Unknown error'), 'error');
+    }
+};
+
+window.deleteIssueAction = async function (id) {
+    const ok = await confirm(`Delete issue action "${id}"?`);
+    if (!ok) return;
+    try {
+        await api.del(`/api/issue-actions/${encodeURIComponent(id)}`);
+        toast('Action deleted');
+        closeModal();
+        navigate('issues');
+    } catch (err) {
+        toast('Failed: ' + (err.message || 'Unknown error'), 'error');
+    }
+};
+
+// ═════════════════════════════════════════════════════════════════════════════
 // WORKFLOWS
 // ═════════════════════════════════════════════════════════════════════════════
 async function renderWorkflows(el) {
-    const [wfData, tmplData, actData] = await Promise.all([api.get('/api/workflows'), api.get('/api/templates'), api.get('/api/actions')]);
+    const [wfData, tmplData, actData, runsData] = await Promise.all([api.get('/api/workflows'), api.get('/api/templates'), api.get('/api/actions'), api.get('/api/runs')]);
     workflows = wfData.workflows || [];
     templates = tmplData.templates || [];
     availableActions = actData.actions || [];
+    const runs = runsData.runs || [];
 
     el.innerHTML = `
         <div class="page-header">
@@ -570,10 +1088,10 @@ function openFullEditor(existingName, wf) {
                         <div class="form-group">
                             <label class="form-label">Sources <span style="font-size:10px;color:var(--text-muted);font-weight:400">(select one or more)</span></label>
                             <div id="ed-source-checkboxes" style="display:flex;flex-wrap:wrap;gap:8px">
-                                ${['github', 'github-poll', 'manual', 'slack', 'webhook', 'cron'].map(s => `
+                                ${['github', 'github-poll', 'gh-cli', 'manual', 'slack', 'webhook', 'cron'].map(s => `
                                     <label class="source-checkbox ${data.trigger.source.includes(s) ? 'checked' : ''}" style="display:flex;align-items:center;gap:6px;padding:6px 12px;border-radius:8px;border:1px solid var(--border-subtle);cursor:pointer;font-size:12px;transition:all 0.15s">
                                         <input type="checkbox" class="ed-source-cb" value="${s}" ${data.trigger.source.includes(s) ? 'checked' : ''} onchange="onSourceCheckboxChange();updateYamlPreview()" style="display:none">
-                                        ${s === 'manual' ? '\u{1F3AE} manual (run from dashboard)' : s}
+                                        ${s === 'manual' ? '🎮 manual (run from dashboard)' : s === 'gh-cli' ? '⚡ gh-cli (zero-config)' : s}
                                     </label>
                                 `).join('')}
                             </div>
@@ -706,7 +1224,7 @@ window.onSourceChange = function () {
     const labelsGroup = $('#ed-labels-group');
 
     // Show/hide GitHub-specific fields
-    const isGithub = sources.some(s => s === 'github' || s === 'github-poll');
+    const isGithub = sources.some(s => s === 'github' || s === 'github-poll' || s === 'gh-cli');
     if (labelsGroup) labelsGroup.style.display = isGithub ? '' : 'none';
 };
 
@@ -1903,6 +2421,12 @@ async function renderIntegrations(el) {
             ]
         },
         {
+            key: 'gh-cli', icon: '⚡', name: 'GitHub (gh CLI)', desc: 'Zero-config — auto-detects gh auth, polls all your PRs', endpoint: '—',
+            fields: [
+                { key: 'interval', label: 'Poll Interval (seconds)', type: 'number', hint: 'Default: 60' },
+            ]
+        },
+        {
             key: 'slack', icon: '💬', name: 'Slack', desc: 'Messages, @mentions, slash commands', endpoint: '/webhooks/slack/events',
             fields: [
                 { key: 'signingSecret', label: 'Signing Secret', type: 'password', hint: 'From Slack app settings' },
@@ -2384,6 +2908,33 @@ function esc(s) {
     return (s ?? '').toString().replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/'/g, '&#39;');
 }
 
+function timeAgo(iso) {
+    const diff = Date.now() - new Date(iso).getTime();
+    if (diff < 60_000) return 'just now';
+    if (diff < 3600_000) return `${Math.floor(diff / 60_000)}m ago`;
+    if (diff < 86400_000) return `${Math.floor(diff / 3600_000)}h ago`;
+    return `${Math.floor(diff / 86400_000)}d ago`;
+}
+
+window.rerunWorkflow = async function (runId) {
+    const btn = event?.target;
+    if (btn) { btn.disabled = true; btn.textContent = '⏳'; }
+    try {
+        const result = await api.post(`/api/runs/${encodeURIComponent(runId)}/rerun`, {});
+        if (result.error) {
+            toast(result.error, 'error');
+        } else {
+            toast('Workflow rerun started');
+            // Refresh the workflows page to show the new run
+            setTimeout(() => navigate('workflows'), 1000);
+        }
+    } catch (err) {
+        toast('Rerun failed: ' + (err.message || 'Unknown error'), 'error');
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = '↻ Rerun'; }
+    }
+};
+
 // ═════════════════════════════════════════════════════════════════════════════
 // SETTINGS
 // ═════════════════════════════════════════════════════════════════════════════
@@ -2556,9 +3107,9 @@ document.addEventListener('keydown', (e) => {
     }
     // Navigation shortcuts: Alt+1-6
     if (e.altKey && !e.ctrlKey && !e.metaKey) {
-        const pages = ['dashboard', 'workflows', 'templates', 'integrations', 'events', 'settings'];
+        const pages = ['dashboard', 'my-prs', 'issues', 'workflows', 'templates', 'integrations', 'events', 'settings'];
         const num = parseInt(e.key);
-        if (num >= 1 && num <= 6) { e.preventDefault(); navigate(pages[num - 1]); }
+        if (num >= 1 && num <= pages.length) { e.preventDefault(); navigate(pages[num - 1]); }
     }
 });
 
@@ -2570,7 +3121,7 @@ $$('.nav-link').forEach((link) => link.addEventListener('click', (e) => { e.prev
 window.navigate = navigate;
 
 // Hash routing: restore page from URL hash
-const validPages = ['dashboard', 'workflows', 'templates', 'integrations', 'events', 'settings'];
+const validPages = ['dashboard', 'my-prs', 'issues', 'workflows', 'templates', 'integrations', 'events', 'settings'];
 const hashPage = window.location.hash.replace('#', '');
 if (validPages.includes(hashPage)) currentPage = hashPage;
 window.addEventListener('hashchange', () => {
