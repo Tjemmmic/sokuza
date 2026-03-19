@@ -119,13 +119,38 @@ describe('matchesTrigger', () => {
         });
     });
 
-    describe('github-poll cross-matching', () => {
-        it('github-poll source matches github trigger', () => {
+    describe('source isolation (no cross-matching)', () => {
+        it('github-poll source does NOT match github trigger', () => {
             const wf = makeWorkflow({
                 trigger: { source: 'github', event: 'pull_request.opened' },
             });
             const event = makeEvent({ source: 'github-poll' });
+            expect(matchesTrigger(wf, event)).toBe(false);
+        });
+
+        it('gh-cli source does NOT match github trigger', () => {
+            const wf = makeWorkflow({
+                trigger: { source: 'github', event: 'pull_request.opened' },
+            });
+            const event = makeEvent({ source: 'gh-cli' });
+            expect(matchesTrigger(wf, event)).toBe(false);
+        });
+
+        it('gh-cli source matches gh-cli trigger', () => {
+            const wf = makeWorkflow({
+                trigger: { source: 'gh-cli', event: 'pull_request.opened' },
+            });
+            const event = makeEvent({ source: 'gh-cli' });
             expect(matchesTrigger(wf, event)).toBe(true);
+        });
+
+        it('workflow can target multiple sources explicitly', () => {
+            const wf = makeWorkflow({
+                trigger: { source: ['github', 'gh-cli'], event: 'pull_request.opened' },
+            });
+            expect(matchesTrigger(wf, makeEvent({ source: 'github' }))).toBe(true);
+            expect(matchesTrigger(wf, makeEvent({ source: 'gh-cli' }))).toBe(true);
+            expect(matchesTrigger(wf, makeEvent({ source: 'github-poll' }))).toBe(false);
         });
     });
 

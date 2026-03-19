@@ -7,6 +7,7 @@ import type {
     Integration,
     SokuzaConfig,
     WorkflowDefinition,
+    WorkflowRunRecord,
 } from './types.js';
 import { readFile } from 'node:fs/promises';
 import yaml from 'js-yaml';
@@ -17,6 +18,7 @@ import type { FastifyInstance } from 'fastify';
 import { resolve, join } from 'node:path';
 
 const MAX_RECENT_EVENTS = 100;
+const MAX_RUN_HISTORY = 200;
 
 export class SokuzaEngine {
     private integrations = new Map<string, Integration>();
@@ -29,6 +31,8 @@ export class SokuzaEngine {
     private recentEvents: Array<{ event: EventPayload; timestamp: string; matchedWorkflows: string[] }> = [];
     private eventSubscribers = new Set<(event: unknown) => void>();
     private configPath: string;
+    private runHistory: WorkflowRunRecord[] = [];
+    private runIdCounter = 0;
 
     constructor(config: SokuzaConfig, configPath?: string) {
         this.config = config;
@@ -116,7 +120,7 @@ export class SokuzaEngine {
     async runWorkflowByName(
         workflowName: string,
         inputs: Record<string, unknown> = {},
-    ): Promise<{ ok: boolean; error?: string }> {
+    ): Promise<{ ok: boolean; error?: string; runId?: string }> {
         // Re-read config to get latest workflows
         await this.reloadConfig();
 
@@ -124,6 +128,20 @@ export class SokuzaEngine {
         if (!workflow) {
             return { ok: false, error: `Workflow "${workflowName}" not found` };
         }
+
+        // ─── Create run record ───────────────────────────────────────────
+        const runId = `run_${Date.now()}_${++this.runIdCounter}`;
+        const runRecord: WorkflowRunRecord = {
+            id: runId,
+            workflowName,
+            inputs: structuredClone(inputs),
+            timestamp: new Date().toISOString(),
+            status: 'running',
+        };
+        this.runHistory.unshift(runRecord);
+        if (this.runHistory.length > MAX_RUN_HISTORY) this.runHistory.pop();
+
+        const startTime = Date.now();
 
         // Construct a manual EventPayload
         const triggerEvents = Array.isArray(workflow.trigger.event) ? workflow.trigger.event : [workflow.trigger.event];
@@ -208,10 +226,15 @@ export class SokuzaEngine {
 
         try {
             await executeWorkflow(workflow, event, this.actions, this.logger, this.config.integrations);
+            runRecord.status = 'success';
+            runRecord.durationMs = Date.now() - startTime;
         } catch (err: any) {
-            return { ok: false, error: err.message ?? 'Workflow execution failed' };
+            runRecord.status = 'error';
+            runRecord.durationMs = Date.now() - startTime;
+            runRecord.error = err.message ?? 'Workflow execution failed';
+            return { ok: false, error: runRecord.error, runId };
         }
-        return { ok: true };
+        return { ok: true, runId };
     }
 
     /** Reload config from disk */
@@ -244,6 +267,23 @@ export class SokuzaEngine {
     /** Get current config */
     getConfig(): SokuzaConfig {
         return this.config;
+    }
+
+    /** Get run history, optionally filtered by workflow name */
+    getRunHistory(workflowName?: string): WorkflowRunRecord[] {
+        if (workflowName) {
+            return this.runHistory.filter((r) => r.workflowName === workflowName);
+        }
+        return [...this.runHistory];
+    }
+
+    /** Rerun a previous workflow execution by run ID */
+    async rerunWorkflow(runId: string): Promise<{ ok: boolean; error?: string; runId?: string }> {
+        const originalRun = this.runHistory.find((r) => r.id === runId);
+        if (!originalRun) {
+            return { ok: false, error: `Run "${runId}" not found` };
+        }
+        return this.runWorkflowByName(originalRun.workflowName, originalRun.inputs);
     }
 
     /** Get integration status for the dashboard */
@@ -288,6 +328,8 @@ export class SokuzaEngine {
             },
             getRegisteredActions: () => [...this.actions.keys()],
             runWorkflow: (name, inputs) => this.runWorkflowByName(name, inputs),
+            rerunWorkflow: (runId) => this.rerunWorkflow(runId),
+            getRunHistory: (name?) => this.getRunHistory(name),
             getConfig: () => this.getConfig(),
         });
 

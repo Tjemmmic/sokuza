@@ -32,11 +32,10 @@ export function matchesTrigger(
     const { trigger } = workflow;
 
     // ─── Source matching (any of the trigger sources) ────────────────────
+    // Each source is distinct: github (webhooks), github-poll (token polling),
+    // gh-cli (CLI polling). Workflows must explicitly target their source.
     const triggerSources = toArray(trigger.source);
-    const sourceMatches = triggerSources.some(src =>
-        src === event.source ||
-        (event.source === 'github-poll' && src === 'github'),
-    );
+    const sourceMatches = triggerSources.some(src => src === event.source);
 
     if (!sourceMatches) return false;
 
@@ -63,12 +62,18 @@ export function matchesTrigger(
         for (const { values, path } of shorthandChecks) {
             if (values.length <= 1) continue; // Single values handled by filters above
             const actual = String(resolvePath(event, path) ?? '');
-            if (!values.some(v => v === actual)) return false;
+            const caseInsensitive = path === 'payload.pull_request.user.login';
+            if (!values.some(v => caseInsensitive ? v.toLowerCase() === actual.toLowerCase() : v === actual)) return false;
         }
     }
 
     return true;
 }
+
+/** Paths where comparison should be case-insensitive (GitHub usernames) */
+const CASE_INSENSITIVE_PATHS = new Set([
+    'payload.pull_request.user.login',
+]);
 
 /**
  * Match a single filter key against the event.
@@ -96,6 +101,9 @@ function matchesFilter(
 
     // Standard dot-path resolution
     const actual = resolvePath(event, filterKey);
+    if (CASE_INSENSITIVE_PATHS.has(filterKey)) {
+        return String(actual).toLowerCase() === expected.toLowerCase();
+    }
     return String(actual) === expected;
 }
 

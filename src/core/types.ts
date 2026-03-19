@@ -156,3 +156,23 @@ export type ActionHandler = (
     params: Record<string, unknown>,
     context: ActionContext,
 ) => Promise<unknown>;
+
+// ─── Run History ────────────────────────────────────────────────────────────
+
+/** A record of a manual workflow execution */
+export interface WorkflowRunRecord {
+    /** Unique run identifier */
+    id: string;
+    /** Name of the workflow that was executed */
+    workflowName: string;
+    /** Inputs provided for this run */
+    inputs: Record<string, unknown>;
+    /** ISO-8601 timestamp when the run started */
+    timestamp: string;
+    /** Execution status */
+    status: 'running' | 'success' | 'error';
+    /** Duration in milliseconds (set after completion) */
+    durationMs?: number;
+    /** Error message if status is 'error' */
+    error?: string;
+}
