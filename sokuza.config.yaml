@@ -39,5 +39,8 @@ issueActions:
   - id: fix-issue
     name: Fix Issue
     description: Use Claude Code to fix this bug and open a PR
-    icon: "🔧"
+    icon: 🔧
     workflow: fix-github-issue
+deck:
+  - secret-scan
+  - ai-pr-review
