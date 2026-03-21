@@ -1,0 +1,115 @@
+# Experiment Runner
+#
+# Data-driven improvement: audit → hypothesize → experiment → analyze → iterate.
+# Generates hypotheses from internal metrics analysis,
+# runs controlled experiments, and reports with before/after data.
+#
+# Usage:
+#   - name: experiment-runner
+#     template: experiment-runner
+#     trigger:
+#       event: manual
+
+trigger:
+  source: manual
+  event: manual
+
+inputs:
+  - name: focus
+    description: "Area to improve (e.g., 'test coverage', 'performance', 'error handling')"
+    default: ""
+
+steps:
+  - id: clone
+    action: github-clone-repo
+    params: {}
+
+  - id: experiment
+    action: ai-agent
+    params:
+      workdir: "{{steps.clone.path}}"
+      max_turns: 50
+      allowed_tools:
+        - Read
+        - Write
+        - Edit
+        - Grep
+        - Glob
+        - LS
+        - Bash
+        - MultiTool
+      prompt: |
+        You are running a structured experiment loop.
+        {{#if inputs.focus}}Focus: {{inputs.focus}}{{/if}}
+
+        ## Phase 1: Audit
+
+        ### 1a. Internal Metrics
+        Measure the current state:
+        - Test coverage (run coverage report if possible)
+        - Build time
+        - Bundle size (if applicable)
+        - Error rate patterns (grep for error handling)
+        - Code complexity (line counts, nesting depth)
+        - Type safety (any, unknown usage)
+
+        ### 1b. Gap Analysis
+        Where is the codebase weakest? Identify the top 3-5 improvement opportunities.
+        Rank by impact (how much better the codebase gets) / effort (how hard to fix).
+
+        ## Phase 2: Hypothesize
+        For each identified gap, create a structured hypothesis:
+
+        ```
+        Hypothesis: [ID]
+          Area: [which gap this addresses]
+          Claim: [specific, measurable improvement expected]
+          Action: [exactly what code/config to change]
+          Measurement: [how to verify the improvement]
+          Risk: [what could go wrong]
+          Effort: trivial / moderate / significant
+        ```
+
+        ### Anti-overfitting rules
+        - Hypotheses must target root causes, not symptoms
+        - Each hypothesis must be independently verifiable
+        - Prefer small, surgical changes over large refactors
+
+        ## Phase 3: Experiment
+        For each hypothesis (prioritized by impact/effort):
+        1. Record baseline measurement
+        2. Implement the change
+        3. Run tests — if anything breaks, revert immediately
+        4. Record post-change measurement
+        5. Compare and decide: KEEP / REVERT / ITERATE
+
+        ## Phase 4: Analyze
+        ```
+        ## Experiment Results
+
+        | Hypothesis | Baseline | After | Δ | Verdict |
+        |-----------|----------|-------|---|---------|
+        | H1        | [val]    | [val] | [±] | KEEP/REVERT |
+        | H2        | [val]    | [val] | [±] | KEEP/REVERT |
+
+        Net improvement: [summary]
+        Reverted: [count and reasons]
+        ```
+
+        ## Phase 5: Iterate
+        If improvements remain, generate new hypotheses from current state and repeat.
+        Maximum 3 experiment rounds.
+
+        ## Rules
+        - Every change must have a before/after measurement
+        - Never keep a change that breaks tests
+        - Report honestly — negative results are valuable
+        - Be specific about what changed and why
+
+  - id: push
+    action: github-create-pr
+    condition: "{{steps.experiment.hasChanges}}"
+    params:
+      branch: "experiment-improvements"
+      title: "Experiment Runner: improvements to {{inputs.focus}}"
+      body: "{{steps.experiment.review}}"

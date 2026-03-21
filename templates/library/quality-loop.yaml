@@ -1,0 +1,100 @@
+# Quality Loop
+#
+# Iterative quality improvement: audit → fix → test → re-rate → repeat.
+# Structured scoring across correctness/design/robustness/tests/API surface.
+# Keeps improving until target score is met (default: 9/10).
+#
+# Usage:
+#   - name: quality-loop
+#     template: quality-loop
+#     trigger:
+#       event: manual
+
+trigger:
+  source: manual
+  event: manual
+
+inputs:
+  - name: target_score
+    description: "Target quality score (1-10, default 9)"
+    default: "9"
+  - name: max_rounds
+    description: "Maximum improvement rounds (default 5)"
+    default: "5"
+
+steps:
+  - id: clone
+    action: github-clone-repo
+    params: {}
+
+  - id: loop
+    action: ai-agent
+    params:
+      workdir: "{{steps.clone.path}}"
+      max_turns: 60
+      allowed_tools:
+        - Read
+        - Write
+        - Edit
+        - Grep
+        - Glob
+        - LS
+        - Bash
+        - MultiTool
+      prompt: |
+        You are running a relentless quality loop. Target: {{inputs.target_score}}/10.
+        Maximum rounds: {{inputs.max_rounds}}.
+
+        ## Process (repeat until target met)
+
+        ### 1. Audit — Rate across 5 dimensions (be ruthlessly honest)
+        - **Correctness** — Works in ALL cases? Edge cases, errors, concurrency, empty/huge/malformed inputs
+        - **Design** — Architecture right? Abstractions justified? Self-explanatory?
+        - **Robustness** — Error handling, failure modes, invariants. Silent failures = 0
+        - **Tests** — Testing behavior or just asserting code runs? Edge case coverage?
+        - **API Surface** — Clean public interface? Sane defaults? Self-documenting?
+
+        A 6 = "merely fine". Most code starts at 5-7.
+        A 9 = senior staff engineer approves with zero comments.
+        A 10 = they'd learn something from reading it.
+
+        ### 2. List every issue — group by severity, no hedging
+
+        ### 3. Fix everything in priority order
+        - Don't ask permission for obvious improvements
+        - Every change must make the code measurably better
+
+        ### 4. Run tests — if anything breaks, fix the regression FIRST
+
+        ### 5. Re-rate with before/after scores and what improved
+
+        ### 6. Repeat until target met or improvements exhausted
+
+        ## Rules
+        - No score inflation
+        - No fluff fixes (comments restating code = negative value)
+        - Design thinking > cosmetics
+        - Tests must be meaningful (mock-everything tests are worse than no tests)
+        - Keep fixes surgical — if a fix needs 50 lines of scaffolding, the design is wrong
+        - Broken tests = stop everything, fix regression first
+
+        ## Output Per Round
+        ```
+        Round N — Score: X/10 (target: Y)
+          Correctness:  X/10 — [assessment]
+          Design:       X/10 — [assessment]
+          Robustness:   X/10 — [assessment]
+          Tests:        X/10 — [assessment]
+          API surface:  X/10 — [assessment]
+
+          Issues: N
+          [prioritized list]
+        ```
+
+  - id: push
+    action: github-create-pr
+    condition: "{{steps.loop.hasChanges}}"
+    params:
+      branch: "quality-loop-improvements"
+      title: "Quality Loop: Automated improvements"
+      body: "{{steps.loop.review}}"

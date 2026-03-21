@@ -1,0 +1,106 @@
+# PR Inspector
+#
+# Structured PR review with P1/P2/P3 severity prioritization,
+# AI slop detection, context-aware analysis, and approve/reject decision.
+#
+# Usage:
+#   - name: pr-inspector
+#     template: pr-inspector
+#     trigger:
+#       event: pull_request.opened
+
+trigger:
+  source: github
+  event: pull_request.opened
+
+steps:
+  - id: clone
+    action: github-clone-repo
+    params: {}
+
+  - id: diff
+    action: github-fetch-diff
+    params: {}
+
+  - id: inspect
+    action: ai-agent
+    params:
+      workdir: "{{steps.clone.path}}"
+      max_turns: 25
+      allowed_tools:
+        - Read
+        - Grep
+        - Glob
+        - LS
+        - Bash
+      prompt: |
+        You are a senior code reviewer performing a structured inspection of this PR.
+
+        ## PR DIFF
+        {{steps.diff.diff}}
+
+        ## REVIEW PROTOCOL
+
+        ### Step 1: Gather Context
+        - Read the FULL content of every modified file (diffs alone are insufficient)
+        - Read closely related files (callers, callees, types, tests)
+        - Check for project conventions (CONTRIBUTING.md, .editorconfig, CLAUDE.md)
+
+        ### Step 2: Inspect For Issues
+
+        **Bugs (Primary Focus)**
+        - Logic errors, off-by-one, incorrect conditionals
+        - Missing guards, unreachable code paths
+        - Edge cases: null/empty/undefined, error conditions, race conditions
+        - Security: injection, auth bypass, data exposure
+        - Error handling that swallows failures or throws unexpectedly
+
+        **Architecture**
+        - Does it follow existing patterns?
+        - Excessive nesting that should be flattened
+        - Missing or misused abstractions
+
+        **AI Slop Detection**
+        - Version-numbered names (v2, improved, new, enhanced)
+        - Unnecessary abstractions for one-time operations
+        - Over-engineering (gratuitous config, feature flags for simple things)
+        - Duplicate code expressed differently
+        - Gratuitous comments restating the code
+        - Type workarounds (as any, .d.ts hacks)
+        - Dead code, unused imports, empty scaffolding
+
+        **Performance (Obvious Issues Only)**
+        - O(n²) on unbounded data, N+1 queries, blocking I/O on hot paths
+
+        ### Step 3: Classify Findings
+
+        **P1 (Blocking)** — Logic errors, crashes, security vulnerabilities, severe type issues
+        **P2 (Should Fix)** — Maintainability, non-idiomatic patterns, performance issues, AI slop
+        **P3 (Nice to Have)** — Readability, naming, minor refactors, documentation
+
+        For each issue provide:
+        1. Priority prefix and specific title
+        2. **Where**: file path and line number
+        3. **What**: concise description
+        4. **Why**: realistic failure scenario
+        5. **Fix** (if non-obvious)
+
+        ### Step 4: Final Decision (Required)
+        End with either:
+        - `APPROVE - [brief reason]` (no P1 issues, P2s are suggestions)
+        - `CHANGES REQUESTED - [brief reason]` (P1 issues or critical P2s)
+
+        If no issues: "No issues found.\n\nAPPROVE - Clean changes, no concerns."
+
+        Sort all findings by priority (P1 first).
+
+  - action: github-comment
+    condition: "{{steps.inspect.review}}"
+    params:
+      body: |
+        ## 🔎 PR Inspection Report
+
+        {{steps.inspect.review}}
+
+        ---
+        _Inspected by Sokuza AI — PR Inspector_

@@ -40,14 +40,21 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
     });
 
     server.put('/api/config', async (request, reply) => {
-        const body = request.body as { config: Record<string, unknown> };
-        if (!body?.config) {
-            return reply.status(400).send({ error: 'Missing config in body' });
-        }
+        const body = request.body as Record<string, unknown>;
 
         let yamlStr: string;
-        if (typeof (body.config as any).__raw_yaml === 'string') {
-            // Settings editor sends raw YAML — validate then write as-is
+
+        // Accept raw YAML from Settings editor or Integration setup wizard
+        if (typeof body.__raw_yaml === 'string') {
+            const raw = body.__raw_yaml;
+            try {
+                yaml.load(raw); // Validate it parses
+            } catch (e: any) {
+                return reply.status(400).send({ error: `Invalid YAML: ${e.message}` });
+            }
+            yamlStr = raw;
+        } else if (body.config && typeof (body.config as any).__raw_yaml === 'string') {
+            // Legacy: Settings editor used to nest inside config
             const raw = (body.config as any).__raw_yaml as string;
             try {
                 yaml.load(raw); // Validate it parses
@@ -55,13 +62,60 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
                 return reply.status(400).send({ error: `Invalid YAML: ${e.message}` });
             }
             yamlStr = raw;
-        } else {
+        } else if (body.config) {
             yamlStr = yaml.dump(body.config, { lineWidth: 120, noRefs: true });
+        } else {
+            return reply.status(400).send({ error: 'Missing config in body' });
         }
 
         await writeFile(deps.getConfigPath(), yamlStr, 'utf-8');
         logger.info('Config updated via dashboard');
         return { ok: true };
+    });
+
+    // ─── Deck ───────────────────────────────────────────────────────────
+
+    server.get('/api/deck', async () => {
+        const raw = await readFile(deps.getConfigPath(), 'utf-8');
+        const parsed = yaml.load(raw) as Record<string, unknown>;
+        const deck = (parsed.deck as string[]) ?? [];
+        return { deck };
+    });
+
+    server.post('/api/deck/add', async (request, reply) => {
+        const { id } = request.body as { id: string };
+        if (!id) {
+            return reply.status(400).send({ error: 'Missing id' });
+        }
+
+        const raw = await readFile(deps.getConfigPath(), 'utf-8');
+        const parsed = yaml.load(raw) as Record<string, unknown>;
+        const deck = ((parsed.deck as string[]) ?? []);
+
+        if (!deck.includes(id)) {
+            deck.push(id);
+            parsed.deck = deck;
+            const yamlStr = yaml.dump(parsed, { lineWidth: 120, noRefs: true });
+            await writeFile(deps.getConfigPath(), yamlStr, 'utf-8');
+            logger.info({ id }, 'Added to deck');
+        }
+
+        return { ok: true, deck };
+    });
+
+    server.delete('/api/deck/:id', async (request) => {
+        const { id } = request.params as { id: string };
+
+        const raw = await readFile(deps.getConfigPath(), 'utf-8');
+        const parsed = yaml.load(raw) as Record<string, unknown>;
+        const deck = ((parsed.deck as string[]) ?? []).filter(d => d !== id);
+        parsed.deck = deck;
+
+        const yamlStr = yaml.dump(parsed, { lineWidth: 120, noRefs: true });
+        await writeFile(deps.getConfigPath(), yamlStr, 'utf-8');
+        logger.info({ id }, 'Removed from deck');
+
+        return { ok: true, deck };
     });
 
     // ─── Workflows ──────────────────────────────────────────────────────
@@ -394,6 +448,27 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
                 steps: parsed.steps,
                 raw: content,
             });
+        }
+
+        return { templates };
+    });
+
+    // Library templates (separate from user templates)
+    server.get('/api/templates/library', async () => {
+        const dir = join(deps.getTemplateDir(), 'library');
+        let files: string[];
+        try {
+            files = await readdir(dir);
+        } catch {
+            return { templates: [] };
+        }
+
+        const templates = [];
+        for (const file of files) {
+            if (!file.endsWith('.yaml') && !file.endsWith('.yml')) continue;
+            const name = basename(file, extname(file));
+            const content = await readFile(join(dir, file), 'utf-8');
+            templates.push({ name, content });
         }
 
         return { templates };

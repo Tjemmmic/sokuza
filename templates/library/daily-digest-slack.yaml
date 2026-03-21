@@ -1,0 +1,54 @@
+# Daily Digest → Slack
+#
+# Runs daily, summarizes recent repository activity using AI, and sends
+# a consolidated report to Slack.
+#
+# Usage:
+#   - name: daily-digest
+#     template: daily-digest-slack
+#     trigger:
+#       source: cron
+#       event: daily
+
+trigger:
+  source: cron
+  event: daily
+
+steps:
+  - id: digest
+    action: ai-agent
+    params:
+      workdir: "/tmp"
+      max_turns: 15
+      allowed_tools:
+        - Bash
+        - Read
+      prompt: |
+        Generate a daily activity digest for the repository.
+
+        ## Steps
+
+        1. Get recent PRs (last 24h):
+           `gh pr list -R {{event.metadata.repo}} --state all --json number,title,state,author,createdAt,mergedAt -L 20`
+
+        2. Get recent issues:
+           `gh issue list -R {{event.metadata.repo}} --state all --json number,title,state,author,createdAt -L 20`
+
+        3. Get recent commits:
+           `gh api repos/{{event.metadata.repo}}/commits?per_page=20 --jq '.[].commit.message' 2>/dev/null | head -20`
+
+        4. Summarize into a concise daily digest with sections:
+           - **PRs**: Opened, merged, closed
+           - **Issues**: New, closed
+           - **Key Changes**: Notable commits
+           - **Metrics**: Numbers for quick scanning
+
+        Keep it concise and scannable. Use emoji for visual distinction.
+
+  - action: slack-send-message
+    params:
+      channel: "#daily-digest"
+      text: |
+        📊 *Daily Digest — {{event.metadata.repo}}*
+
+        {{steps.digest.review}}

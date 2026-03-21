@@ -1,0 +1,87 @@
+# Ship Check
+#
+# Pre-merge/pre-deploy verification checklist.
+# Runs tests, scans for debug artifacts and secrets, checks build,
+# reviews diff. Posts a pass/fail table with SHIP IT / HOLD verdict.
+#
+# Usage:
+#   - name: ship-check
+#     template: ship-check
+#     trigger:
+#       event: manual
+
+trigger:
+  source: manual
+  event: manual
+
+steps:
+  - id: clone
+    action: github-clone-repo
+    params: {}
+
+  - id: check
+    action: ai-agent
+    params:
+      workdir: "{{steps.clone.path}}"
+      max_turns: 20
+      allowed_tools:
+        - Read
+        - Grep
+        - Glob
+        - LS
+        - Bash
+      prompt: |
+        Perform a thorough pre-ship verification. Do NOT ask questions — run checks and report.
+
+        ## Checks (run all)
+
+        1. **Tests pass** — run the project's test suite (detect: npm test, pytest, cargo test, go test, vitest, jest)
+           Report pass/fail counts
+
+        2. **No debug artifacts** — grep changed files for:
+           - console.log, console.debug, console.warn (non-error)
+           - print( (in Python files)
+           - debugger
+           - TODO, FIXME, HACK, XXX that shouldn't ship
+
+        3. **Build succeeds** — if project has a build step, run it
+           Report success/failure
+
+        4. **No secrets** — scan for patterns:
+           - API keys (AKIA*, sk-*, ghp_*, xoxb-*)
+           - Passwords in string literals
+           - Private keys (BEGIN.*PRIVATE KEY)
+           - .env files that shouldn't be committed
+
+        5. **Git status clean** — check for uncommitted or untracked files
+
+        6. **Diff review** — review the actual changes for obvious issues
+
+        ## Report Format (REQUIRED)
+        ```
+        ## Verification
+
+        | Check | Result |
+        |-------|--------|
+        | Tests | PASS (N passed, M failed) |
+        | Git status | CLEAN / N uncommitted files |
+        | Debug artifacts | CLEAN / N found |
+        | Build | PASS / FAIL / N/A |
+        | Secrets scan | CLEAN / WARNING |
+        | Diff review | OK / N concerns |
+
+        Overall: SHIP IT / HOLD (reasons)
+        ```
+
+        If any check fails, explain what needs fixing. Be specific.
+
+  - action: github-comment
+    condition: "{{steps.check.review}}"
+    params:
+      body: |
+        ## ✅ Ship Check
+
+        {{steps.check.review}}
+
+        ---
+        _Verified by Sokuza AI — Ship Check_

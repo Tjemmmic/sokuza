@@ -1,0 +1,81 @@
+# Security Audit
+#
+# Clones the repo, runs a comprehensive security analysis using Claude Code
+# with tool access, and posts findings as a PR comment.
+#
+# Usage:
+#   - name: security-check
+#     template: security-audit
+#     trigger:
+#       event: pull_request.opened
+
+trigger:
+  source: github
+  event: pull_request.opened
+
+steps:
+  - id: clone
+    action: github-clone-repo
+    params: {}
+
+  - id: audit
+    action: ai-agent
+    params:
+      workdir: "{{steps.clone.path}}"
+      max_turns: 30
+      allowed_tools:
+        - Read
+        - Grep
+        - Glob
+        - LS
+        - Bash
+      prompt: |
+        You are a security engineer performing a focused security audit on this PR.
+
+        ## Audit Checklist
+
+        1. **Secrets & Credentials**: Search for hardcoded API keys, passwords,
+           tokens, connection strings. Check `.env` files aren't committed.
+           Run: `grep -rn "password\|secret\|api_key\|token\|credential" --include="*.ts" --include="*.js" --include="*.py" --include="*.env"`
+
+        2. **Dependency Vulnerabilities**: If package.json exists, run `npm audit --json 2>/dev/null | head -100`
+           If requirements.txt exists, note any known-vulnerable packages.
+
+        3. **Input Validation**: Check for unsanitized user input in:
+           - SQL queries (injection risk)
+           - HTML output (XSS risk)
+           - File paths (path traversal)
+           - Shell commands (command injection)
+           - URL handling (SSRF)
+
+        4. **Authentication & Authorization**: Check for:
+           - Missing auth checks on endpoints
+           - Hardcoded roles or permissions
+           - JWT handling issues
+
+        5. **Data Exposure**: Check for:
+           - Sensitive data in logs
+           - Overly permissive CORS
+           - Stack traces in production error responses
+
+        ## Output Format
+
+        For each finding:
+        ```
+        🔴/🟡/🟢 [SEVERITY] — [Title]
+        File: path/to/file.ts:L42
+        Risk: [What could go wrong]
+        Fix: [How to fix it]
+        ```
+
+        End with a summary: X critical, Y warnings, Z informational.
+
+  - action: github-comment
+    params:
+      body: |
+        ## 🔒 Security Audit
+
+        {{steps.audit.review}}
+
+        ---
+        _Audited by Sokuza AI ({{steps.audit.model}})_

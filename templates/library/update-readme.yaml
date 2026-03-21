@@ -1,0 +1,65 @@
+# Update README
+#
+# Clones the repo, analyzes the current state, and updates the README
+# to reflect actual code structure, APIs, and setup instructions.
+# Creates a PR with the changes.
+#
+# Usage:
+#   - name: update-readme
+#     template: update-readme
+#     trigger:
+#       source: manual
+
+trigger:
+  source: manual
+
+steps:
+  - id: clone
+    action: github-clone-repo
+    params:
+      repo: "{{event.payload.inputs.repo}}"
+
+  - id: update
+    action: ai-agent
+    params:
+      workdir: "{{steps.clone.path}}"
+      max_turns: 30
+      allowed_tools:
+        - Read
+        - Write
+        - Edit
+        - Grep
+        - Glob
+        - LS
+        - Bash
+      prompt: |
+        Update the README.md to accurately reflect the current state of
+        this codebase.
+
+        ## Steps
+
+        1. Read the current README.md
+        2. Explore the project structure
+        3. Read key source files to understand functionality
+        4. Update the README with:
+           - Accurate project description
+           - Current installation instructions
+           - Usage examples that actually work
+           - API reference (if applicable)
+           - Configuration options
+           - Contributing guidelines reference
+        5. Keep the existing README structure where possible
+        6. Commit: `git add README.md && git commit -m "docs: update README"`
+
+  - id: pr
+    action: github-create-pr
+    params:
+      workdir: "{{steps.clone.path}}"
+      title: "📝 Update README.md"
+      body: |
+        ## README Update
+
+        {{steps.update.review}}
+
+        ---
+        _Updated by Sokuza AI ({{steps.update.model}})_

@@ -1,0 +1,28 @@
+# Issue Alert → Slack
+#
+# Sends a notification to Slack when a new issue is opened.
+#
+# Usage:
+#   - name: issue-alert
+#     template: issue-notify-slack
+#     trigger:
+#       event: issues.opened
+
+trigger:
+  source: github
+  event: issues.opened
+
+steps:
+  - action: log
+    params:
+      message: "[ISSUE] #{{event.metadata.issueNumber}} opened on {{event.metadata.repo}}"
+
+  - action: slack-send-message
+    params:
+      channel: "#issues"
+      text: |
+        🐛 *New Issue* on `{{event.metadata.repo}}`
+        *#{{event.metadata.issueNumber}}*: {{event.payload.issue.title}}
+        *By:* {{event.payload.issue.user.login}}
+        *Labels:* {{event.payload.issue.labels}}
+        *URL:* {{event.payload.issue.html_url}}

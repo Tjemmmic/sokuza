@@ -1,0 +1,64 @@
+# API Docs Sync
+#
+# Analyzes API endpoints in the codebase and ensures documentation
+# matches the actual implementation. Creates a PR with fixes.
+#
+# Usage:
+#   - name: api-docs
+#     template: api-docs-sync
+#     trigger:
+#       event: push
+
+trigger:
+  source: github
+  event: push
+
+steps:
+  - id: clone
+    action: github-clone-repo
+    params: {}
+
+  - id: sync
+    action: ai-agent
+    params:
+      workdir: "{{steps.clone.path}}"
+      max_turns: 30
+      allowed_tools:
+        - Read
+        - Write
+        - Edit
+        - Grep
+        - Glob
+        - LS
+        - Bash
+      prompt: |
+        Sync API documentation with the actual codebase implementation.
+
+        ## Steps
+
+        1. Find all API route definitions:
+           `grep -rn "app.get\|app.post\|app.put\|app.delete\|router\.\|server\." --include="*.ts" --include="*.js" .`
+
+        2. Find existing API documentation:
+           `find . -name "*.md" | xargs grep -l "API\|endpoint\|route" 2>/dev/null`
+
+        3. Compare documented endpoints with actual code
+        4. For each discrepancy, update the documentation
+        5. If no API docs exist, create a basic `docs/api.md`
+
+        6. If changes were made, commit:
+           `git add -A && git commit -m "docs: sync API documentation"`
+
+        7. If no changes needed, output "DOCS_IN_SYNC"
+
+  - id: pr
+    action: github-create-pr
+    condition: "{{steps.sync.review}}"
+    params:
+      workdir: "{{steps.clone.path}}"
+      title: "📝 Sync API documentation"
+      body: |
+        {{steps.sync.review}}
+
+        ---
+        _Synced by Sokuza AI_

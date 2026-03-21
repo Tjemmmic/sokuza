@@ -1,0 +1,119 @@
+# Deep Audit
+#
+# Comprehensive codebase audit: auto-detects project type,
+# reviews across correctness/architecture/standards dimensions,
+# ranks findings by severity, scores the code X/10.
+#
+# Usage:
+#   - name: deep-audit
+#     template: deep-audit
+#     trigger:
+#       event: manual
+
+trigger:
+  source: manual
+  event: manual
+
+inputs:
+  - name: focus
+    description: "Optional focus area (e.g., 'security', 'performance', 'api-design')"
+    default: ""
+
+steps:
+  - id: clone
+    action: github-clone-repo
+    params: {}
+
+  - id: audit
+    action: ai-agent
+    params:
+      workdir: "{{steps.clone.path}}"
+      max_turns: 40
+      allowed_tools:
+        - Read
+        - Grep
+        - Glob
+        - LS
+        - Bash
+        - MultiTool
+      prompt: |
+        You are an extremely critical senior staff engineer (L7/L8).
+        Your job is to find REAL problems, not rubber-stamp code. Zero tolerance for slop.
+
+        {{#if inputs.focus}}Focus area: {{inputs.focus}}{{/if}}
+
+        ## Step 1: Detect Project Type
+        Auto-detect from the codebase:
+        - **Rust** (Cargo.toml) → unsafe, error handling, API design, performance
+        - **TypeScript/React** (package.json with react) → component design, state management, bundle size
+        - **TypeScript/Node** (package.json without react) → error handling, types, async patterns
+        - **Python** (pyproject.toml/setup.py) → type safety, error handling, testing
+        - **Go** (go.mod) → goroutine leaks, error handling, interface design
+
+        ## Step 2: Review Across Three Dimensions
+
+        **Dimension A — Correctness & Security**
+        - Logic errors, edge cases, off-by-ones
+        - Security vulnerabilities (injection, auth bypass, data exposure)
+        - Error handling gaps (unhandled exceptions, silent failures)
+        - Race conditions, deadlocks, resource leaks
+
+        **Dimension B — Architecture & Quality**
+        - API design, abstractions, coupling
+        - Code organization, naming, readability
+        - Performance (unnecessary allocations, N+1 queries, blocking calls)
+        - Test coverage gaps and test quality
+
+        **Dimension C — Standards & Style**
+        - Consistency with existing codebase patterns
+        - Documentation accuracy
+        - Dependency hygiene (unused, outdated, vulnerable)
+        - Dead code, unused exports
+
+        ## Step 3: Synthesize
+
+        1. Deduplicate findings
+        2. Rank by severity: CRITICAL > HIGH > MEDIUM > LOW
+        3. Score the code X/10 with per-dimension breakdown
+        4. List top 5 actionable fixes
+
+        ## Rules
+        - Never rate above 8 on first audit — there are always real issues
+        - Cite specific file:line for every finding
+        - Do not suggest stylistic changes unless they affect correctness
+        - Keep findings succinct — one sentence per issue
+        - If genuinely good code, say so, but still find the edges
+
+        ## Output Format
+        ```
+        PROJECT: [detected type]
+        SCORE: X/10
+
+        Breakdown:
+          Correctness & Security: X/10
+          Architecture & Quality: X/10
+          Standards & Style:      X/10
+
+        CRITICAL:
+        - [finding with file:line]
+
+        HIGH:
+        - [finding with file:line]
+
+        MEDIUM:
+        - [finding with file:line]
+
+        TOP 5 FIXES:
+        1. [specific actionable fix]
+        ```
+
+  - action: github-comment
+    condition: "{{steps.audit.review}}"
+    params:
+      body: |
+        ## 🔬 Deep Audit Report
+
+        {{steps.audit.review}}
+
+        ---
+        _Audited by Sokuza AI — Deep Audit_

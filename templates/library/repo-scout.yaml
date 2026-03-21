@@ -1,0 +1,109 @@
+# Repo Scout
+#
+# 4-phase repo exploration: read docs → explore structure →
+# fill gaps → synthesize briefing. Generates a comprehensive
+# project overview with architecture, current state, and developer guide.
+#
+# Usage:
+#   - name: repo-scout
+#     template: repo-scout
+#     trigger:
+#       event: manual
+
+trigger:
+  source: manual
+  event: manual
+
+steps:
+  - id: clone
+    action: github-clone-repo
+    params: {}
+
+  - id: scout
+    action: ai-agent
+    params:
+      workdir: "{{steps.clone.path}}"
+      max_turns: 30
+      allowed_tools:
+        - Read
+        - Grep
+        - Glob
+        - LS
+        - Bash
+        - MultiTool
+      prompt: |
+        Build a complete mental map of this project. Follow these phases:
+
+        ## Phase 1: Read Documentation
+        Find and read key docs:
+        - Root markdown files: README, CHANGELOG, CONTRIBUTING, ARCHITECTURE, ROADMAP
+        - Agent instruction files: CLAUDE.md, AGENTS.md, .cursor/rules
+        - Package/project files: package.json, Cargo.toml, go.mod, pyproject.toml
+
+        ## Phase 2: Explore Structure
+        Explore major areas of the codebase:
+        - **Source directories** — architecture, key modules, entry points, interfaces
+        - **Tests** — test structure, how to run tests
+        - **Config & Infrastructure** — deployment configs, docker files, CI, scripts
+        - **Documentation** — any docs/, wiki/, or research/ folders
+
+        For each area, note: what's there, how it works, key decisions, where to look for what.
+
+        ## Phase 3: Fill Gaps
+        After exploration, identify gaps:
+        - Key files referenced in docs but not yet read?
+        - Data flow / request lifecycle clear end-to-end?
+        - How to build, test, and run the project?
+        - Check recent git log (`git log --oneline -15`) for latest changes
+        - If gh CLI available: `gh issue list --limit 5` and `gh pr list --limit 5`
+
+        ## Phase 4: Synthesize Briefing
+
+        Provide a concise briefing covering:
+
+        ```
+        ## Project Overview
+        What is this? What problem does it solve?
+
+        ## Current State
+        Phase/version, what works, what's in progress
+
+        ## Architecture
+        How major pieces fit together, data flow, key abstractions
+        [Include a simple ASCII diagram if helpful]
+
+        ## Tech Stack
+        Languages, frameworks, key dependencies
+
+        ## Open Work
+        Open issues, PRs, blockers, next steps
+
+        ## Key Numbers
+        Test count, line count, dependency count, any benchmarks
+
+        ## Developer Guide
+        How to: install, build, test, run, deploy
+        Key commands
+
+        ## Quick Reference
+        | Need | Where |
+        |------|-------|
+        | Config | [path] |
+        | Entry point | [path] |
+        | Types | [path] |
+        | Tests | [path] |
+        | CI | [path] |
+        ```
+
+        Goal: after this runs, someone should have FULL project context.
+
+  - action: github-comment
+    condition: "{{steps.scout.review}}"
+    params:
+      body: |
+        ## 🗺️ Project Scout Report
+
+        {{steps.scout.review}}
+
+        ---
+        _Explored by Sokuza AI — Repo Scout_

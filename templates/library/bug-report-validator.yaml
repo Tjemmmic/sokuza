@@ -1,0 +1,53 @@
+# Bug Report Validator
+#
+# Checks if a new bug report has sufficient information for debugging:
+# reproduction steps, expected vs actual behavior, environment details.
+# Posts a helpful comment if information is missing.
+#
+# Usage:
+#   - name: validate-bugs
+#     template: bug-report-validator
+#     trigger:
+#       event: issues.opened
+
+trigger:
+  source: github
+  event: issues.opened
+
+steps:
+  - id: validate
+    action: ai-review
+    params:
+      prompt: |
+        You are validating a bug report for completeness.
+
+        Analyze the issue and check for these required elements:
+
+        1. **Description**: Is the problem clearly described?
+        2. **Steps to Reproduce**: Are there specific steps to reproduce?
+        3. **Expected Behavior**: What should happen?
+        4. **Actual Behavior**: What actually happens?
+        5. **Environment**: OS, browser, version, etc.?
+        6. **Error Messages**: Stack traces, console output?
+
+        ## Rules
+        - If ALL required elements are present: output "COMPLETE"
+        - If elements are missing: list what's missing and provide a
+          friendly template for the reporter to fill in.
+        - Be helpful, not demanding. Acknowledge the report.
+        - If this doesn't look like a bug report (feature request, question),
+          note that and still provide guidance.
+
+  - action: github-comment
+    condition: "{{steps.validate.review}}"
+    params:
+      skip_if_contains: "COMPLETE"
+      issue_number: "{{event.metadata.issueNumber}}"
+      repo: "{{event.metadata.repo}}"
+      body: |
+        ## 📝 Bug Report Review
+
+        {{steps.validate.review}}
+
+        ---
+        _Validated by Sokuza AI_

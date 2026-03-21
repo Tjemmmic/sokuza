@@ -1,0 +1,67 @@
+# Release Notes Generator
+#
+# Analyzes commits since the last release and generates user-friendly
+# release notes categorized by type (features, fixes, breaking changes).
+#
+# Usage:
+#   - name: release-notes
+#     template: release-notes
+#     trigger:
+#       source: manual
+
+trigger:
+  source: manual
+
+steps:
+  - id: clone
+    action: github-clone-repo
+    params:
+      repo: "{{event.payload.inputs.repo}}"
+
+  - id: notes
+    action: ai-agent
+    params:
+      workdir: "{{steps.clone.path}}"
+      max_turns: 20
+      allowed_tools:
+        - Read
+        - Grep
+        - Glob
+        - LS
+        - Bash
+      prompt: |
+        Generate release notes for this repository.
+
+        ## Steps
+
+        1. Find the latest tag/release:
+           `git tag --sort=-version:refname | head -5`
+
+        2. Get commits since the last tag:
+           `git log $(git tag --sort=-version:refname | head -1)..HEAD --oneline`
+           If no tags exist: `git log --oneline -30`
+
+        3. For each commit, categorize as:
+           - 🚀 **Features** — New functionality
+           - 🐛 **Bug Fixes** — Fixes to existing features
+           - ⚠️ **Breaking Changes** — API or behavior changes
+           - 🔧 **Improvements** — Refactors, performance, DX
+           - 📝 **Documentation** — Doc changes
+
+        4. Read the actual changed files for important commits
+           to write better descriptions than the commit message.
+
+        5. Output formatted release notes:
+
+           ## v[next] Release Notes
+
+           ### 🚀 Features
+           - Description of feature (#PR)
+
+           ### 🐛 Bug Fixes
+           - Description of fix (#PR)
+
+           (etc.)
+
+           ### Contributors
+           List contributors from git log.

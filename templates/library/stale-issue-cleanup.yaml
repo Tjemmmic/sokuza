@@ -1,0 +1,49 @@
+# Stale Issue Cleanup
+#
+# Runs on a schedule (daily). Uses gh CLI to find issues with no activity
+# in 30+ days, posts a reminder comment, and optionally closes very old ones.
+#
+# Usage:
+#   - name: stale-cleanup
+#     template: stale-issue-cleanup
+#     trigger:
+#       source: cron
+#       event: daily
+
+trigger:
+  source: cron
+  event: daily
+
+steps:
+  - id: cleanup
+    action: ai-agent
+    params:
+      workdir: "/tmp"
+      max_turns: 20
+      allowed_tools:
+        - Bash
+        - Read
+      prompt: |
+        You are a repository maintenance bot. Find and manage stale issues.
+
+        ## Steps
+
+        1. List issues with no activity in the last 30 days:
+           `gh issue list -R {{event.metadata.repo}} --state open --json number,title,updatedAt,labels -L 50`
+
+        2. For each stale issue (updated > 30 days ago):
+           - If it has no "pinned" or "keep-open" label
+           - Post a gentle reminder comment:
+             `gh issue comment <number> -R {{event.metadata.repo}} --body "..."`
+
+        3. For issues with no activity in 90+ days:
+           - Add a "stale" label if not present
+           - Consider closing with a comment explaining why
+
+        4. Output a summary of actions taken.
+
+        ## Rules
+        - Be polite and helpful in all comments
+        - Never close issues with "bug" or "security" labels
+        - Always explain why an issue is being marked stale
+        - Maximum 10 issues per run to avoid spam

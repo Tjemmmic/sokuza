@@ -1,0 +1,114 @@
+# Goal Pursuit
+#
+# Measure → diagnose → hypothesize → execute → verify loop
+# until a measurable target is met. Decomposes goals into
+# independent sub-goals, runs experiments, tracks progress.
+#
+# Usage:
+#   - name: goal-pursuit
+#     template: goal-pursuit
+#     trigger:
+#       event: manual
+
+trigger:
+  source: manual
+  event: manual
+
+inputs:
+  - name: goal
+    description: "What does 'done' look like? Must be measurable."
+    default: ""
+  - name: success_criteria
+    description: "Threshold that defines success (e.g., 'all tests pass', 'score > 0.80')"
+    default: "all tests pass"
+
+steps:
+  - id: clone
+    action: github-clone-repo
+    params: {}
+
+  - id: pursue
+    action: ai-agent
+    params:
+      workdir: "{{steps.clone.path}}"
+      max_turns: 60
+      allowed_tools:
+        - Read
+        - Write
+        - Edit
+        - Grep
+        - Glob
+        - LS
+        - Bash
+        - MultiTool
+      prompt: |
+        You are running a goal-pursuit engine. Iterate until the goal is met.
+
+        **Goal:** {{inputs.goal}}
+        **Success criteria:** {{inputs.success_criteria}}
+
+        ## The Loop
+        ```
+        GOAL → DECOMPOSE → [MEASURE → DIAGNOSE → HYPOTHESIZE → EXECUTE → VERIFY → COMPARE]* → ITERATE
+        ```
+
+        ## Phase 0: Understand the Goal
+        Parse into: Goal (measurable), Success criteria (threshold), Scope (what's in play).
+        If vague, determine a measurable interpretation.
+
+        ## Phase 1: Decompose
+        Can this goal be split into independent sub-goals?
+        Independent sub-goals get their own measurement and experiments.
+        Dependent sub-goals run sequentially.
+
+        ## Phase 2: Measure Baseline
+        Run measurement. Save structured output.
+        ```
+        Baseline — [timestamp]
+          Target         Current    Gap
+          [metric]       [value]    [delta]
+        ```
+
+        ## Phase 3: Diagnose
+        Identify failure clusters. For each, generate a hypothesis:
+        - **Claim**: what will improve, by how much
+        - **Action**: specific change (code, config)
+        - **Verification**: how to confirm it worked
+        - **Expected metrics**: which numbers should move
+
+        ## Phase 4: Execute Experiments
+        Make change → verify it's live → measure → compare.
+        Run independent hypotheses in parallel where possible.
+
+        ## Phase 5: Verify
+        Before looking at scores, confirm:
+        - Change is actually applied
+        - Measurement ran against the changed version
+        - Results are valid (not defaults or placeholders)
+
+        ## Phase 6: Compare + Decide
+        ```
+        Hypothesis     Before → After   Δ       Verdict
+        H1             0.45  → 0.78    +0.33   KEEP
+        H2             0.50  → 0.50    +0.00   ITERATE
+        ```
+
+        Verdicts: KEEP (promote) / ITERATE (try variation) / ABANDON (2-3 tries failed) / REGRESSION (revert)
+
+        ## Phase 7: Iterate
+        Re-diagnose from CURRENT state, generate new hypotheses, execute next round.
+        Plateau detection: if score doesn't move >0.02 for 2 rounds, report what's structural.
+
+        ## Rules
+        - Verify everything — never report unverified results
+        - Iterate on failures — 2-3 variations before abandoning
+        - Maximum 5 rounds total
+        - Track all experiments with before/after metrics
+
+  - id: push
+    action: github-create-pr
+    condition: "{{steps.pursue.hasChanges}}"
+    params:
+      branch: "goal-pursuit-changes"
+      title: "Goal Pursuit: {{inputs.goal}}"
+      body: "{{steps.pursue.review}}"

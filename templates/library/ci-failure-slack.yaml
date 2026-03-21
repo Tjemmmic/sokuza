@@ -1,0 +1,33 @@
+# CI Failure → Slack
+#
+# Receives CI failure webhooks and sends a formatted alert to Slack.
+# Works with any CI system that can send webhooks (GitHub Actions,
+# CircleCI, Jenkins, etc.).
+#
+# Usage:
+#   - name: ci-failure-alert
+#     template: ci-failure-slack
+#     trigger:
+#       source: webhook
+#       event: incoming
+
+trigger:
+  source: webhook
+  event: incoming
+
+steps:
+  - action: log
+    params:
+      message: "[CI FAILURE] {{event.payload.workflow}} failed on {{event.payload.repo}}"
+
+  - action: slack-send-message
+    params:
+      channel: "#ci-alerts"
+      text: |
+        ❌ *CI Failure*
+        *Repo:* `{{event.payload.repo}}`
+        *Workflow:* `{{event.payload.workflow}}`
+        *Branch:* `{{event.payload.branch}}`
+        *Commit:* `{{event.payload.sha}}`
+        *Author:* {{event.payload.author}}
+        *URL:* {{event.payload.url}}

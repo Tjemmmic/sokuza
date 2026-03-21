@@ -1,0 +1,78 @@
+# Issue Triage Bot
+#
+# Analyzes new issues using AI, categorizes them, suggests priority,
+# and posts a structured triage comment. Optionally labels using gh CLI.
+#
+# Usage:
+#   - name: triage-issues
+#     template: issue-triage
+#     trigger:
+#       event: issues.opened
+
+trigger:
+  source: github
+  event: issues.opened
+
+steps:
+  - id: clone
+    action: github-clone-repo
+    params: {}
+
+  - id: triage
+    action: ai-agent
+    params:
+      workdir: "{{steps.clone.path}}"
+      max_turns: 15
+      allowed_tools:
+        - Read
+        - Grep
+        - Glob
+        - LS
+        - Bash
+      prompt: |
+        You are an issue triage bot. A new issue was just opened.
+
+        ## Issue Details
+        - **Number**: #{{event.metadata.issueNumber}}
+        - **Repository**: {{event.metadata.repo}}
+
+        ## Steps
+
+        1. Fetch the issue details:
+           `gh issue view {{event.metadata.issueNumber}} -R {{event.metadata.repo}}`
+
+        2. Read the issue title and body carefully.
+
+        3. Search the codebase to understand if the issue relates to
+           existing code, and which components are relevant.
+
+        4. Categorize the issue:
+           - **bug** — Something is broken
+           - **feature** — New functionality request
+           - **docs** — Documentation improvement
+           - **question** — User needs help
+           - **duplicate** — Similar to an existing issue
+
+        5. Assess priority:
+           - **P0** — Critical, needs immediate attention
+           - **P1** — Important, should be addressed soon
+           - **P2** — Normal priority
+           - **P3** — Low priority / nice to have
+
+        6. Try to add labels:
+           `gh issue edit {{event.metadata.issueNumber}} -R {{event.metadata.repo}} --add-label "bug" --add-label "P2"`
+           (Use appropriate labels based on your analysis)
+
+        7. Output your triage analysis.
+
+  - action: github-comment
+    params:
+      issue_number: "{{event.metadata.issueNumber}}"
+      repo: "{{event.metadata.repo}}"
+      body: |
+        ## 🏷️ Issue Triage
+
+        {{steps.triage.review}}
+
+        ---
+        _Triaged by Sokuza AI ({{steps.triage.model}})_

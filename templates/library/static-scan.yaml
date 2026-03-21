@@ -1,0 +1,106 @@
+# Static Scan
+#
+# Tool-agnostic static analysis: auto-detects languages, runs appropriate
+# linters/scanners, groups findings by severity, posts summary report.
+#
+# Usage:
+#   - name: static-scan
+#     template: static-scan
+#     trigger:
+#       event: push
+
+trigger:
+  source: github
+  event: push
+
+steps:
+  - id: clone
+    action: github-clone-repo
+    params: {}
+
+  - id: scan
+    action: ai-agent
+    params:
+      workdir: "{{steps.clone.path}}"
+      max_turns: 25
+      allowed_tools:
+        - Read
+        - Grep
+        - Glob
+        - LS
+        - Bash
+        - MultiTool
+      prompt: |
+        Run a comprehensive static analysis scan on this codebase.
+
+        ## Step 1: Detect Languages & Tools
+        Scan the repo to detect:
+        - Languages present (check file extensions, package files)
+        - Available linters/scanners (check if installed: eslint, tsc, biome, ruff, mypy, clippy, golint)
+        - Build system (npm, cargo, go, pip)
+
+        ## Step 2: Run Available Scanners
+        For each detected language, run appropriate checks:
+
+        **TypeScript/JavaScript:**
+        - `npx tsc --noEmit` (type checking)
+        - `npx eslint . --format compact` (if eslint config exists)
+        - `npx biome check .` (if biome config exists)
+
+        **Python:**
+        - `ruff check .` or `flake8 .` (linting)
+        - `mypy .` (type checking, if configured)
+
+        **Rust:**
+        - `cargo clippy -- -W warnings`
+
+        **Go:**
+        - `go vet ./...`
+        - `staticcheck ./...` (if available)
+
+        **All languages:**
+        - Grep for common security patterns (hardcoded secrets, SQL injection, eval)
+        - Check for common anti-patterns
+
+        ## Step 3: Synthesize Results
+        Group all findings by severity:
+
+        | Severity | Criteria |
+        |----------|----------|
+        | CRITICAL | Security vulnerabilities, data exposure, injection |
+        | HIGH | Type errors, logic bugs, broken error handling |
+        | MEDIUM | Style violations, unused code, missing validation |
+        | LOW | Formatting, naming conventions, minor warnings |
+
+        ## Output Format
+        ```
+        ## Static Analysis Report
+
+        Languages: [detected]
+        Scanners run: [list]
+
+        | Severity | Count | Details |
+        |----------|-------|---------|
+        | CRITICAL | N | [descriptions] |
+        | HIGH | N | [descriptions] |
+        | MEDIUM | N | [descriptions] |
+        | LOW | N | [descriptions] |
+
+        Top Issues:
+        1. [file:line — description]
+        2. [file:line — description]
+        3. [file:line — description]
+
+        Overall: CLEAN / N issues found
+        ```
+
+  - action: github-comment
+    condition: "{{steps.scan.review}}"
+    params:
+      body: |
+        ## 🔬 Static Analysis Report
+
+        {{steps.scan.review}}
+
+        ---
+        _Scanned by Sokuza AI — Static Scan_

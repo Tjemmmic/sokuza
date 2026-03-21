@@ -1,0 +1,130 @@
+# Failure Tracer
+#
+# 5-phase failure analysis: extract → classify → cluster → rank → hypothesize.
+# Analyzes test failures, CI logs, or error traces to identify root causes,
+# cluster related failures, and propose specific fixes.
+#
+# Usage:
+#   - name: failure-tracer
+#     template: failure-tracer
+#     trigger:
+#       event: manual
+
+trigger:
+  source: manual
+  event: manual
+
+inputs:
+  - name: source
+    description: "What to analyze (e.g., 'test output', 'CI logs', 'error traces')"
+    default: "test output"
+
+steps:
+  - id: clone
+    action: github-clone-repo
+    params: {}
+
+  - id: trace
+    action: ai-agent
+    params:
+      workdir: "{{steps.clone.path}}"
+      max_turns: 30
+      allowed_tools:
+        - Read
+        - Grep
+        - Glob
+        - LS
+        - Bash
+        - MultiTool
+      prompt: |
+        You are a failure analysis expert performing a structured diagnosis.
+        Analysis target: {{inputs.source}}
+
+        ## Phase 1: Extract Failures
+        Run the test suite or find the failure source. For each failure, extract:
+        - **Test/case ID**: which test/operation failed
+        - **Error message**: the immediate error
+        - **Stack trace**: if available
+        - **Context**: what was happening before the failure
+        - **Timing**: how long it ran, when it failed
+
+        ## Phase 2: Classify Root Causes
+        Assign each failure to a category:
+
+        | Category | Pattern |
+        |----------|---------|
+        | Logic error | Wrong output, incorrect computation |
+        | Timeout | Hit time limit, hung waiting |
+        | Crash/exception | Unhandled error, null reference, type error |
+        | External dependency | Network failure, API error, service down |
+        | Race condition | Flaky, passes sometimes, timing-dependent |
+        | Resource exhaustion | OOM, disk full, connection pool depleted |
+        | Configuration | Wrong config, missing env var |
+        | Stale state | Cache poisoning, leftover data |
+        | Test bug | Test assertion wrong, not the code |
+        | Environment mismatch | Works locally, fails in CI |
+
+        ## Phase 3: Cluster
+        Group failures sharing the same root cause. For each cluster:
+        ```
+        Cluster: [name]
+          Failures: [count] ([test IDs])
+          Root cause: [specific explanation]
+          Affected code: [file:line or module]
+          Fix complexity: trivial / moderate / significant
+          Expected impact: fixing this resolves N failures (X% of total)
+        ```
+
+        ## Phase 4: Rank
+        Sort clusters by **expected impact / fix complexity**. Best targets = high impact, low complexity.
+
+        ## Phase 5: Generate Hypotheses
+        For each top cluster:
+        ```
+        Hypothesis: [id]
+          Cluster: [which failure cluster]
+          Diagnosis: [what's wrong and why]
+          Proposed fix: [specific code change — files, functions, approach]
+          Expected result: [which failures turn to passes]
+          Risk: [what could regress]
+          Verification: [how to confirm the fix]
+        ```
+
+        ## Output Format
+        ```
+        Failure Diagnosis — [source]
+
+        Summary:
+          Total:   N tests/cases
+          Passed:  N (X%)
+          Failed:  N (X%)
+          Skipped: N
+
+        Failure Clusters (ranked by impact):
+          1. [cluster name] — N failures, [complexity]
+          2. [cluster name] — N failures, [complexity]
+
+        Top Hypotheses:
+          1. [hypothesis with specific fix]
+          2. [hypothesis with specific fix]
+
+        Unclustered / One-off Failures:
+          [list of failures that don't fit a pattern]
+        ```
+
+        ## Rules
+        - Read the ACTUAL traces, not just summaries
+        - Be specific about code locations
+        - Distinguish test bugs from code bugs
+        - Don't guess — if insufficient data, say so
+
+  - action: github-comment
+    condition: "{{steps.trace.review}}"
+    params:
+      body: |
+        ## 🔍 Failure Trace Analysis
+
+        {{steps.trace.review}}
+
+        ---
+        _Analyzed by Sokuza AI — Failure Tracer_

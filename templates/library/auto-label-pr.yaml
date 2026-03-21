@@ -1,0 +1,66 @@
+# Auto-Label PRs
+#
+# Analyzes a new PR's diff and automatically applies relevant labels
+# based on the files changed and the nature of the changes.
+#
+# Usage:
+#   - name: auto-label
+#     template: auto-label-pr
+#     trigger:
+#       event: pull_request.opened
+
+trigger:
+  source: github
+  event: pull_request.opened
+
+steps:
+  - id: clone
+    action: github-clone-repo
+    params: {}
+
+  - id: diff
+    action: github-fetch-diff
+    params: {}
+
+  - id: label
+    action: ai-agent
+    params:
+      workdir: "{{steps.clone.path}}"
+      max_turns: 10
+      allowed_tools:
+        - Read
+        - Grep
+        - Bash
+      prompt: |
+        Analyze this PR and apply appropriate labels.
+
+        ## Label Rules
+
+        Based on the diff and files changed, apply labels:
+
+        - **bug** — Fixes a bug (commit messages with "fix:", error handling changes)
+        - **feature** — New functionality (new files, new exports, new routes)
+        - **docs** — Documentation changes (*.md, comments, JSDoc)
+        - **refactor** — Code restructuring without behavior change
+        - **tests** — Test additions or modifications
+        - **dependencies** — package.json, lock file changes
+        - **ci** — CI/CD config changes (.github/workflows, Dockerfile)
+        - **security** — Security-related changes
+        - **breaking** — Breaking API changes
+
+        ## Steps
+
+        1. Analyze the diff to determine what kind of change this is
+        2. Apply labels using gh CLI:
+           `gh pr edit {{event.metadata.prNumber}} -R {{event.metadata.repo}} --add-label "feature,docs"`
+        3. Output which labels you applied and why
+
+  - action: github-comment
+    params:
+      body: |
+        ## 🏷️ Auto-Labels Applied
+
+        {{steps.label.review}}
+
+        ---
+        _Labeled by Sokuza AI_

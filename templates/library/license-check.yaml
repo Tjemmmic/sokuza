@@ -1,0 +1,66 @@
+# License Checker
+#
+# Reviews dependencies for license compatibility issues.
+# Flags copyleft, unknown, or potentially problematic licenses.
+#
+# Usage:
+#   - name: license-check
+#     template: license-check
+#     trigger:
+#       event: pull_request.opened
+
+trigger:
+  source: github
+  event: pull_request.opened
+
+steps:
+  - id: clone
+    action: github-clone-repo
+    params: {}
+
+  - id: check
+    action: ai-agent
+    params:
+      workdir: "{{steps.clone.path}}"
+      max_turns: 15
+      allowed_tools:
+        - Read
+        - Grep
+        - Glob
+        - LS
+        - Bash
+      prompt: |
+        Check this project's dependencies for license compatibility.
+
+        ## Steps
+
+        1. Identify the package manager:
+           - package.json → npm/yarn
+           - requirements.txt / pyproject.toml → pip
+           - Cargo.toml → cargo
+           - go.mod → go
+
+        2. List all dependencies and try to determine their licenses:
+           For npm: `npm ls --all --json 2>/dev/null | head -200`
+           Or check node_modules/*/package.json for license fields
+
+        3. Flag these license categories:
+           - 🔴 **Copyleft** (GPL, AGPL) — may require source disclosure
+           - 🟡 **Weak Copyleft** (LGPL, MPL) — file-level copyleft
+           - 🟢 **Permissive** (MIT, Apache-2.0, BSD, ISC) — safe
+           - ⚫ **Unknown/No License** — risky, needs investigation
+
+        4. Output a summary table and any concerns.
+           If all licenses are permissive, output "ALL_CLEAR"
+
+  - action: github-comment
+    condition: "{{steps.check.review}}"
+    params:
+      skip_if_contains: "ALL_CLEAR"
+      body: |
+        ## 📜 License Check
+
+        {{steps.check.review}}
+
+        ---
+        _Checked by Sokuza AI_

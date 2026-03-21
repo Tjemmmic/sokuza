@@ -1,0 +1,31 @@
+# Deploy Alert → Slack
+#
+# Sends a notification to Slack when code is pushed to the main branch,
+# indicating a potential deployment.
+#
+# Usage:
+#   - name: deploy-alert
+#     template: deploy-notify-slack
+#     trigger:
+#       event: push
+#       filter:
+#         branch: main
+
+trigger:
+  source: github
+  event: push
+
+steps:
+  - action: log
+    params:
+      message: "[DEPLOY] Push to {{event.metadata.branch}} on {{event.metadata.repo}} by {{event.metadata.sender}}"
+
+  - action: slack-send-message
+    params:
+      channel: "#deployments"
+      text: |
+        🚀 *Deploy Alert*
+        *Repo:* `{{event.metadata.repo}}`
+        *Branch:* `{{event.metadata.branch}}`
+        *By:* {{event.metadata.sender}}
+        *Commits:* {{event.metadata.commitCount}}

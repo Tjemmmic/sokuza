@@ -27,33 +27,36 @@ export async function loadTemplates(
     // Default: templates/ next to the project root
     const dir = templateDir ?? getDefaultTemplateDir();
 
-    let files: string[];
-    try {
-        files = await readdir(dir);
-    } catch {
-        // No templates directory — return empty
-        loadedTemplates = {};
-        return loadedTemplates;
-    }
-
     const templates: Record<string, TemplateDefinition> = {};
 
-    for (const file of files) {
-        if (!file.endsWith('.yaml') && !file.endsWith('.yml')) continue;
+    // Load from main dir and library/ subdirectory
+    const dirs = [dir, join(dir, 'library')];
+    for (const d of dirs) {
+        let files: string[];
+        try {
+            files = await readdir(d);
+        } catch {
+            continue;
+        }
 
-        const name = basename(file, extname(file));
-        const content = await readFile(join(dir, file), 'utf-8');
-        const parsed = yaml.load(content) as Record<string, unknown>;
+        for (const file of files) {
+            if (!file.endsWith('.yaml') && !file.endsWith('.yml')) continue;
 
-        templates[name] = {
-            trigger: parsed.trigger as Partial<TriggerDefinition> | undefined,
-            steps: (parsed.steps as WorkflowStepDefinition[]) ?? [],
-        };
+            const name = basename(file, extname(file));
+            const content = await readFile(join(d, file), 'utf-8');
+            const parsed = yaml.load(content) as Record<string, unknown>;
+
+            templates[name] = {
+                trigger: parsed.trigger as Partial<TriggerDefinition> | undefined,
+                steps: (parsed.steps as WorkflowStepDefinition[]) ?? [],
+            };
+        }
     }
 
     loadedTemplates = templates;
     return templates;
 }
+
 
 /** Reset the cache (for testing) */
 export function resetTemplateCache(): void {

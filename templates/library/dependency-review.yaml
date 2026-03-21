@@ -1,0 +1,70 @@
+# Dependency Review
+#
+# Analyzes dependency changes in a PR — checks for known vulnerabilities,
+# license issues, and breaking changes in updated packages.
+#
+# Usage:
+#   - name: dep-review
+#     template: dependency-review
+#     trigger:
+#       event: pull_request.opened
+
+trigger:
+  source: github
+  event: pull_request.opened
+
+steps:
+  - id: clone
+    action: github-clone-repo
+    params: {}
+
+  - id: diff
+    action: github-fetch-diff
+    params: {}
+
+  - id: review
+    action: ai-agent
+    params:
+      workdir: "{{steps.clone.path}}"
+      max_turns: 20
+      allowed_tools:
+        - Read
+        - Grep
+        - Glob
+        - LS
+        - Bash
+      prompt: |
+        You are reviewing dependency changes in this pull request.
+
+        ## Steps
+
+        1. Check if package.json, package-lock.json, requirements.txt,
+           Cargo.toml, go.mod, or similar dependency files were modified.
+           If no dependency files changed, output "NO_DEPENDENCY_CHANGES" and stop.
+
+        2. For each changed dependency:
+           - Identify if it's new, updated, or removed
+           - Check the version change (major/minor/patch)
+           - Run `npm audit` if applicable
+
+        3. Flag these risks:
+           - **Major version bumps** — likely breaking changes
+           - **New dependencies** — review necessity and size
+           - **Deprecated packages** — suggest alternatives
+           - **Known vulnerabilities** — from npm audit or similar
+
+        4. Output a summary table:
+           | Package | Change | Risk | Notes |
+           |---------|--------|------|-------|
+
+  - action: github-comment
+    condition: "{{steps.review.review}}"
+    params:
+      skip_if_contains: "NO_DEPENDENCY_CHANGES"
+      body: |
+        ## 📦 Dependency Review
+
+        {{steps.review.review}}
+
+        ---
+        _Reviewed by Sokuza AI ({{steps.review.model}})_
