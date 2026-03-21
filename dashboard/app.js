@@ -13,6 +13,10 @@ let availableActions = [];
 let events = [];
 let eventStats = {};
 let eventSource = null;
+let deck = [];
+let libraryTemplates = [];
+let librarySearchQuery = '';
+let libraryActiveCategory = 'all';
 
 // ─── Event Catalog (source → events with friendly names) ───────────────────
 const eventCatalog = {
@@ -159,6 +163,80 @@ const actionDocs = {
     },
 };
 
+// ─── Library Catalog ────────────────────────────────────────────────────────
+const libraryCategories = [
+    { key: 'all', label: 'All', icon: '📋' },
+    { key: 'code-quality', label: 'Code Quality', icon: '🔍' },
+    { key: 'issue-management', label: 'Issue Management', icon: '🐛' },
+    { key: 'docs-release', label: 'Docs & Release', icon: '📝' },
+    { key: 'notifications', label: 'Notifications', icon: '🔔' },
+    { key: 'security', label: 'Security', icon: '🔒' },
+    { key: 'diagnostics', label: 'Diagnostics', icon: '🩺' },
+    { key: 'research', label: 'Research & Experimentation', icon: '🧪' },
+    { key: 'productivity', label: 'Productivity', icon: '⚡' },
+];
+
+const libraryItems = [
+    // ── Code Quality ──
+    { id: 'ai-pr-review', name: 'AI PR Review', description: 'Claude reviews every PR for bugs, security issues, and code quality — posts a detailed comment with approve/reject decision.', category: 'code-quality', icon: '🔍', tags: ['ai', 'review', 'pr', 'automated'], template: 'ai-pr-review', requiredIntegrations: ['github'], difficulty: 'easy', status: 'available', popular: true, defaultTrigger: { source: ['github', 'gh-cli'], event: ['pull_request.opened'] } },
+    { id: 'review-on-update', name: 'Review on Update', description: 'Re-run AI review whenever new commits are pushed to an open PR.', category: 'code-quality', icon: '🔄', tags: ['ai', 'review', 'pr', 'synchronize'], template: 'ai-pr-review', requiredIntegrations: ['github'], difficulty: 'easy', status: 'available', popular: false, defaultTrigger: { source: ['github', 'gh-cli'], event: ['pull_request.synchronize'] } },
+    { id: 'respond-to-reviews', name: 'Respond to Reviews', description: 'AI reads reviewer feedback, implements fixes, runs quality checks, and pushes — then posts a structured response.', category: 'code-quality', icon: '💬', tags: ['ai', 'review', 'response', 'agent'], template: 'respond-to-reviews', requiredIntegrations: ['github'], difficulty: 'medium', status: 'available', popular: true, defaultTrigger: { source: ['github', 'gh-cli'], event: ['issue_comment.created', 'pull_request_review.submitted'] } },
+    { id: 'enforce-rules', name: 'Enforce Repo Rules', description: 'Claude reads your project rules (CONTRIBUTING.md, RULES.md) and checks PRs for compliance — auto-creates fix PRs.', category: 'code-quality', icon: '📏', tags: ['ai', 'rules', 'compliance', 'agent'], template: 'enforce-rules', requiredIntegrations: ['github'], difficulty: 'medium', status: 'available', popular: false, defaultTrigger: { source: ['github'], event: ['pull_request.opened'] } },
+    { id: 'security-audit', name: 'Security Audit', description: 'Comprehensive security scan: secrets, dependency vulns, XSS, SQL injection, SSRF, and more.', category: 'code-quality', icon: '🛡️', tags: ['security', 'audit', 'vulnerabilities'], template: 'security-audit', requiredIntegrations: ['github'], difficulty: 'easy', status: 'available', popular: true, defaultTrigger: { source: ['github'], event: ['pull_request.opened'] } },
+    { id: 'dependency-review', name: 'Dependency Review', description: 'Analyzes dependency changes for vulnerabilities, breaking versions, and deprecated packages.', category: 'code-quality', icon: '📦', tags: ['dependencies', 'npm', 'security'], template: 'dependency-review', requiredIntegrations: ['github'], difficulty: 'easy', status: 'available', popular: false, defaultTrigger: { source: ['github'], event: ['pull_request.opened'] } },
+    { id: 'pr-summary', name: 'PR Summary Generator', description: 'Auto-generates a structured summary of PR changes: what changed, impact, testing status.', category: 'code-quality', icon: '📋', tags: ['summary', 'pr', 'documentation'], template: 'pr-summary', requiredIntegrations: ['github'], difficulty: 'easy', status: 'available', popular: true, defaultTrigger: { source: ['github', 'gh-cli'], event: ['pull_request.opened'] } },
+
+    // ── Issue Management ──
+    { id: 'fix-github-issue', name: 'Fix GitHub Issue', description: 'AI clones the repo, reads the issue, implements a fix, runs tests, and creates a PR — fully automated.', category: 'issue-management', icon: '🔧', tags: ['ai', 'agent', 'fix', 'pr'], template: 'fix-github-issue', requiredIntegrations: ['github'], difficulty: 'advanced', status: 'available', popular: true, defaultTrigger: { source: ['manual'], event: ['manual'] } },
+    { id: 'issue-triage', name: 'Issue Triage Bot', description: 'Analyzes new issues, categorizes as bug/feature/question, assigns priority, and applies labels via gh CLI.', category: 'issue-management', icon: '🏷️', tags: ['ai', 'triage', 'labels', 'issues'], template: 'issue-triage', requiredIntegrations: ['github'], difficulty: 'medium', status: 'available', popular: true, defaultTrigger: { source: ['github', 'gh-cli'], event: ['issues.opened'] } },
+    { id: 'bug-report-validator', name: 'Bug Report Validator', description: 'Checks if bug reports have sufficient info: repro steps, expected/actual behavior, environment, errors.', category: 'issue-management', icon: '📝', tags: ['validation', 'bug', 'quality'], template: 'bug-report-validator', requiredIntegrations: ['github'], difficulty: 'easy', status: 'available', popular: false, defaultTrigger: { source: ['github'], event: ['issues.opened'] } },
+    { id: 'stale-issue-cleanup', name: 'Stale Issue Cleanup', description: 'Daily scan for issues with no activity in 30+ days — posts reminders and optionally closes very stale ones.', category: 'issue-management', icon: '🧹', tags: ['maintenance', 'stale', 'cleanup', 'cron'], template: 'stale-issue-cleanup', requiredIntegrations: ['github'], difficulty: 'medium', status: 'available', popular: false, defaultTrigger: { source: ['cron'], event: ['daily'] } },
+    { id: 'issue-to-pr', name: 'Issue → Auto-Fix PR', description: 'When an issue is labeled "autofix", AI clones the repo and creates a fix PR automatically.', category: 'issue-management', icon: '🚀', tags: ['ai', 'autofix', 'agent'], template: 'fix-github-issue', requiredIntegrations: ['github'], difficulty: 'advanced', status: 'available', popular: false, defaultTrigger: { source: ['github'], event: ['issues.labeled'] } },
+
+    // ── Documentation & Release ──
+    { id: 'generate-docs', name: 'Auto-Generate Docs', description: 'Claude analyzes the codebase and generates/updates README, API docs, and architecture documentation.', category: 'docs-release', icon: '📚', tags: ['docs', 'readme', 'api', 'agent'], template: 'generate-docs', requiredIntegrations: ['github'], difficulty: 'medium', status: 'available', popular: true, defaultTrigger: { source: ['manual'], event: ['manual'] } },
+    { id: 'release-notes', name: 'Release Notes Generator', description: 'Analyzes commits since last release, categorizes changes, and generates formatted release notes.', category: 'docs-release', icon: '🎉', tags: ['release', 'changelog', 'notes'], template: 'release-notes', requiredIntegrations: ['github'], difficulty: 'medium', status: 'available', popular: true, defaultTrigger: { source: ['manual'], event: ['manual'] } },
+    { id: 'changelog-entry', name: 'Changelog Builder', description: 'When a PR is merged, auto-generates a user-friendly changelog entry.', category: 'docs-release', icon: '📋', tags: ['changelog', 'pr', 'merge'], template: 'changelog-entry', requiredIntegrations: ['github'], difficulty: 'easy', status: 'available', popular: false, defaultTrigger: { source: ['github'], event: ['pull_request.closed'] } },
+    { id: 'update-readme', name: 'README Updater', description: 'Reads the codebase and updates README.md to reflect actual structure, setup steps, and APIs.', category: 'docs-release', icon: '📖', tags: ['readme', 'docs', 'agent'], template: 'update-readme', requiredIntegrations: ['github'], difficulty: 'medium', status: 'available', popular: false, defaultTrigger: { source: ['manual'], event: ['manual'] } },
+    { id: 'api-docs-sync', name: 'API Docs Sync', description: 'Compares API route definitions with documentation and creates a PR to fix discrepancies.', category: 'docs-release', icon: '🔗', tags: ['api', 'docs', 'sync', 'agent'], template: 'api-docs-sync', requiredIntegrations: ['github'], difficulty: 'medium', status: 'available', popular: false, defaultTrigger: { source: ['github'], event: ['push'] } },
+
+    // ── Notifications ──
+    { id: 'review-notify-slack', name: 'PR Review → Slack', description: 'Reviews a PR with AI and sends the result to both GitHub and a Slack channel.', category: 'notifications', icon: '💬', tags: ['slack', 'review', 'notification'], template: 'review-notify-slack', requiredIntegrations: ['github', 'slack'], difficulty: 'easy', status: 'available', popular: true, defaultTrigger: { source: ['github'], event: ['pull_request.opened'] } },
+    { id: 'deploy-notify-slack', name: 'Deploy Alert → Slack', description: 'Sends a Slack notification when code is pushed to the main branch.', category: 'notifications', icon: '🚀', tags: ['slack', 'deploy', 'push'], template: 'deploy-notify-slack', requiredIntegrations: ['github', 'slack'], difficulty: 'easy', status: 'available', popular: true, defaultTrigger: { source: ['github'], event: ['push'] } },
+    { id: 'ci-failure-slack', name: 'CI Failure → Slack', description: 'Receives CI failure webhooks and sends formatted alerts to Slack.', category: 'notifications', icon: '❌', tags: ['slack', 'ci', 'failure', 'webhook'], template: 'ci-failure-slack', requiredIntegrations: ['slack'], difficulty: 'easy', status: 'available', popular: false, defaultTrigger: { source: ['webhook'], event: ['incoming'] } },
+    { id: 'issue-notify-slack', name: 'Issue Alert → Slack', description: 'Posts to Slack when a new issue is opened with title, author, and labels.', category: 'notifications', icon: '🐛', tags: ['slack', 'issues', 'notification'], template: 'issue-notify-slack', requiredIntegrations: ['github', 'slack'], difficulty: 'easy', status: 'available', popular: false, defaultTrigger: { source: ['github'], event: ['issues.opened'] } },
+    { id: 'daily-digest-slack', name: 'Daily Digest → Slack', description: 'AI-powered daily summary of repo activity: PRs, issues, commits. Sent to Slack each morning.', category: 'notifications', icon: '📊', tags: ['slack', 'digest', 'cron', 'ai'], template: 'daily-digest-slack', requiredIntegrations: ['github', 'slack'], difficulty: 'medium', status: 'available', popular: true, defaultTrigger: { source: ['cron'], event: ['daily'] } },
+
+    // ── Security ──
+    { id: 'secret-scan', name: 'Secret Scanner', description: 'Scans for accidentally committed secrets: API keys, passwords, tokens, private keys, .env files.', category: 'security', icon: '🔐', tags: ['security', 'secrets', 'scan'], template: 'secret-scan', requiredIntegrations: ['github'], difficulty: 'easy', status: 'available', popular: true, defaultTrigger: { source: ['github'], event: ['push'] } },
+    { id: 'license-check', name: 'License Checker', description: 'Reviews dependency licenses for compatibility issues: flags copyleft, unknown, and risky licenses.', category: 'security', icon: '📜', tags: ['license', 'compliance', 'dependencies'], template: 'license-check', requiredIntegrations: ['github'], difficulty: 'easy', status: 'available', popular: false, defaultTrigger: { source: ['github'], event: ['pull_request.opened'] } },
+    { id: 'owasp-review', name: 'OWASP Top 10 Review', description: 'Checks code against OWASP Top 10 security vulnerabilities with detailed findings.', category: 'security', icon: '🛡️', tags: ['owasp', 'security', 'vulnerabilities'], template: 'security-audit', requiredIntegrations: ['github'], difficulty: 'medium', status: 'coming-soon', popular: false, defaultTrigger: { source: ['github'], event: ['pull_request.opened'] } },
+    { id: 'compliance-report', name: 'Compliance Report', description: 'Weekly automated compliance report covering security, licensing, and code quality metrics.', category: 'security', icon: '📊', tags: ['compliance', 'report', 'cron'], template: 'enforce-rules', requiredIntegrations: ['github'], difficulty: 'advanced', status: 'coming-soon', popular: false, defaultTrigger: { source: ['cron'], event: ['daily'] } },
+
+    // ── Productivity ──
+    { id: 'auto-label-pr', name: 'Auto-Label PRs', description: 'Analyzes PR diff and applies relevant labels (bug, feature, docs, refactor, tests, etc.) via gh CLI.', category: 'productivity', icon: '🏷️', tags: ['labels', 'pr', 'automation'], template: 'auto-label-pr', requiredIntegrations: ['github'], difficulty: 'easy', status: 'available', popular: true, defaultTrigger: { source: ['github', 'gh-cli'], event: ['pull_request.opened'] } },
+    { id: 'standup-generator', name: 'Standup Generator', description: 'AI-powered daily standup report summarizing recent activity across PRs, issues, and commits.', category: 'productivity', icon: '☀️', tags: ['standup', 'daily', 'cron', 'ai'], template: 'daily-digest-slack', requiredIntegrations: ['github', 'slack'], difficulty: 'medium', status: 'coming-soon', popular: false, defaultTrigger: { source: ['cron'], event: ['daily'] } },
+    { id: 'log-everything', name: 'Log Everything', description: 'Simple event logger — logs a message whenever any event fires. Great for debugging.', category: 'productivity', icon: '📝', tags: ['log', 'debug', 'events'], template: 'log-events', requiredIntegrations: ['github'], difficulty: 'easy', status: 'available', popular: false, defaultTrigger: { source: ['github'], event: ['push'] } },
+    { id: 'webhook-forwarder', name: 'Webhook Forwarder', description: 'Forward events to an external HTTP endpoint. Connect Sokuza to any external service.', category: 'productivity', icon: '🔗', tags: ['webhook', 'forward', 'integration'], template: 'log-events', requiredIntegrations: [], difficulty: 'easy', status: 'coming-soon', popular: false, defaultTrigger: { source: ['webhook'], event: ['incoming'] } },
+    { id: 'test-impact', name: 'Test Impact Analyzer', description: 'Analyzes which tests are affected by PR changes and suggests which test suites to run.', category: 'productivity', icon: '🧪', tags: ['tests', 'ci', 'analysis'], template: 'ai-pr-review', requiredIntegrations: ['github'], difficulty: 'advanced', status: 'coming-soon', popular: false, defaultTrigger: { source: ['github'], event: ['pull_request.opened'] } },
+
+    // ── Advanced Code Quality (Skills-inspired) ──
+    { id: 'pr-inspector', name: 'PR Inspector', description: 'Senior-level PR review with P1/P2/P3 severity prioritization, AI slop detection, full-context analysis, and mandatory approve/reject decision.', category: 'code-quality', icon: '🔎', tags: ['ai', 'review', 'pr', 'structured', 'severity'], template: 'pr-inspector', requiredIntegrations: ['github'], difficulty: 'easy', status: 'available', popular: true, defaultTrigger: { source: ['github', 'gh-cli'], event: ['pull_request.opened'] } },
+    { id: 'deep-audit', name: 'Deep Audit', description: 'Staff-engineer-level codebase audit across correctness, architecture, and standards — auto-detects project type and scores code X/10.', category: 'code-quality', icon: '🔬', tags: ['audit', 'quality', 'scoring', 'architecture'], template: 'deep-audit', requiredIntegrations: ['github'], difficulty: 'medium', status: 'available', popular: true, defaultTrigger: { source: ['manual'], event: ['manual'] } },
+    { id: 'quality-loop', name: 'Quality Loop', description: 'Iterative improvement engine: audit → fix → test → re-rate across 5 dimensions — repeats until target score met (default 9/10).', category: 'code-quality', icon: '🔄', tags: ['quality', 'iterative', 'improvement', 'scoring'], template: 'quality-loop', requiredIntegrations: ['github'], difficulty: 'advanced', status: 'available', popular: true, defaultTrigger: { source: ['manual'], event: ['manual'] } },
+    { id: 'ship-check', name: 'Ship Check', description: 'Pre-merge verification: runs tests, scans for debug artifacts and secrets, checks build — posts pass/fail table with SHIP IT or HOLD verdict.', category: 'code-quality', icon: '✅', tags: ['verification', 'pre-merge', 'checklist'], template: 'ship-check', requiredIntegrations: ['github'], difficulty: 'easy', status: 'available', popular: true, defaultTrigger: { source: ['manual'], event: ['manual'] } },
+
+    // ── Diagnostics ──
+    { id: 'failure-tracer', name: 'Failure Tracer', description: '5-phase failure analysis: extracts failures, classifies root causes, clusters related issues, ranks by impact, and proposes specific fixes.', category: 'diagnostics', icon: '🔍', tags: ['debugging', 'failure', 'analysis', 'clustering'], template: 'failure-tracer', requiredIntegrations: ['github'], difficulty: 'medium', status: 'available', popular: true, defaultTrigger: { source: ['manual'], event: ['manual'] } },
+    { id: 'progress-pulse', name: 'Progress Pulse', description: 'Quick project health check: git status, test results, TODOs, open PRs/issues — compact report with next recommended action.', category: 'diagnostics', icon: '📊', tags: ['status', 'health', 'overview'], template: 'progress-pulse', requiredIntegrations: ['github'], difficulty: 'easy', status: 'available', popular: true, defaultTrigger: { source: ['manual'], event: ['manual'] } },
+    { id: 'static-scan', name: 'Static Scan', description: 'Language-agnostic static analysis: auto-detects project languages, runs available linters/scanners, groups findings by severity.', category: 'security', icon: '🔬', tags: ['static-analysis', 'linting', 'scanning', 'security'], template: 'static-scan', requiredIntegrations: ['github'], difficulty: 'medium', status: 'available', popular: true, defaultTrigger: { source: ['github'], event: ['push'] } },
+
+    // ── Research & Experimentation ──
+    { id: 'goal-pursuit', name: 'Goal Pursuit', description: 'Iterative goal engine: decompose → measure baseline → diagnose → hypothesize → execute → verify — repeats until measurable target met.', category: 'research', icon: '🎯', tags: ['iterative', 'goals', 'measurement', 'experiments'], template: 'goal-pursuit', requiredIntegrations: ['github'], difficulty: 'advanced', status: 'available', popular: false, defaultTrigger: { source: ['manual'], event: ['manual'] } },
+    { id: 'experiment-runner', name: 'Experiment Runner', description: 'Data-driven improvement: audits internal metrics, generates hypotheses, runs controlled experiments, reports with before/after data.', category: 'research', icon: '🧪', tags: ['experiments', 'metrics', 'improvement', 'data-driven'], template: 'experiment-runner', requiredIntegrations: ['github'], difficulty: 'advanced', status: 'available', popular: false, defaultTrigger: { source: ['manual'], event: ['manual'] } },
+    { id: 'repo-scout', name: 'Repo Scout', description: '4-phase codebase exploration: reads docs, explores structure, fills gaps, synthesizes a complete project briefing with architecture and dev guide.', category: 'productivity', icon: '🗺️', tags: ['onboarding', 'exploration', 'architecture', 'overview'], template: 'repo-scout', requiredIntegrations: ['github'], difficulty: 'easy', status: 'available', popular: true, defaultTrigger: { source: ['manual'], event: ['manual'] } },
+];
+
 // ─── Array helpers ──────────────────────────────────────────────────────────
 function ensureArray(val) {
     if (val === undefined || val === null) return [];
@@ -175,14 +253,17 @@ const api = {
     },
     async post(p, b) {
         const r = await fetch(p, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(b) });
+        if (!r.ok) throw new Error(`${r.status}`);
         return r.json();
     },
     async put(p, b) {
         const r = await fetch(p, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(b) });
+        if (!r.ok) throw new Error(`${r.status}`);
         return r.json();
     },
     async del(p) {
         const r = await fetch(p, { method: 'DELETE' });
+        if (!r.ok) throw new Error(`${r.status}`);
         return r.json();
     },
 };
@@ -254,6 +335,7 @@ async function renderPage() {
             case 'issues': await renderIssues(el); break;
             case 'workflows': await renderWorkflows(el); break;
             case 'templates': await renderTemplates(el); break;
+            case 'library': await renderLibrary(el); break;
             case 'integrations': await renderIntegrations(el); break;
             case 'events': await renderEvents(el); break;
             case 'settings': await renderSettings(el); break;
@@ -336,6 +418,40 @@ async function renderDashboard(el) {
                 </div>
             `).join('') : '<div style="font-size:12px;color:var(--text-muted)">No workflows</div>'}
         </div>
+
+        ${deck.length > 0 ? `
+        <div class="card" style="padding:18px 20px">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+                <span style="font-size:13px;font-weight:600;color:var(--text-secondary)">⚡ QUICK ACTIONS</span>
+                <button class="btn btn-ghost btn-sm" onclick="navigate('library')" style="font-size:11px">Browse Library →</button>
+            </div>
+            <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px">
+                ${deck.map(id => {
+                    const item = libraryItems.find(i => i.id === id);
+                    if (!item) return '';
+                    const wfName = getInstalledWorkflowName(item.id);
+                    const isManual = ensureArray(item.defaultTrigger?.event).includes('manual');
+                    return `<div class="quick-action-card" style="display:flex;align-items:center;gap:10px;padding:12px;border-radius:8px;background:var(--bg-secondary);border:1px solid var(--border-color);cursor:pointer;transition:all 0.15s" onmouseover="this.style.borderColor='var(--border-active)'" onmouseout="this.style.borderColor='var(--border-color)'">
+                        <span style="font-size:20px">${item.icon}</span>
+                        <div style="flex:1;min-width:0">
+                            <div style="font-size:12px;font-weight:600;color:var(--text-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(item.name)}</div>
+                            <div style="font-size:10px;color:var(--text-muted)">${isManual ? 'Manual' : 'Auto: ' + esc(ensureArray(item.defaultTrigger?.event).join(', '))}</div>
+                        </div>
+                        ${wfName && isManual ? `<button class="btn btn-primary btn-sm" style="padding:4px 8px;font-size:11px" onclick="event.stopPropagation();openRunModal('${esc(wfName)}')">▶</button>` : ''}
+                    </div>`;
+                }).join('')}
+            </div>
+        </div>
+        ` : `
+        <div class="card" style="padding:18px 20px">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+                <span style="font-size:13px;font-weight:600;color:var(--text-secondary)">⚡ QUICK ACTIONS</span>
+            </div>
+            <div style="font-size:12px;color:var(--text-muted);line-height:1.6">
+                Install recipes from the <a href="#library" onclick="event.preventDefault();navigate('library')" style="color:var(--accent)">Library</a> to get quick-launch actions here.
+            </div>
+        </div>
+        `}
     `;
 }
 
@@ -368,9 +484,11 @@ async function renderMyPrs(el) {
     const wfData = await api.get('/api/workflows');
     const allWorkflows = wfData.workflows || [];
 
-    // Find review & respond workflows
-    const reviewWf = allWorkflows.find(w => w.template === 'ai-pr-review') ?? allWorkflows.find(w => w.name.toLowerCase().includes('review'));
-    const respondWf = allWorkflows.find(w => w.template === 'respond-to-reviews') ?? allWorkflows.find(w => w.name.toLowerCase().includes('respond'));
+    // Build deck-sourced PR action buttons
+    const deckPrItems = getDeckPrItems();
+    // Fallback: still show review/respond if user has those workflows but hasn't used library
+    const reviewWf = deckPrItems.length === 0 ? (allWorkflows.find(w => w.template === 'ai-pr-review') ?? allWorkflows.find(w => w.name.toLowerCase().includes('review'))) : null;
+    const respondWf = deckPrItems.length === 0 ? (allWorkflows.find(w => w.template === 'respond-to-reviews') ?? allWorkflows.find(w => w.name.toLowerCase().includes('respond'))) : null;
 
     el.innerHTML = `
         <div class="page-header">
@@ -407,6 +525,10 @@ async function renderMyPrs(el) {
                         ${labels ? `<div style="margin-bottom:12px">${labels}</div>` : ''}
 
                         <div class="btn-group" style="flex-wrap:wrap">
+                            ${deckPrItems.map(di => {
+                                const wfName = getInstalledWorkflowName(di.id);
+                                return wfName ? `<button class="btn btn-primary btn-sm" onclick="runWorkflowForPr('${esc(wfName)}', '${esc(owner)}', '${esc(repo)}', ${pr.number})" title="${esc(di.description)}">${di.icon} ${esc(di.name)}</button>` : '';
+                            }).join('')}
                             ${reviewWf ? `<button class="btn btn-primary btn-sm" onclick="runWorkflowForPr('${esc(reviewWf.name)}', '${esc(owner)}', '${esc(repo)}', ${pr.number})" title="Run AI code review on this PR">🔍 Review</button>` : ''}
                             ${respondWf ? `<button class="btn btn-ghost btn-sm" onclick="runWorkflowForPr('${esc(respondWf.name)}', '${esc(owner)}', '${esc(repo)}', ${pr.number})" title="Respond to review comments">💬 Respond</button>` : ''}
                             <button class="btn btn-ghost btn-sm" onclick="openRunModalForPr('${esc(owner)}', '${esc(repo)}', ${pr.number})" title="Run any workflow against this PR">▶ Run Workflow</button>
@@ -606,6 +728,10 @@ async function renderIssues(el) {
 
                         <div class="btn-group" style="flex-wrap:wrap">
                             ${issueActions.map(a => `<button class="btn btn-primary btn-sm" onclick="runIssueAction('${esc(a.id)}', '${esc(owner)}', '${esc(repo)}', ${issue.number})" title="${esc(a.description || a.name)}">${a.icon ? esc(a.icon) + ' ' : ''}${esc(a.name)}</button>`).join('')}
+                            ${getDeckIssueItems().map(di => {
+                                const wfName = getInstalledWorkflowName(di.id);
+                                return wfName ? `<button class="btn btn-primary btn-sm" onclick="runIssueWorkflow('${esc(wfName)}', '${esc(owner)}', '${esc(repo)}', ${issue.number})" title="${esc(di.description)}">${di.icon} ${esc(di.name)}</button>` : '';
+                            }).join('')}
                             <button class="btn btn-ghost btn-sm" onclick="openIssueWorkflowModal('${esc(owner)}', '${esc(repo)}', ${issue.number})" title="Run any workflow against this issue">▶ Run Workflow</button>
                             <a href="${esc(issue.url)}" target="_blank" class="btn btn-ghost btn-sm" title="Open on GitHub">↗ GitHub</a>
                         </div>
@@ -652,6 +778,34 @@ window.runIssueAction = async function (actionId, owner, repo, issueNumber) {
             toast(result.error, 'error');
         } else {
             toast(result.message || `Action started for issue #${issueNumber}`);
+        }
+    } catch (err) {
+        toast('Failed: ' + (err.message || 'Unknown error'), 'error');
+    } finally {
+        if (btn) { btn.disabled = false; }
+        setTimeout(() => navigate('issues'), 1000);
+    }
+};
+
+// Run a deck-sourced workflow against an issue
+window.runIssueWorkflow = async function (workflowName, owner, repo, issueNumber) {
+    const btn = event?.target;
+    if (btn) { btn.disabled = true; btn.textContent = '⏳'; }
+    try {
+        const result = await api.post('/api/workflows/run', {
+            name: workflowName,
+            inputs: {
+                issue: { number: issueNumber },
+                owner,
+                repo: `${owner}/${repo}`,
+                repoName: repo,
+                issueNumber,
+            },
+        });
+        if (result.error) {
+            toast(result.error, 'error');
+        } else {
+            toast(`Workflow "${workflowName}" started for issue #${issueNumber}`);
         }
     } catch (err) {
         toast('Failed: ' + (err.message || 'Unknown error'), 'error');
@@ -863,7 +1017,10 @@ async function renderWorkflows(el) {
                 <h1 class="page-title">Workflows</h1>
                 <p class="page-subtitle">${workflows.length} workflow${workflows.length !== 1 ? 's' : ''} configured</p>
             </div>
-            <button class="btn btn-primary" onclick="openWorkflowEditor()">+ New Workflow</button>
+            <div class="btn-group">
+                <button class="btn btn-ghost" onclick="navigate('library')">📚 Browse Library</button>
+                <button class="btn btn-primary" onclick="openWorkflowEditor()">+ New Workflow</button>
+            </div>
         </div>
         ${workflows.length > 0 ? `<div class="table-wrap"><table>
             <thead><tr><th>Name</th><th>Source</th><th>Trigger</th><th>Type</th><th>Steps</th><th style="text-align:right">Actions</th></tr></thead>
@@ -1022,11 +1179,7 @@ window.quickStartPreset = function (preset) {
 function openFullEditor(existingName, wf) {
     const isEdit = !!existingName;
 
-    const ensureArray = (val) => {
-        if (!val || val === '') return [];
-        if (Array.isArray(val)) return val.filter(Boolean);
-        return [val].filter(Boolean);
-    };
+    // Use the global ensureArray helper
 
     const data = {
         name: wf?.name ?? '',
@@ -2362,7 +2515,7 @@ window.saveTemplate = async function (existingName) {
 };
 
 window.deleteTemplate = async function (name) {
-    if (!confirm(`Delete template "${name}"? This cannot be undone.`)) return;
+    if (!(await confirm(`Delete template <strong>"${esc(name)}"</strong>?<br><span style="font-size:12px;color:var(--text-muted)">This cannot be undone.</span>`))) return;
     try {
         await api.del(`/api/templates/${encodeURIComponent(name)}`);
         toast(`Template "${name}" deleted`);
@@ -2375,27 +2528,357 @@ window.deleteTemplate = async function (name) {
 window.useTemplate = function (templateName) {
     const tmpl = templates.find((t) => t.name === templateName);
     if (!tmpl) return;
-    // Open editor with template data pre-filled without modifying workflows array
+    // Open editor with template data pre-filled
     const fakeWf = {
         name: `my-${templateName}`,
         template: templateName,
-        trigger: { source: tmpl.trigger?.source ?? 'github', event: tmpl.trigger?.event ?? '' },
+        trigger: {
+            source: ensureArray(tmpl.trigger?.source || 'github'),
+            event: ensureArray(tmpl.trigger?.event || ''),
+        },
         steps: [],
     };
-    // Temporarily set, open, then clear
-    const origWfs = workflows;
-    workflows = [...origWfs, fakeWf];
-    openWorkflowEditor();
-    workflows = origWfs;
-    // Set form values
-    const nameEl = $('#ed-name');
-    const tmplEl = $('#ed-template');
-    const eventEl = $('#ed-event');
-    if (nameEl) nameEl.value = `my-${templateName}`;
-    if (tmplEl) { tmplEl.value = templateName; onTemplateChange(); }
-    if (eventEl) eventEl.value = tmpl.trigger?.event ?? '';
-    updateYamlPreview();
+    openFullEditor(null, fakeWf);
 };
+
+// ═════════════════════════════════════════════════════════════════════════════
+// LIBRARY + DECK
+// ═════════════════════════════════════════════════════════════════════════════
+
+function getFilteredLibraryItems() {
+    let items = libraryItems;
+    if (libraryActiveCategory !== 'all') {
+        items = items.filter(i => i.category === libraryActiveCategory);
+    }
+    if (librarySearchQuery.trim()) {
+        const q = librarySearchQuery.toLowerCase().trim();
+        items = items.filter(i =>
+            i.name.toLowerCase().includes(q) ||
+            i.description.toLowerCase().includes(q) ||
+            i.tags.some(t => t.includes(q)) ||
+            i.category.replace('-', ' ').includes(q)
+        );
+    }
+    // Sort: installed first, then popular, then available before coming-soon
+    items.sort((a, b) => {
+        const aInstalled = deck.includes(a.id) ? 1 : 0;
+        const bInstalled = deck.includes(b.id) ? 1 : 0;
+        if (aInstalled !== bInstalled) return bInstalled - aInstalled;
+        if (a.popular !== b.popular) return b.popular - a.popular;
+        if (a.status !== b.status) return a.status === 'available' ? -1 : 1;
+        return a.name.localeCompare(b.name);
+    });
+    return items;
+}
+
+// Find the installed workflow name for a library item
+function getInstalledWorkflowName(itemId) {
+    // Check if any workflow's name matches a known pattern for this item
+    const item = libraryItems.find(i => i.id === itemId);
+    if (!item) return null;
+    return workflows.find(w =>
+        w.template === item.template && (
+            w.name === `my-${item.id}` ||
+            w.name === item.id ||
+            w._libraryItem === item.id
+        )
+    )?.name || null;
+}
+
+// Get all deck items that have PR triggers
+function getDeckPrItems() {
+    return deck.map(id => libraryItems.find(i => i.id === id)).filter(Boolean).filter(item => {
+        const events = ensureArray(item.defaultTrigger?.event);
+        return events.some(e => e?.startsWith('pull_request'));
+    });
+}
+
+// Get all deck items that have issue triggers
+function getDeckIssueItems() {
+    return deck.map(id => libraryItems.find(i => i.id === id)).filter(Boolean).filter(item => {
+        const events = ensureArray(item.defaultTrigger?.event);
+        return item.category === 'issue-management' || events.some(e => e?.startsWith('issues'));
+    });
+}
+
+function renderLibraryCard(item) {
+    const isInstalled = deck.includes(item.id);
+    const isComingSoon = item.status === 'coming-soon';
+    const diffColors = { easy: '#22c55e', medium: '#f59e0b', advanced: '#a855f7' };
+    const diffColor = diffColors[item.difficulty] || '#6b7280';
+    const integBadges = item.requiredIntegrations.map(i =>
+        `<span class="badge badge-${i}" style="font-size:10px;padding:2px 6px">${esc(i)}</span>`
+    ).join(' ');
+
+    return `
+    <div class="library-card ${isInstalled ? 'in-deck' : ''} ${isComingSoon ? 'coming-soon' : ''}">
+        <div class="library-card-header">
+            <span class="library-card-icon">${item.icon}</span>
+            <div class="library-card-title-area">
+                <span class="library-card-name">${esc(item.name)}</span>
+                <span class="difficulty-badge" style="--diff-color:${diffColor}">${item.difficulty}</span>
+                ${isComingSoon ? '<span class="badge" style="background:rgba(107,114,128,0.3);color:#9ca3af;font-size:10px;padding:2px 6px">Coming Soon</span>' : ''}
+                ${isInstalled ? '<span class="badge" style="background:rgba(34,197,94,0.2);color:#22c55e;font-size:10px;padding:2px 6px">✓ Installed</span>' : ''}
+            </div>
+        </div>
+        <p class="library-card-desc">${esc(item.description)}</p>
+        <div class="library-card-meta">
+            <div class="library-card-integrations">${integBadges}</div>
+            <div class="library-card-tags">${item.tags.slice(0, 3).map(t => `<span class="tag-pill">${esc(t)}</span>`).join('')}</div>
+        </div>
+        <div class="library-card-actions">
+            ${isComingSoon ? `
+                <button class="btn btn-ghost btn-sm" disabled>Not Available</button>
+            ` : isInstalled ? `
+                <button class="btn btn-ghost btn-sm" style="color:#ef4444" onclick="uninstallLibraryItem('${item.id}')">Uninstall</button>
+                <button class="btn btn-ghost btn-sm" onclick="previewLibraryItem('${item.id}')">Preview</button>
+            ` : `
+                <button class="btn btn-primary btn-sm" onclick="installLibraryItem('${item.id}')">⚡ Install</button>
+                <button class="btn btn-ghost btn-sm" onclick="previewLibraryItem('${item.id}')">Preview</button>
+            `}
+        </div>
+    </div>`;
+}
+
+async function renderLibrary(el) {
+    const filtered = getFilteredLibraryItems();
+    const catCounts = {};
+    for (const cat of libraryCategories) {
+        catCounts[cat.key] = cat.key === 'all' ? libraryItems.length : libraryItems.filter(i => i.category === cat.key).length;
+    }
+    const installedCount = deck.length;
+
+    el.innerHTML = `
+    <div class="page-header">
+        <div>
+            <h1>Library</h1>
+            <p class="page-subtitle">Browse AI workflow recipes — install to activate and get quick actions everywhere</p>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center">
+            <span class="badge" style="background:rgba(34,197,94,0.15);color:#22c55e;border:1px solid rgba(34,197,94,0.3);font-size:12px;padding:4px 10px">${installedCount} installed</span>
+        </div>
+    </div>
+
+    <div class="library-search-bar">
+        <input type="text" class="form-input library-search" id="library-search"
+            placeholder="Search workflows... (e.g. review, slack, security)"
+            value="${esc(librarySearchQuery)}"
+            oninput="librarySearchQuery=this.value;renderLibrary($('#content'))">
+        <div class="library-tabs">
+            ${libraryCategories.map(cat => `
+                <button class="library-tab ${libraryActiveCategory === cat.key ? 'active' : ''}"
+                    onclick="libraryActiveCategory='${cat.key}';renderLibrary($('#content'))">
+                    <span class="library-tab-icon">${cat.icon}</span>
+                    <span class="library-tab-label">${cat.label}</span>
+                    <span class="library-tab-count">${catCounts[cat.key]}</span>
+                </button>
+            `).join('')}
+        </div>
+    </div>
+
+    <div class="library-grid">
+        ${filtered.length > 0 ? filtered.map(renderLibraryCard).join('') :
+            `<div class="empty-state" style="grid-column:1/-1">
+                <div class="empty-icon">🔍</div>
+                <p class="empty-text">No workflows match "${esc(librarySearchQuery)}"</p>
+                <button class="btn btn-ghost" onclick="librarySearchQuery='';libraryActiveCategory='all';renderLibrary($('#content'))">Clear Filters</button>
+            </div>`
+        }
+    </div>`;
+
+    // Focus search if user was typing
+    if (librarySearchQuery) {
+        const searchEl = $('#library-search');
+        if (searchEl) { searchEl.focus(); searchEl.selectionStart = searchEl.selectionEnd = searchEl.value.length; }
+    }
+}
+
+// Install = Create workflow + Add to deck (single action)
+window.installLibraryItem = async function (itemId) {
+    const item = libraryItems.find(i => i.id === itemId);
+    if (!item) return;
+
+    const defaultName = `my-${item.id}`;
+    const sources = ensureArray(item.defaultTrigger?.source || 'github');
+    const events = ensureArray(item.defaultTrigger?.event || '');
+
+    // Build source & event options for the config modal
+    const sourceOptions = [...new Set(['github', 'gh-cli', 'github-poll', 'slack', 'cron', 'webhook', 'manual', ...sources])];
+    const triggerSource = sources[0] || 'github';
+    const triggerEvent = events.join(', ');
+
+    openModal(`⚡ Install: ${item.name}`, `
+        <p style="color:var(--text-secondary);margin-bottom:16px;line-height:1.5">${esc(item.description)}</p>
+
+        <div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap">
+            <span class="difficulty-badge" style="--diff-color:${item.difficulty === 'easy' ? '#22c55e' : item.difficulty === 'medium' ? '#f59e0b' : '#a855f7'}">${item.difficulty}</span>
+            ${item.requiredIntegrations.map(i => `<span class="badge badge-${i}">${esc(i)}</span>`).join(' ')}
+        </div>
+
+        <div style="margin-bottom:16px">
+            <label style="display:block;font-size:12px;font-weight:600;color:var(--text-muted);margin-bottom:6px">WORKFLOW NAME</label>
+            <input type="text" id="install-wf-name" class="form-input" value="${esc(defaultName)}"
+                style="width:100%;padding:10px 12px;font-size:14px;background:var(--bg-input);border:1px solid var(--border-color);border-radius:8px;color:var(--text-primary)">
+        </div>
+
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px">
+            <div>
+                <label style="display:block;font-size:12px;font-weight:600;color:var(--text-muted);margin-bottom:6px">TRIGGER SOURCE</label>
+                <select id="install-wf-source" class="form-input"
+                    style="width:100%;padding:10px 12px;font-size:14px;background:var(--bg-input);border:1px solid var(--border-color);border-radius:8px;color:var(--text-primary)">
+                    ${sourceOptions.map(s => `<option value="${esc(s)}" ${s === triggerSource ? 'selected' : ''}>${esc(s)}</option>`).join('')}
+                </select>
+            </div>
+            <div>
+                <label style="display:block;font-size:12px;font-weight:600;color:var(--text-muted);margin-bottom:6px">TRIGGER EVENT</label>
+                <input type="text" id="install-wf-event" class="form-input" value="${esc(triggerEvent)}"
+                    style="width:100%;padding:10px 12px;font-size:14px;background:var(--bg-input);border:1px solid var(--border-color);border-radius:8px;color:var(--text-primary)">
+            </div>
+        </div>
+
+        <div style="padding:12px;border-radius:8px;background:rgba(99,102,241,0.08);border:1px solid rgba(99,102,241,0.15);margin-bottom:8px">
+            <div style="font-size:12px;color:var(--text-secondary);line-height:1.5">
+                <strong>Template:</strong> <code>${esc(item.template)}</code><br>
+                <strong>What happens:</strong> A workflow will be created that runs automatically on matching events. It will appear as a quick action on your Dashboard, PRs, and Issues pages.
+            </div>
+        </div>
+    `, `
+        <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
+        <button class="btn btn-primary" onclick="confirmInstallLibraryItem('${item.id}')">Create Workflow</button>
+    `);
+};
+
+window.confirmInstallLibraryItem = async function (itemId) {
+    const item = libraryItems.find(i => i.id === itemId);
+    if (!item) return;
+
+    const nameEl = document.getElementById('install-wf-name');
+    const sourceEl = document.getElementById('install-wf-source');
+    const eventEl = document.getElementById('install-wf-event');
+    if (!nameEl || !sourceEl || !eventEl) return;
+
+    const wfName = nameEl.value.trim();
+    const wfSource = sourceEl.value;
+    const wfEvents = eventEl.value.split(',').map(e => e.trim()).filter(Boolean);
+
+    if (!wfName) { toast('Please enter a workflow name', 'error'); return; }
+
+    closeModal();
+
+    try {
+        // 1. Create workflow
+        const workflow = {
+            name: wfName,
+            template: item.template,
+            _libraryItem: item.id,
+            trigger: {
+                source: wfSource,
+                event: wfEvents.length === 1 ? wfEvents[0] : wfEvents,
+            },
+        };
+        await api.post('/api/workflows', workflow);
+
+        // 2. Add to deck
+        if (!deck.includes(item.id)) {
+            deck.push(item.id);
+            await api.post('/api/deck/add', { id: item.id });
+        }
+
+        // 3. Refresh workflows list
+        const wfData = await api.get('/api/workflows');
+        workflows = wfData.workflows || [];
+
+        toast(`"${item.name}" installed! Workflow "${wfName}" created.`);
+    } catch (err) {
+        toast('Install failed: ' + (err.message || 'Unknown error'), 'error');
+    }
+
+    if (currentPage === 'library') renderLibrary($('#content'));
+};
+
+window.uninstallLibraryItem = async function (itemId) {
+    const item = libraryItems.find(i => i.id === itemId);
+    if (!item) return;
+
+    // Find the associated workflow(s)
+    const matchingWfs = workflows.filter(w =>
+        w._libraryItem === item.id ||
+        (w.template === item.template && (w.name === `my-${item.id}` || w.name === item.id))
+    );
+
+    const wfNames = matchingWfs.map(w => w.name);
+
+    openModal(`Uninstall: ${item.name}`, `
+        <p style="color:var(--text-secondary);margin-bottom:16px;line-height:1.5">
+            This will remove the recipe from your deck${wfNames.length > 0 ? ` and delete ${wfNames.length === 1 ? 'the workflow' : wfNames.length + ' workflows'}: <strong>${wfNames.map(n => esc(n)).join(', ')}</strong>` : ''}.
+        </p>
+        <p style="color:var(--text-muted);font-size:12px">
+            The recipe will remain in the Library if you want to install it again later.
+        </p>
+    `, `
+        <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
+        <button class="btn btn-primary" style="background:#ef4444;border-color:#ef4444" onclick="confirmUninstallLibraryItem('${item.id}')">Uninstall</button>
+    `);
+};
+
+window.confirmUninstallLibraryItem = async function (itemId) {
+    const item = libraryItems.find(i => i.id === itemId);
+    if (!item) return;
+    closeModal();
+
+    try {
+        // 1. Delete matching workflows
+        const matchingWfs = workflows.filter(w =>
+            w._libraryItem === item.id ||
+            (w.template === item.template && (w.name === `my-${item.id}` || w.name === item.id))
+        );
+        for (const wf of matchingWfs) {
+            try { await api.del(`/api/workflows/${encodeURIComponent(wf.name)}`); } catch { /* ignore */ }
+        }
+
+        // 2. Remove from deck
+        deck = deck.filter(id => id !== item.id);
+        try { await api.del(`/api/deck/${encodeURIComponent(item.id)}`); } catch { /* ignore */ }
+
+        // 3. Refresh workflows list
+        const wfData = await api.get('/api/workflows');
+        workflows = wfData.workflows || [];
+
+        toast(`"${item.name}" uninstalled`);
+    } catch (err) {
+        toast('Uninstall failed: ' + err.message, 'error');
+    }
+
+    if (currentPage === 'library') renderLibrary($('#content'));
+};
+
+window.previewLibraryItem = async function (itemId) {
+    const item = libraryItems.find(i => i.id === itemId);
+    if (!item) return;
+    const isInstalled = deck.includes(item.id);
+    try {
+        const tmpl = templates.find(t => t.name === item.template) || libraryTemplates.find(t => t.name === item.template);
+        const yamlContent = tmpl?.content || `# Template: ${item.template}\n# (Template content will be loaded on install)`;
+        openModal(`Preview: ${item.name}`, `
+            <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap">
+                <span class="difficulty-badge" style="--diff-color:${item.difficulty === 'easy' ? '#22c55e' : item.difficulty === 'medium' ? '#f59e0b' : '#a855f7'}">${item.difficulty}</span>
+                ${item.requiredIntegrations.map(i => `<span class="badge badge-${i}">${esc(i)}</span>`).join(' ')}
+                ${item.tags.map(t => `<span class="tag-pill">${esc(t)}</span>`).join('')}
+                ${isInstalled ? '<span class="badge" style="background:rgba(34,197,94,0.2);color:#22c55e;font-size:10px;padding:2px 6px">✓ Installed</span>' : ''}
+            </div>
+            <p style="color:var(--text-secondary);margin-bottom:16px;line-height:1.6">${esc(item.description)}</p>
+            <div style="font-size:12px;font-weight:600;color:var(--text-muted);margin-bottom:6px">TEMPLATE: ${esc(item.template)}</div>
+            <pre style="background:var(--bg-secondary);padding:14px;border-radius:8px;font-size:12px;overflow:auto;max-height:400px;border:1px solid var(--border)">${esc(typeof yamlContent === 'string' ? yamlContent : JSON.stringify(yamlContent, null, 2))}</pre>
+        `, `
+            <button class="btn btn-ghost" onclick="closeModal()">Close</button>
+            ${isInstalled ?
+                `<button class="btn btn-ghost" style="color:#ef4444" onclick="closeModal();uninstallLibraryItem('${item.id}')">Uninstall</button>` :
+                `<button class="btn btn-primary" onclick="closeModal();installLibraryItem('${item.id}')">⚡ Install</button>`
+            }
+        `);
+    } catch { /* ignore */ }
+};
+
 
 // ═════════════════════════════════════════════════════════════════════════════
 // INTEGRATIONS
@@ -2514,6 +2997,11 @@ const integrationDefs = {
         name: 'Generic Webhook', fields: [
             { key: 'secret', label: 'HMAC Secret (optional)', type: 'password', hint: 'If set, incoming requests must include a valid HMAC signature.' },
         ], guide: 'POST JSON to /webhooks/custom/your-name to trigger workflows.\nThe request body becomes the event payload.'
+    },
+    'gh-cli': {
+        name: 'GitHub (gh CLI)', fields: [
+            { key: 'interval', label: 'Poll Interval (seconds)', type: 'number', hint: 'How often to check for PR updates. Default: 60. Min recommended: 30.' },
+        ], guide: 'Zero-config GitHub integration using the gh CLI.\n\n1. Install gh CLI: https://cli.github.com/\n2. Run: gh auth login\n3. Enable this integration — Sokuza will auto-detect your auth and poll your PRs'
     },
     'cron': { name: 'Cron', fields: [], guide: 'Cron triggers are configured per-workflow using cron expressions.\nNo integration-level config needed — just enable it.' },
 };
@@ -2792,11 +3280,15 @@ window.replayEvent = async function (idx) {
     const e = events[idx];
     if (!e?.matchedWorkflows?.length) { toast('No workflows to replay', 'error'); return; }
     const wfName = e.matchedWorkflows[0];
-    if (!confirm(`Replay event to workflow "${wfName}"?`)) return;
+    if (!(await confirm(`Replay event to workflow <strong>"${esc(wfName)}"</strong>?`))) return;
     try {
-        const result = await api.post(`/api/workflows/${encodeURIComponent(wfName)}/run`, { inputs: {} });
-        if (result.ok) toast(`Replayed event → "${wfName}" workflow started`);
-        else toast('Replay failed: ' + (result.error || 'Unknown'), 'error');
+        // Forward original event data for faithful replay
+        const inputs = e.event?.payload?.inputs || {};
+        const result = await api.post(`/api/workflows/${encodeURIComponent(wfName)}/run`, {
+            inputs,
+            _replayEvent: e.event,
+        });
+        toast(`Replayed event → "${wfName}" workflow started`);
     } catch (err) {
         toast('Replay failed: ' + (err.message || 'Unknown'), 'error');
     }
@@ -2871,6 +3363,9 @@ function connectSSE() {
         const txt = $('#status-text');
         if (dot) dot.classList.remove('online');
         if (txt) txt.textContent = 'Reconnecting...';
+        // Auto-reconnect after 5 seconds
+        eventSource.close();
+        setTimeout(() => connectSSE(), 5000);
     };
 }
 
@@ -2885,6 +3380,9 @@ async function loadAll() {
     integrations = intg.integrations || {};
     events = evt.events || [];
     eventStats = stats;
+    // Load deck and library templates (graceful fallback)
+    try { const d = await api.get('/api/deck'); deck = d.deck || []; } catch { deck = []; }
+    try { const lt = await api.get('/api/templates/library'); libraryTemplates = lt.templates || []; } catch { libraryTemplates = []; }
 }
 
 // ─── Utilities ──────────────────────────────────────────────────────────────
@@ -3041,15 +3539,13 @@ window.saveConfig = async function () {
     if (!editor) return;
 
     const yamlText = editor.value;
+    if (!yamlText.trim()) { toast('Config cannot be empty', 'error'); return; }
     statusEl.textContent = 'Saving...';
     saveBtn.disabled = true;
 
     try {
-        // Parse locally first to validate
-        const parsed = parseSimpleYaml(yamlText);
-        if (!parsed) throw new Error('Invalid YAML structure');
-
-        const result = await api.put('/api/config', { config: parsed });
+        // Send raw YAML to backend for parsing (backend uses js-yaml)
+        const result = await api.put('/api/config', { __raw_yaml: yamlText });
         if (result.error) throw new Error(result.error);
         statusEl.textContent = '✓ Saved';
         toast('Config saved successfully');
@@ -3062,22 +3558,6 @@ window.saveConfig = async function () {
     }
 };
 
-function parseSimpleYaml(text) {
-    // Send raw text to backend for YAML parsing (backend uses js-yaml)
-    // We send as a JSON string to be parsed server-side
-    try {
-        // Basic structural validation: check it's not empty
-        if (!text.trim()) return null;
-        // The backend already accepts a config object, but we've been
-        // serializing/deserializing. For the settings editor, let's
-        // just send the raw text as a JSON structure the backend accepts.
-        // Actually the PUT /api/config expects { config: object }, so
-        // we need to do a simple parse. We'll use a fetch to re-read
-        // after save, or we can just send raw and let the backend handle it.
-        // For now, return a marker that signals raw yaml.
-        return { __raw_yaml: text };
-    } catch { return null; }
-}
 
 // ─── Event Badge ────────────────────────────────────────────────────────────
 let unseenEventCount = 0;
@@ -3121,7 +3601,7 @@ $$('.nav-link').forEach((link) => link.addEventListener('click', (e) => { e.prev
 window.navigate = navigate;
 
 // Hash routing: restore page from URL hash
-const validPages = ['dashboard', 'my-prs', 'issues', 'workflows', 'templates', 'integrations', 'events', 'settings'];
+const validPages = ['dashboard', 'my-prs', 'issues', 'workflows', 'templates', 'library', 'integrations', 'events', 'settings'];
 const hashPage = window.location.hash.replace('#', '');
 if (validPages.includes(hashPage)) currentPage = hashPage;
 window.addEventListener('hashchange', () => {

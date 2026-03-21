@@ -448,6 +448,12 @@ tr:hover td {
     border: 1px solid rgba(6, 182, 212, 0.3);
 }
 
+.badge-gh-cli {
+    background: rgba(88, 28, 135, 0.5);
+    color: #c084fc;
+    border: 1px solid rgba(168, 85, 247, 0.3);
+}
+
 .badge-manual {
     background: rgba(120, 53, 15, 0.5);
     color: #fbbf24;
@@ -1744,4 +1750,214 @@ tr:hover td {
 
 .picker-list::-webkit-scrollbar-thumb:hover {
     background: rgba(99, 102, 241, 0.4);
+}
+
+/* ─── Library Page ──────────────────────────────────────────────────────── */
+.library-search-bar {
+    margin-bottom: 20px;
+}
+
+.library-search {
+    width: 100%;
+    padding: 12px 16px;
+    font-size: 14px;
+    margin-bottom: 12px;
+    background: var(--bg-input);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius);
+    color: var(--text-primary);
+    transition: border-color var(--transition);
+}
+
+.library-search:focus {
+    border-color: var(--accent);
+    outline: none;
+}
+
+.library-tabs {
+    display: flex;
+    gap: 4px;
+    flex-wrap: wrap;
+    padding: 4px;
+    background: var(--bg-secondary);
+    border-radius: var(--radius);
+    border: 1px solid var(--border-color);
+}
+
+.library-tab {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 12px;
+    border: none;
+    background: transparent;
+    color: var(--text-muted);
+    font-size: 12px;
+    font-weight: 500;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all var(--transition);
+    white-space: nowrap;
+}
+
+.library-tab:hover {
+    background: rgba(99, 102, 241, 0.1);
+    color: var(--text-secondary);
+}
+
+.library-tab.active {
+    background: var(--accent);
+    color: white;
+}
+
+.library-tab-icon {
+    font-size: 14px;
+}
+
+.library-tab-count {
+    font-size: 10px;
+    padding: 1px 5px;
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.15);
+}
+
+.library-tab.active .library-tab-count {
+    background: rgba(255, 255, 255, 0.25);
+}
+
+.library-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+    gap: 16px;
+}
+
+.library-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius);
+    padding: 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    transition: all var(--transition);
+}
+
+.library-card:hover {
+    border-color: var(--border-active);
+    background: var(--bg-card-hover);
+    transform: translateY(-1px);
+}
+
+.library-card.in-deck {
+    border-color: rgba(34, 197, 94, 0.3);
+    background: rgba(34, 197, 94, 0.04);
+}
+
+.library-card.in-deck:hover {
+    border-color: rgba(34, 197, 94, 0.5);
+}
+
+.library-card.coming-soon {
+    opacity: 0.5;
+}
+
+.library-card.coming-soon:hover {
+    opacity: 0.65;
+    transform: none;
+}
+
+.library-card-header {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+}
+
+.library-card-icon {
+    font-size: 28px;
+    line-height: 1;
+    flex-shrink: 0;
+}
+
+.library-card-title-area {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+    min-height: 28px;
+}
+
+.library-card-name {
+    font-weight: 600;
+    font-size: 14px;
+    color: var(--text-primary);
+}
+
+.difficulty-badge {
+    font-size: 10px;
+    font-weight: 600;
+    padding: 2px 7px;
+    border-radius: 4px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--diff-color, #6b7280);
+    background: color-mix(in srgb, var(--diff-color, #6b7280) 15%, transparent);
+    border: 1px solid color-mix(in srgb, var(--diff-color, #6b7280) 30%, transparent);
+}
+
+.library-card-desc {
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--text-muted);
+    margin: 0;
+    flex: 1;
+}
+
+.library-card-meta {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.library-card-integrations {
+    display: flex;
+    gap: 4px;
+}
+
+.library-card-tags {
+    display: flex;
+    gap: 4px;
+}
+
+.tag-pill {
+    font-size: 10px;
+    padding: 2px 6px;
+    border-radius: 4px;
+    background: rgba(99, 102, 241, 0.1);
+    color: var(--text-muted);
+    border: 1px solid rgba(99, 102, 241, 0.1);
+}
+
+.library-card-actions {
+    display: flex;
+    gap: 6px;
+    margin-top: 4px;
+    padding-top: 10px;
+    border-top: 1px solid rgba(99, 102, 241, 0.06);
+}
+
+@media (max-width: 768px) {
+    .library-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .library-tabs {
+        overflow-x: auto;
+        flex-wrap: nowrap;
+    }
+
+    .library-tab-label {
+        display: none;
+    }
 }
