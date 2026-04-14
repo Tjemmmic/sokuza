@@ -40,6 +40,7 @@ Create a `.env` file (see `.env.example`):
 | Integration | Webhook Endpoint | Description |
 |---|---|---|
 | **GitHub** | `/webhooks/github` | PR events, issues, pushes, reviews |
+| **GitHub CLI** | _(polling-based)_ | Zero-config GitHub integration using `gh` CLI |
 | **Slack** | `/webhooks/slack/events` `/webhooks/slack/commands` | Messages, @mentions, reactions, slash commands |
 | **Webhook** | `/webhooks/custom/:name` | Accept arbitrary JSON from any source |
 | **Cron** | _(timer-based)_ | Scheduled triggers (every-5m, hourly, daily, etc.) |
@@ -63,6 +64,7 @@ Create a `.env` file (see `.env.example`):
 | `github-comment` | Post a comment on a PR or issue |
 | `github-clone-repo` | Clone a repo to a temp directory |
 | `github-create-pr` | Commit changes, push, and open a PR |
+| `github-create-review` | Submit a PR review (approve/request-changes/comment) via REST API |
 
 **Slack-specific** (auto-registered when Slack is enabled):
 
@@ -86,7 +88,85 @@ workflows:
       repo: "my-org/my-repo"
 ```
 
-Available templates: `ai-pr-review`, `log-events`, `enforce-rules`, `review-notify-slack`
+Available templates: `ai-pr-review`, `log-events`, `enforce-rules`, `review-notify-slack`, `respond-to-reviews`, `security-audit`, `deep-audit`
+
+**Library templates** (`templates/library/`): Additional workflow templates for specialized tasks like security audits, dependency reviews, and repo scouting. All review templates now use a standardized P1/P2/P3 priority system with consistent output format.
+
+## AI Code Review System
+
+Sokuza provides a standardized AI code review system with consistent formatting, priority levels, and approval logic across all review templates.
+
+### Review Features
+
+- **Consistent Format**: All reviews follow the same markdown structure with standardized headers and issue format
+- **Priority System**: Three-level priority system (P1/P2/P3) with clear blocking criteria
+- **Approval Logic**: Deterministic approval decisions based on issue counts
+- **Multiple Review Types**: Support for general code reviews, security audits, and deep architectural audits
+
+### Review Priority Levels
+
+| Priority | Name | Description | Blocking? |
+|----------|------|-------------|------------|
+| **P1** | Blocking | Bugs, security vulnerabilities, crashes, broken API contracts | Yes |
+| **P2** | Should Fix | Missing error handling, untested logic, performance issues | No (3+ blocks) |
+| **P3** | Nice to Have | Readability, naming, minor style improvements | No |
+
+### Approval Thresholds
+
+A PR is **approved** when:
+- Zero P1 issues AND
+- Fewer than 3 P2 issues
+
+A PR **requests changes** when:
+- Any P1 issue exists OR
+- 3 or more P2 issues exist
+
+### Review Output Format
+
+All reviews follow this standardized structure:
+
+```markdown
+## 🤖 AI Code Review
+
+### Summary
+[One-sentence overview]
+
+### Issues Found
+[Count] total issues: [X] P1 (blocking), [Y] P2 (should fix), [Z] P3 (nice to have)
+
+---
+
+❗ P1 — [Specific title]
+**File:** `path/to/file.ts:L42-L50`
+**Problem:** [What is wrong and WHY]
+**Fix:** [Exact suggestion]
+
+---
+
+### Review Decision
+✅ APPROVE / ❌ CHANGES REQUESTED
+
+### Quick Reference
+- P1: [title] • [title]
+- P2: [title] • [title] • [title]
+```
+
+### Posting Actual GitHub Reviews
+
+By default, AI reviews are posted as comments. To post as actual GitHub reviews (which appear in the PR's review section):
+
+```yaml
+workflows:
+  - name: review-prs
+    template: ai-pr-review
+    trigger:
+      event: pull_request.opened
+      repo: "my-org/my-repo"
+    params:
+      use_actual_review: true  # Requires gh-cli integration
+```
+
+**Note**: `use_actual_review` requires the `gh-cli` integration to be enabled. The `gh` CLI must be installed and authenticated (`gh auth login`).
 
 ### Cross-Source Workflows
 
