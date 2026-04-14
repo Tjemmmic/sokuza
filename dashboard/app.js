@@ -174,6 +174,7 @@ const libraryCategories = [
     { key: 'diagnostics', label: 'Diagnostics', icon: '🩺' },
     { key: 'research', label: 'Research & Experimentation', icon: '🧪' },
     { key: 'productivity', label: 'Productivity', icon: '⚡' },
+    { key: 'custom', label: 'Custom', icon: '🛠️' },
 ];
 
 const libraryItems = [
@@ -300,6 +301,8 @@ function confirm(msg) {
 
 // ─── Router ─────────────────────────────────────────────────────────────────
 function navigate(page) {
+    // Redirect legacy templates page to library
+    if (page === 'templates') page = 'library';
     currentPage = page;
     window.location.hash = page;
     $$('.nav-link').forEach((el) => el.classList.toggle('active', el.dataset.page === page));
@@ -334,7 +337,7 @@ async function renderPage() {
             case 'my-prs': await renderMyPrs(el); break;
             case 'issues': await renderIssues(el); break;
             case 'workflows': await renderWorkflows(el); break;
-            case 'templates': await renderTemplates(el); break;
+
             case 'library': await renderLibrary(el); break;
             case 'integrations': await renderIntegrations(el); break;
             case 'events': await renderEvents(el); break;
@@ -2418,127 +2421,599 @@ window.executeRun = async function () {
 };
 
 // ═════════════════════════════════════════════════════════════════════════════
-// TEMPLATES
+// VISUAL TEMPLATE BUILDER
 // ═════════════════════════════════════════════════════════════════════════════
-async function renderTemplates(el) {
-    const [tmplData, actData] = await Promise.all([api.get('/api/templates'), api.get('/api/actions')]);
-    templates = tmplData.templates || [];
-    availableActions = actData.actions || [];
 
-    el.innerHTML = `
-        <div class="page-header"><div class="page-header-left">
-            <h1 class="page-title">Templates</h1>
-            <p class="page-subtitle">${templates.length} template${templates.length !== 1 ? 's' : ''} available in templates/</p>
-        </div><div class="page-header-right">
-            <button class="btn btn-primary" onclick="openTemplateEditor()">+ New Template</button>
-        </div></div>
-        <div class="card-grid card-grid-3">
-            ${templates.map((t) => `<div class="card">
-                <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:14px">
-                    <div>
-                        <h3 style="font-size:16px;font-weight:600;margin-bottom:6px">${esc(t.name)}</h3>
-                        ${sourceBadge(t.trigger?.source ?? 'github')}
-                        <code style="font-size:11px;color:var(--text-muted);margin-left:6px">${esc(t.trigger?.event ?? '')}</code>
-                    </div>
-                    <div class="btn-group">
-                        <button class="btn btn-ghost btn-sm" onclick="previewTemplate('${esc(t.name)}')">Preview</button>
-                        <button class="btn btn-ghost btn-sm" onclick="openTemplateEditor('${esc(t.name)}')">Edit</button>
-                        <button class="btn btn-danger-outline btn-sm" onclick="deleteTemplate('${esc(t.name)}')">Delete</button>
-                        <button class="btn btn-primary btn-sm" onclick="useTemplate('${esc(t.name)}')">Use →</button>
-                    </div>
-                </div>
-                <div style="display:flex;flex-direction:column;gap:6px;margin-top:10px">
-                    ${(t.steps || []).map((s, i) => `<div style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:rgba(99,102,241,0.06);border-radius:6px;font-size:13px">
-                        <div class="step-num" style="width:20px;height:20px;font-size:10px">${i + 1}</div>
-                        <span>${esc(s.action)}</span>
-                        ${s.condition ? '<span class="badge badge-warning" style="font-size:9px;margin-left:auto">conditional</span>' : ''}
-                    </div>`).join('')}
-                </div>
-            </div>`).join('')}
-        </div>
-    `;
+let customTemplates = []; // loaded from /api/templates
+let builderState = null; // current builder form state
+
+const CLAUDE_TOOLS = ['Read', 'Write', 'Edit', 'MultiEdit', 'Grep', 'Glob', 'LS', 'Bash', 'TodoRead', 'TodoWrite', 'MultiTool'];
+
+function newBuilderState(existing) {
+    if (existing) {
+        // Parse existing template YAML content
+        const parsed = typeof existing.parsed === 'object' ? existing.parsed : {};
+        const trigger = parsed.trigger || {};
+        const steps = (parsed.steps || []).map((s, i) => ({
+            id: s.id || '',
+            action: s.action || 'log',
+            condition: s.condition || '',
+            params: s.params || {},
+        }));
+        return {
+            name: existing.name || '',
+            description: existing.description || '',
+            isEdit: true,
+            trigger: {
+                source: Array.isArray(trigger.source) ? trigger.source[0] : (trigger.source || 'github'),
+                event: Array.isArray(trigger.event) ? trigger.event.join(', ') : (trigger.event || ''),
+                repo: trigger.repo || '',
+                branch: trigger.branch || '',
+                author: trigger.author || '',
+                labels: trigger.labels ? trigger.labels.join(', ') : '',
+            },
+            steps,
+            inputs: parsed.inputs || [],
+        };
+    }
+    return {
+        name: '',
+        description: '',
+        isEdit: false,
+        trigger: { source: 'github', event: '', repo: '', branch: '', author: '', labels: '' },
+        steps: [{ id: '', action: 'log', condition: '', params: { message: 'Event received' } }],
+        inputs: [],
+    };
 }
 
-window.previewTemplate = function (templateName) {
-    const tmpl = templates.find(t => t.name === templateName);
-    if (!tmpl) return;
-    openModal(`Template: ${templateName}`, `
-        <pre class="yaml-preview" style="white-space:pre-wrap;max-height:400px;overflow:auto">${esc(tmpl.raw || JSON.stringify(tmpl, null, 2))}</pre>
+function builderGenerateYaml() {
+    const s = builderState;
+    if (!s) return '';
+    let y = '';
+    if (s.description) y += `# ${s.name}\n#\n# ${s.description}\n\n`;
+
+    // Trigger
+    y += 'trigger:\n';
+    y += `  source: ${s.trigger.source}\n`;
+    if (s.trigger.event) {
+        const events = s.trigger.event.split(',').map(e => e.trim()).filter(Boolean);
+        if (events.length === 1) {
+            y += `  event: ${events[0]}\n`;
+        } else if (events.length > 1) {
+            y += '  event:\n';
+            for (const e of events) y += `    - ${e}\n`;
+        }
+    }
+    if (s.trigger.repo) y += `  repo: "${s.trigger.repo}"\n`;
+    if (s.trigger.branch) y += `  branch: "${s.trigger.branch}"\n`;
+    if (s.trigger.author) y += `  author: "${s.trigger.author}"\n`;
+    if (s.trigger.labels) {
+        const labels = s.trigger.labels.split(',').map(l => l.trim()).filter(Boolean);
+        if (labels.length) {
+            y += '  labels:\n';
+            for (const l of labels) y += `    - "${l}"\n`;
+        }
+    }
+
+    // Inputs
+    if (s.inputs.length > 0) {
+        y += '\ninputs:\n';
+        for (const inp of s.inputs) {
+            y += `  - name: ${inp.name}\n`;
+            if (inp.label) y += `    label: "${inp.label}"\n`;
+            if (inp.type) y += `    type: ${inp.type}\n`;
+            if (inp.required) y += `    required: true\n`;
+            if (inp.default) y += `    default: "${inp.default}"\n`;
+        }
+    }
+
+    // Steps
+    y += '\nsteps:\n';
+    for (const step of s.steps) {
+        if (step.id) y += `  - id: ${step.id}\n    action: ${step.action}\n`;
+        else y += `  - action: ${step.action}\n`;
+        if (step.condition) y += `    condition: "${step.condition}"\n`;
+        const params = step.params || {};
+        const paramKeys = Object.keys(params).filter(k => params[k] !== undefined && params[k] !== '');
+        if (paramKeys.length > 0) {
+            y += '    params:\n';
+            for (const key of paramKeys) {
+                const val = params[key];
+                if (Array.isArray(val)) {
+                    y += `      ${key}:\n`;
+                    for (const v of val) y += `        - ${v}\n`;
+                } else if (typeof val === 'string' && val.includes('\n')) {
+                    y += `      ${key}: |\n`;
+                    for (const line of val.split('\n')) y += `        ${line}\n`;
+                } else if (typeof val === 'object') {
+                    y += `      ${key}: {}\n`;
+                } else {
+                    const needsQuote = typeof val === 'string' && (val.includes('{{') || val.includes(':') || val.includes('#'));
+                    y += `      ${key}: ${needsQuote ? `"${val}"` : val}\n`;
+                }
+            }
+        } else {
+            y += '    params: {}\n';
+        }
+    }
+
+    return y;
+}
+
+function getActionGroups() {
+    return [
+        { label: '🤖 AI', actions: ['ai-review', 'ai-agent'] },
+        { label: '🐙 GitHub', actions: ['github-clone-repo', 'github-fetch-diff', 'github-comment', 'github-fetch-reviews', 'github-create-pr', 'github-review'] },
+        { label: '💬 Slack', actions: ['slack-send-message', 'slack-react'] },
+        { label: '🔧 Utility', actions: ['log', 'webhook'] },
+    ];
+}
+
+function renderActionSelect(stepIdx, currentAction) {
+    const groups = getActionGroups();
+    let html = `<select class="form-input builder-action-select" id="step-action-${stepIdx}" onchange="builderChangeAction(${stepIdx}, this.value)" style="font-weight:600;color:var(--accent)">`;
+    for (const g of groups) {
+        html += `<optgroup label="${g.label}">`;
+        for (const a of g.actions) {
+            const doc = actionDocs[a];
+            html += `<option value="${esc(a)}" ${a === currentAction ? 'selected' : ''}>${esc(a)}${doc ? ' — ' + esc(doc.desc).substring(0, 40) : ''}</option>`;
+        }
+        html += '</optgroup>';
+    }
+    html += '</select>';
+    return html;
+}
+
+function renderParamField(stepIdx, paramDef, value) {
+    const id = `step-${stepIdx}-param-${paramDef.name}`;
+    const val = value !== undefined && value !== null ? value : (paramDef.default || '');
+
+    if (paramDef.name === '(none)') {
+        return `<div style="padding:8px 12px;background:rgba(34,197,94,0.06);border-radius:6px;font-size:12px;color:var(--text-muted);font-style:italic">
+            ✓ ${esc(paramDef.desc)}
+        </div>`;
+    }
+
+    // Special: allowed_tools for ai-agent
+    if (paramDef.name === 'allowed_tools') {
+        const selectedTools = Array.isArray(val) ? val : (typeof val === 'string' ? val.split(',').map(t => t.trim()) : ['Read', 'Grep', 'Glob', 'LS']);
+        return `<div class="form-group" style="margin-bottom:10px">
+            <label class="form-label" style="font-size:12px;font-weight:600;color:var(--text-secondary)">${esc(paramDef.name)} ${paramDef.required ? '<span style="color:#ef4444">*</span>' : ''}</label>
+            <div style="font-size:11px;color:var(--text-muted);margin-bottom:6px">${esc(paramDef.desc)}</div>
+            <div style="display:flex;flex-wrap:wrap;gap:6px" id="${id}">
+                ${CLAUDE_TOOLS.map(tool => `<label style="display:flex;align-items:center;gap:4px;padding:4px 10px;border-radius:6px;font-size:12px;cursor:pointer;background:${selectedTools.includes(tool) ? 'rgba(99,102,241,0.15)' : 'rgba(255,255,255,0.04)'};border:1px solid ${selectedTools.includes(tool) ? 'rgba(99,102,241,0.3)' : 'var(--border-color)'};transition:all 0.15s">
+                    <input type="checkbox" value="${tool}" ${selectedTools.includes(tool) ? 'checked' : ''} onchange="builderUpdateToolParam(${stepIdx})" style="width:14px;height:14px">
+                    ${esc(tool)}
+                </label>`).join('')}
+            </div>
+        </div>`;
+    }
+
+    // Special: level dropdown for log action
+    if (paramDef.name === 'level') {
+        return `<div class="form-group" style="margin-bottom:10px">
+            <label class="form-label" style="font-size:12px;font-weight:600;color:var(--text-secondary)">${esc(paramDef.name)}</label>
+            <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px">${esc(paramDef.desc)}</div>
+            <select class="form-input" id="${id}" onchange="builderUpdateParam(${stepIdx}, '${paramDef.name}', this.value)">
+                ${['info', 'warn', 'error', 'debug'].map(l => `<option value="${l}" ${val === l ? 'selected' : ''}>${l}</option>`).join('')}
+            </select>
+        </div>`;
+    }
+
+    // Special: provider dropdown for ai-review
+    if (paramDef.name === 'provider') {
+        return `<div class="form-group" style="margin-bottom:10px">
+            <label class="form-label" style="font-size:12px;font-weight:600;color:var(--text-secondary)">${esc(paramDef.name)}</label>
+            <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px">${esc(paramDef.desc)}</div>
+            <select class="form-input" id="${id}" onchange="builderUpdateParam(${stepIdx}, '${paramDef.name}', this.value)">
+                ${['auto', 'api', 'claude-code'].map(p => `<option value="${p}" ${val === p ? 'selected' : ''}>${p === 'auto' ? 'Auto-detect' : p}</option>`).join('')}
+            </select>
+        </div>`;
+    }
+
+    // Special: output_format dropdown for ai-agent
+    if (paramDef.name === 'output_format') {
+        return `<div class="form-group" style="margin-bottom:10px">
+            <label class="form-label" style="font-size:12px;font-weight:600;color:var(--text-secondary)">${esc(paramDef.name)}</label>
+            <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px">${esc(paramDef.desc)}</div>
+            <select class="form-input" id="${id}" onchange="builderUpdateParam(${stepIdx}, '${paramDef.name}', this.value)">
+                ${['text', 'json'].map(f => `<option value="${f}" ${val === f ? 'selected' : ''}>${f}</option>`).join('')}
+            </select>
+        </div>`;
+    }
+
+    // Special: method dropdown for webhook
+    if (paramDef.name === 'method') {
+        return `<div class="form-group" style="margin-bottom:10px">
+            <label class="form-label" style="font-size:12px;font-weight:600;color:var(--text-secondary)">${esc(paramDef.name)}</label>
+            <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px">${esc(paramDef.desc)}</div>
+            <select class="form-input" id="${id}" onchange="builderUpdateParam(${stepIdx}, '${paramDef.name}', this.value)">
+                ${['POST', 'PUT', 'PATCH', 'DELETE'].map(m => `<option value="${m}" ${val === m ? 'selected' : ''}>${m}</option>`).join('')}
+            </select>
+        </div>`;
+    }
+
+    // Prompt / body = large textarea
+    if (paramDef.name === 'prompt' || paramDef.name === 'body' || paramDef.name === 'text' || paramDef.name === 'system_prompt') {
+        return `<div class="form-group" style="margin-bottom:10px">
+            <label class="form-label" style="font-size:12px;font-weight:600;color:var(--text-secondary)">${esc(paramDef.name)} ${paramDef.required ? '<span style="color:#ef4444">*</span>' : ''}</label>
+            <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px">${esc(paramDef.desc)}</div>
+            <textarea class="form-input" id="${id}" rows="8" onchange="builderUpdateParam(${stepIdx}, '${paramDef.name}', this.value)" style="font-family:var(--font-mono);font-size:12px;min-height:120px;resize:vertical">${esc(String(val))}</textarea>
+        </div>`;
+    }
+
+    // Number fields
+    if (paramDef.type === 'number') {
+        return `<div class="form-group" style="margin-bottom:10px">
+            <label class="form-label" style="font-size:12px;font-weight:600;color:var(--text-secondary)">${esc(paramDef.name)} ${paramDef.required ? '<span style="color:#ef4444">*</span>' : ''}</label>
+            <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px">${esc(paramDef.desc)}</div>
+            <input type="number" class="form-input" id="${id}" value="${esc(String(val))}" placeholder="${esc(paramDef.default || '')}" onchange="builderUpdateParam(${stepIdx}, '${paramDef.name}', Number(this.value))" style="width:120px">
+        </div>`;
+    }
+
+    // Default: text input
+    return `<div class="form-group" style="margin-bottom:10px">
+        <label class="form-label" style="font-size:12px;font-weight:600;color:var(--text-secondary)">${esc(paramDef.name)} ${paramDef.required ? '<span style="color:#ef4444">*</span>' : ''}</label>
+        <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px">${esc(paramDef.desc)}</div>
+        <input type="text" class="form-input" id="${id}" value="${esc(String(val))}" placeholder="${esc(paramDef.default || '')}" onchange="builderUpdateParam(${stepIdx}, '${paramDef.name}', this.value)">
+    </div>`;
+}
+
+function renderStepCard(step, idx, total) {
+    const doc = actionDocs[step.action];
+    const paramDefs = doc?.params || [];
+
+    // Get interpolation hints from prior steps
+    const priorVars = [];
+    for (let i = 0; i < idx; i++) {
+        const ps = builderState.steps[i];
+        const sid = ps.id || `step_${i}`;
+        if (ps.action === 'github-clone-repo') priorVars.push({ path: `steps.${sid}.path`, desc: 'Cloned repo directory' });
+        if (ps.action === 'github-fetch-diff') priorVars.push({ path: `steps.${sid}.diff`, desc: 'PR diff content' });
+        if (ps.action === 'ai-review' || ps.action === 'ai-agent') {
+            priorVars.push({ path: `steps.${sid}.review`, desc: 'AI response text' });
+            priorVars.push({ path: `steps.${sid}.model`, desc: 'Model used' });
+            priorVars.push({ path: `steps.${sid}.provider`, desc: 'Provider used' });
+        }
+        if (ps.action === 'github-create-pr') {
+            priorVars.push({ path: `steps.${sid}.url`, desc: 'PR URL' });
+            priorVars.push({ path: `steps.${sid}.branch`, desc: 'Branch name' });
+        }
+        if (ps.action === 'github-fetch-reviews') priorVars.push({ path: `steps.${sid}.summary`, desc: 'Reviews summary' });
+    }
+
+    const varsHtml = priorVars.length > 0 ? `
+        <div style="margin-top:10px;padding:8px 10px;background:rgba(99,102,241,0.04);border-radius:6px;border:1px solid rgba(99,102,241,0.1)">
+            <div style="font-size:10px;font-weight:700;color:var(--accent);margin-bottom:4px;text-transform:uppercase;letter-spacing:0.5px">Available Variables</div>
+            ${priorVars.map(v => `<div style="font-size:11px;margin-bottom:2px"><code style="color:var(--accent);background:rgba(99,102,241,0.1);padding:1px 4px;border-radius:3px">{{${v.path}}}</code> <span style="color:var(--text-muted)">${esc(v.desc)}</span></div>`).join('')}
+        </div>
+    ` : '';
+
+    return `
+    <div class="builder-step-card" id="builder-step-${idx}">
+        <div class="builder-step-header">
+            <div style="display:flex;align-items:center;gap:10px;flex:1;min-width:0">
+                <div class="step-num" style="width:28px;height:28px;font-size:12px;flex-shrink:0">${idx + 1}</div>
+                ${renderActionSelect(idx, step.action)}
+            </div>
+            <div style="display:flex;gap:4px;flex-shrink:0">
+                <button class="btn btn-ghost btn-sm" onclick="builderMoveStep(${idx}, -1)" ${idx === 0 ? 'disabled' : ''} title="Move up">↑</button>
+                <button class="btn btn-ghost btn-sm" onclick="builderMoveStep(${idx}, 1)" ${idx === total - 1 ? 'disabled' : ''} title="Move down">↓</button>
+                <button class="btn btn-ghost btn-sm" onclick="builderDuplicateStep(${idx})" title="Duplicate">⧉</button>
+                <button class="btn btn-ghost btn-sm" style="color:#ef4444" onclick="builderRemoveStep(${idx})" ${total <= 1 ? 'disabled' : ''} title="Remove">✕</button>
+            </div>
+        </div>
+        ${doc ? `<div style="font-size:12px;color:var(--text-muted);margin-bottom:12px;padding-left:38px">${esc(doc.desc)}</div>` : ''}
+        <div class="builder-step-body">
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px">
+                <div class="form-group" style="margin-bottom:0">
+                    <label class="form-label" style="font-size:11px;font-weight:600;color:var(--text-muted)">STEP ID <span style="font-weight:400">(optional)</span></label>
+                    <input type="text" class="form-input" value="${esc(step.id || '')}" placeholder="e.g. clone, review" onchange="builderUpdateStepId(${idx}, this.value)" style="font-family:var(--font-mono);font-size:12px">
+                </div>
+                <div class="form-group" style="margin-bottom:0">
+                    <label class="form-label" style="font-size:11px;font-weight:600;color:var(--text-muted)">CONDITION <span style="font-weight:400">(optional)</span></label>
+                    <input type="text" class="form-input" value="${esc(step.condition || '')}" placeholder="e.g. {{steps.analysis.changes_needed}}" onchange="builderUpdateStepCondition(${idx}, this.value)" style="font-family:var(--font-mono);font-size:12px">
+                </div>
+            </div>
+            <div class="builder-params-section">
+                ${paramDefs.map(pd => renderParamField(idx, pd, step.params?.[pd.name])).join('')}
+            </div>
+            ${varsHtml}
+        </div>
+    </div>`;
+}
+
+function renderInputRow(inp, idx) {
+    return `<div style="display:grid;grid-template-columns:1fr 1fr 120px 60px 40px;gap:8px;align-items:end;margin-bottom:8px">
+        <div>
+            <label class="form-label" style="font-size:11px;color:var(--text-muted)">Name</label>
+            <input type="text" class="form-input" value="${esc(inp.name || '')}" onchange="builderUpdateInput(${idx}, 'name', this.value)" placeholder="param_name" style="font-size:12px">
+        </div>
+        <div>
+            <label class="form-label" style="font-size:11px;color:var(--text-muted)">Label</label>
+            <input type="text" class="form-input" value="${esc(inp.label || '')}" onchange="builderUpdateInput(${idx}, 'label', this.value)" placeholder="Display Label" style="font-size:12px">
+        </div>
+        <div>
+            <label class="form-label" style="font-size:11px;color:var(--text-muted)">Type</label>
+            <select class="form-input" onchange="builderUpdateInput(${idx}, 'type', this.value)" style="font-size:12px">
+                ${['text', 'textarea', 'number', 'boolean', 'select', 'github-pr', 'github-issue', 'github-repo'].map(t =>
+                    `<option value="${t}" ${inp.type === t ? 'selected' : ''}>${t}</option>`
+                ).join('')}
+            </select>
+        </div>
+        <div style="display:flex;align-items:center;gap:4px;padding-bottom:2px">
+            <input type="checkbox" ${inp.required ? 'checked' : ''} onchange="builderUpdateInput(${idx}, 'required', this.checked)" style="width:14px;height:14px">
+            <span style="font-size:11px;color:var(--text-muted)">Req</span>
+        </div>
+        <button class="btn btn-ghost btn-sm" style="color:#ef4444;padding:4px" onclick="builderRemoveInput(${idx})">✕</button>
+    </div>`;
+}
+
+function renderTemplateBuilder(el) {
+    const s = builderState;
+    const isGithub = ['github', 'gh-cli', 'github-poll'].includes(s.trigger.source);
+
+    // Get events for selected source
+    const sourceEvents = eventCatalog[s.trigger.source === 'gh-cli' ? 'github' : s.trigger.source === 'github-poll' ? 'github' : s.trigger.source] || [];
+
+    el.innerHTML = `
+    <div class="builder-container">
+        <div class="builder-header">
+            <div>
+                <h1 style="font-size:22px;font-weight:700;margin-bottom:4px">${s.isEdit ? '✏️ Edit' : '🛠️ Create'} Custom Recipe</h1>
+                <p style="font-size:13px;color:var(--text-muted)">Design your automation visually — no YAML needed</p>
+            </div>
+            <div style="display:flex;gap:8px">
+                <button class="btn btn-ghost" onclick="builderCancel()">Cancel</button>
+                <button class="btn btn-ghost" onclick="builderPreviewYaml()">Preview YAML</button>
+                <button class="btn btn-primary" onclick="builderSave()">💾 ${s.isEdit ? 'Update' : 'Create'} Recipe</button>
+            </div>
+        </div>
+
+        <!-- NAME & DESCRIPTION -->
+        <div class="builder-section">
+            <div class="builder-section-title">📝 Basics</div>
+            <div style="display:grid;grid-template-columns:1fr 2fr;gap:16px">
+                <div class="form-group">
+                    <label class="form-label">Recipe Name</label>
+                    <input type="text" class="form-input" id="builder-name" value="${esc(s.name)}" placeholder="my-custom-review" ${s.isEdit ? 'disabled style="opacity:0.6"' : ''} oninput="builderState.name=this.value" style="font-size:14px;font-weight:500">
+                    <div style="font-size:11px;color:var(--text-muted);margin-top:4px">Lowercase with dashes. Used as the template ID.</div>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Description</label>
+                    <input type="text" class="form-input" id="builder-desc" value="${esc(s.description)}" placeholder="What does this recipe do?" oninput="builderState.description=this.value" style="font-size:14px">
+                </div>
+            </div>
+        </div>
+
+        <!-- TRIGGER -->
+        <div class="builder-section">
+            <div class="builder-section-title">⚡ Trigger</div>
+            <div style="display:grid;grid-template-columns:1fr 2fr;gap:16px;margin-bottom:12px">
+                <div class="form-group">
+                    <label class="form-label">Source</label>
+                    <select class="form-input" id="builder-source" onchange="builderState.trigger.source=this.value;renderTemplateBuilder($('#content'))" style="font-size:14px">
+                        ${['github', 'gh-cli', 'github-poll', 'slack', 'cron', 'webhook', 'manual'].map(src =>
+                            `<option value="${src}" ${s.trigger.source === src ? 'selected' : ''}>${src}</option>`
+                        ).join('')}
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Event(s)</label>
+                    ${sourceEvents.length > 0 ? `
+                        <select class="form-input" id="builder-event-select" onchange="if(this.value){const curr=document.getElementById('builder-event').value;document.getElementById('builder-event').value=curr?(curr+', '+this.value):this.value;builderState.trigger.event=document.getElementById('builder-event').value;this.value='';}" style="font-size:13px;margin-bottom:6px">
+                            <option value="">+ Add event from list...</option>
+                            ${sourceEvents.map(e => `<option value="${esc(e.value)}">${esc(e.label)}</option>`).join('')}
+                        </select>
+                    ` : ''}
+                    <input type="text" class="form-input" id="builder-event" value="${esc(s.trigger.event)}" placeholder="e.g. pull_request.opened, push" oninput="builderState.trigger.event=this.value" style="font-family:var(--font-mono);font-size:13px">
+                    <div style="font-size:11px;color:var(--text-muted);margin-top:4px">Comma-separated for multiple events</div>
+                </div>
+            </div>
+            ${isGithub ? `
+            <div class="builder-filters-grid">
+                <div class="form-group">
+                    <label class="form-label" style="font-size:12px">Repository</label>
+                    <input type="text" class="form-input" value="${esc(s.trigger.repo)}" placeholder="owner/repo" oninput="builderState.trigger.repo=this.value" style="font-size:13px">
+                </div>
+                <div class="form-group">
+                    <label class="form-label" style="font-size:12px">Branch</label>
+                    <input type="text" class="form-input" value="${esc(s.trigger.branch)}" placeholder="main" oninput="builderState.trigger.branch=this.value" style="font-size:13px">
+                </div>
+                <div class="form-group">
+                    <label class="form-label" style="font-size:12px">Author</label>
+                    <input type="text" class="form-input" value="${esc(s.trigger.author)}" placeholder="github-username" oninput="builderState.trigger.author=this.value" style="font-size:13px">
+                </div>
+                <div class="form-group">
+                    <label class="form-label" style="font-size:12px">Labels</label>
+                    <input type="text" class="form-input" value="${esc(s.trigger.labels)}" placeholder="bug, urgent" oninput="builderState.trigger.labels=this.value" style="font-size:13px">
+                </div>
+            </div>
+            ` : ''}
+        </div>
+
+        <!-- STEPS -->
+        <div class="builder-section">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+                <div class="builder-section-title" style="margin-bottom:0">🔗 Steps Pipeline</div>
+                <span style="font-size:12px;color:var(--text-muted)">${s.steps.length} step${s.steps.length !== 1 ? 's' : ''}</span>
+            </div>
+            <div class="builder-steps-pipeline">
+                ${s.steps.map((step, i) => renderStepCard(step, i, s.steps.length)).join(`
+                    <div class="builder-step-connector"><div class="connector-line"></div><div class="connector-arrow">▼</div></div>
+                `)}
+            </div>
+            <button class="btn btn-ghost builder-add-step-btn" onclick="builderAddStep()">
+                + Add Step
+            </button>
+        </div>
+
+        <!-- INPUTS -->
+        <div class="builder-section">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+                <div>
+                    <div class="builder-section-title" style="margin-bottom:2px">📥 Inputs <span style="font-weight:400;color:var(--text-muted);font-size:12px">(optional)</span></div>
+                    <div style="font-size:12px;color:var(--text-muted)">Define inputs for manual-trigger workflows. Users fill these before running.</div>
+                </div>
+                <button class="btn btn-ghost btn-sm" onclick="builderAddInput()">+ Add Input</button>
+            </div>
+            ${s.inputs.length > 0 ? `
+                <div class="builder-inputs-list">
+                    ${s.inputs.map((inp, i) => renderInputRow(inp, i)).join('')}
+                </div>
+            ` : `
+                <div style="padding:16px;text-align:center;color:var(--text-muted);font-size:13px;border:1px dashed var(--border-color);border-radius:8px">
+                    No inputs defined. Click "+ Add Input" to add form fields for manual runs.
+                </div>
+            `}
+        </div>
+    </div>`;
+}
+
+// ─── Builder Actions ────────────────────────────────────────────────────────
+
+window.builderChangeAction = function (stepIdx, action) {
+    builderState.steps[stepIdx].action = action;
+    builderState.steps[stepIdx].params = {};
+    renderTemplateBuilder($('#content'));
+};
+
+window.builderUpdateParam = function (stepIdx, paramName, value) {
+    if (!builderState.steps[stepIdx].params) builderState.steps[stepIdx].params = {};
+    builderState.steps[stepIdx].params[paramName] = value;
+};
+
+window.builderUpdateToolParam = function (stepIdx) {
+    const container = document.getElementById(`step-${stepIdx}-param-allowed_tools`);
+    if (!container) return;
+    const tools = [...container.querySelectorAll('input[type=checkbox]:checked')].map(cb => cb.value);
+    builderState.steps[stepIdx].params.allowed_tools = tools;
+};
+
+window.builderUpdateStepId = function (stepIdx, value) {
+    builderState.steps[stepIdx].id = value;
+};
+
+window.builderUpdateStepCondition = function (stepIdx, value) {
+    builderState.steps[stepIdx].condition = value;
+};
+
+window.builderMoveStep = function (idx, dir) {
+    const steps = builderState.steps;
+    const target = idx + dir;
+    if (target < 0 || target >= steps.length) return;
+    [steps[idx], steps[target]] = [steps[target], steps[idx]];
+    renderTemplateBuilder($('#content'));
+};
+
+window.builderDuplicateStep = function (idx) {
+    const step = builderState.steps[idx];
+    builderState.steps.splice(idx + 1, 0, {
+        id: step.id ? step.id + '_copy' : '',
+        action: step.action,
+        condition: step.condition,
+        params: JSON.parse(JSON.stringify(step.params || {})),
+    });
+    renderTemplateBuilder($('#content'));
+};
+
+window.builderRemoveStep = function (idx) {
+    if (builderState.steps.length <= 1) return;
+    builderState.steps.splice(idx, 1);
+    renderTemplateBuilder($('#content'));
+};
+
+window.builderAddStep = function () {
+    builderState.steps.push({ id: '', action: 'log', condition: '', params: { message: '' } });
+    renderTemplateBuilder($('#content'));
+    // Scroll to the new step
+    setTimeout(() => {
+        const el = document.getElementById(`builder-step-${builderState.steps.length - 1}`);
+        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }, 100);
+};
+
+window.builderAddInput = function () {
+    builderState.inputs.push({ name: '', label: '', type: 'text', required: false, default: '' });
+    renderTemplateBuilder($('#content'));
+};
+
+window.builderRemoveInput = function (idx) {
+    builderState.inputs.splice(idx, 1);
+    renderTemplateBuilder($('#content'));
+};
+
+window.builderUpdateInput = function (idx, field, value) {
+    builderState.inputs[idx][field] = value;
+};
+
+window.builderPreviewYaml = function () {
+    const yaml = builderGenerateYaml();
+    openModal('Generated YAML Preview', `
+        <pre style="background:var(--bg-secondary);padding:16px;border-radius:8px;font-size:12px;overflow:auto;max-height:500px;border:1px solid var(--border-color);white-space:pre-wrap;font-family:var(--font-mono)">${esc(yaml)}</pre>
     `, `
         <button class="btn btn-ghost" onclick="closeModal()">Close</button>
-        <button class="btn btn-ghost" onclick="closeModal();openTemplateEditor('${esc(templateName)}')">Edit</button>
-        <button class="btn btn-primary" onclick="closeModal();useTemplate('${esc(templateName)}')">Use This Template</button>
+        <button class="btn btn-ghost" onclick="navigator.clipboard.writeText(document.querySelector('#modal-body pre').innerText);toast('Copied to clipboard')">Copy</button>
     `);
 };
 
-window.openTemplateEditor = function (existingName) {
-    const isEdit = !!existingName;
-    const tmpl = isEdit ? templates.find(t => t.name === existingName) : null;
-    const content = tmpl?.raw || `# ${isEdit ? existingName : 'New Template'}\n#\n# Describe your template\n\ntrigger:\n  source: github\n  event: pull_request.opened\n\nsteps:\n  - action: log\n    params:\n      message: "Event received"\n`;
-    const name = existingName || '';
-
-    openModal(isEdit ? `Edit Template: ${existingName}` : 'Create Template', `
-        <div class="form-group" style="margin-bottom:16px">
-            <label class="form-label">Template Name</label>
-            <input type="text" class="form-input" id="tmpl-name" value="${esc(name)}" placeholder="my-template" ${isEdit ? 'disabled style="opacity:0.6"' : ''}>
-            <div style="font-size:11px;color:var(--text-muted);margin-top:4px">Saved as templates/{name}.yaml</div>
-        </div>
-        <div class="form-group">
-            <label class="form-label">Template YAML</label>
-            <textarea class="form-textarea" id="tmpl-content" rows="18" style="font-family:var(--font-mono);font-size:12px;min-height:300px">${esc(content)}</textarea>
-        </div>
-    `, `
-        <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
-        <button class="btn btn-primary" onclick="saveTemplate('${esc(existingName || '')}')">${isEdit ? 'Update' : 'Create'} Template</button>
-    `);
+window.builderCancel = function () {
+    builderState = null;
+    navigate('library');
 };
 
-window.saveTemplate = async function (existingName) {
-    const name = existingName || $('#tmpl-name')?.value?.trim();
-    const content = $('#tmpl-content')?.value;
-    if (!name) { toast('Template name is required', 'error'); return; }
-    if (!content) { toast('Template content is required', 'error'); return; }
+window.builderSave = async function () {
+    const s = builderState;
+    if (!s.name?.trim()) { toast('Recipe name is required', 'error'); document.getElementById('builder-name')?.focus(); return; }
+    if (!s.trigger.event?.trim() && s.trigger.source !== 'manual') { toast('At least one trigger event is required', 'error'); return; }
+    if (s.steps.length === 0) { toast('At least one step is required', 'error'); return; }
+
+    const yaml = builderGenerateYaml();
+    const name = s.name.trim().replace(/[^a-zA-Z0-9_-]/g, '-');
 
     try {
-        if (existingName) {
-            await api.put(`/api/templates/${encodeURIComponent(existingName)}`, { content });
-            toast(`Template "${name}" updated`);
+        if (s.isEdit) {
+            await api.put(`/api/templates/${encodeURIComponent(name)}`, { content: yaml });
+            toast(`Recipe "${name}" updated`);
         } else {
-            await api.post('/api/templates', { name, content });
-            toast(`Template "${name}" created`);
+            await api.post('/api/templates', { name, content: yaml });
+            toast(`Recipe "${name}" created`);
         }
-        closeModal();
-        navigate('templates');
+        builderState = null;
+        libraryActiveCategory = 'custom';
+        navigate('library');
     } catch (err) {
-        toast('Failed to save template: ' + (err.message || 'Unknown error'), 'error');
+        toast('Failed to save recipe: ' + (err.message || 'Unknown error'), 'error');
     }
 };
 
-window.deleteTemplate = async function (name) {
-    if (!(await confirm(`Delete template <strong>"${esc(name)}"</strong>?<br><span style="font-size:12px;color:var(--text-muted)">This cannot be undone.</span>`))) return;
+window.openTemplateBuilder = function (existingName) {
+    if (existingName) {
+        const tmpl = customTemplates.find(t => t.name === existingName);
+        if (!tmpl) { toast('Template not found', 'error'); return; }
+        // Parse the raw YAML
+        let parsed = {};
+        try {
+            // Simple YAML -> object (we'll use the raw content for editing)
+            parsed = tmpl.parsed || {};
+        } catch { }
+        builderState = newBuilderState({ name: tmpl.name, parsed: { trigger: tmpl.trigger, steps: tmpl.steps, inputs: tmpl.inputs }, description: '' });
+    } else {
+        builderState = newBuilderState();
+    }
+    // Render builder instead of library
+    renderTemplateBuilder($('#content'));
+};
+
+window.deleteCustomTemplate = async function (name) {
+    if (!(await confirm(`Delete custom recipe <strong>"${esc(name)}"</strong>?<br><span style="font-size:12px;color:var(--text-muted)">This cannot be undone.</span>`))) return;
     try {
         await api.del(`/api/templates/${encodeURIComponent(name)}`);
-        toast(`Template "${name}" deleted`);
-        navigate('templates');
+        toast(`Recipe "${name}" deleted`);
+        navigate('library');
     } catch (err) {
-        toast('Failed to delete template: ' + (err.message || 'Unknown error'), 'error');
+        toast('Failed to delete recipe: ' + (err.message || 'Unknown error'), 'error');
     }
-};
-
-window.useTemplate = function (templateName) {
-    const tmpl = templates.find((t) => t.name === templateName);
-    if (!tmpl) return;
-    // Open editor with template data pre-filled
-    const fakeWf = {
-        name: `my-${templateName}`,
-        template: templateName,
-        trigger: {
-            source: ensureArray(tmpl.trigger?.source || 'github'),
-            event: ensureArray(tmpl.trigger?.event || ''),
-        },
-        steps: [],
-    };
-    openFullEditor(null, fakeWf);
 };
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -2641,12 +3116,57 @@ function renderLibraryCard(item) {
 }
 
 async function renderLibrary(el) {
+    // If builder is active, render it instead
+    if (builderState) { renderTemplateBuilder(el); return; }
+
+    // Load custom templates
+    try {
+        const tmplData = await api.get('/api/templates');
+        customTemplates = tmplData.templates || [];
+    } catch { customTemplates = []; }
+
     const filtered = getFilteredLibraryItems();
     const catCounts = {};
     for (const cat of libraryCategories) {
-        catCounts[cat.key] = cat.key === 'all' ? libraryItems.length : libraryItems.filter(i => i.category === cat.key).length;
+        if (cat.key === 'all') catCounts[cat.key] = libraryItems.length + customTemplates.length;
+        else if (cat.key === 'custom') catCounts[cat.key] = customTemplates.length;
+        else catCounts[cat.key] = libraryItems.filter(i => i.category === cat.key).length;
     }
     const installedCount = deck.length;
+
+    // Custom template cards
+    const customCards = (libraryActiveCategory === 'custom' || libraryActiveCategory === 'all')
+        ? customTemplates.filter(t => {
+            if (!librarySearchQuery.trim()) return true;
+            const q = librarySearchQuery.toLowerCase().trim();
+            return t.name.toLowerCase().includes(q);
+        }).map(t => `
+            <div class="library-card custom-template-card">
+                <div class="library-card-header">
+                    <div class="library-card-icon">🛠️</div>
+                    <div class="library-card-meta">
+                        <h3 class="library-card-title">${esc(t.name)}</h3>
+                        <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:4px">
+                            <span class="badge" style="background:rgba(168,85,247,0.15);color:#a855f7;border:1px solid rgba(168,85,247,0.3);font-size:10px">custom</span>
+                            ${sourceBadge(t.trigger?.source ?? 'github')}
+                            ${t.trigger?.event ? `<code style="font-size:10px;color:var(--text-muted)">${esc(Array.isArray(t.trigger.event) ? t.trigger.event.join(', ') : t.trigger.event)}</code>` : ''}
+                        </div>
+                    </div>
+                </div>
+                <div class="library-card-steps">
+                    ${(t.steps || []).map((s, i) => `<div style="display:flex;align-items:center;gap:6px;font-size:12px;padding:3px 0">
+                        <span class="step-num" style="width:18px;height:18px;font-size:9px">${i + 1}</span>
+                        <span style="color:var(--text-secondary)">${esc(s.action)}</span>
+                        ${s.condition ? '<span class="badge badge-warning" style="font-size:8px;padding:1px 4px">if</span>' : ''}
+                    </div>`).join('')}
+                </div>
+                <div class="library-card-footer" style="margin-top:auto;padding-top:12px;border-top:1px solid var(--border-color);display:flex;justify-content:flex-end;gap:6px">
+                    <button class="btn btn-ghost btn-sm" onclick="openTemplateBuilder('${esc(t.name)}')">✏️ Edit</button>
+                    <button class="btn btn-ghost btn-sm" style="color:#ef4444" onclick="deleteCustomTemplate('${esc(t.name)}')">🗑 Delete</button>
+                </div>
+            </div>
+        `).join('')
+        : '';
 
     el.innerHTML = `
     <div class="page-header">
@@ -2656,6 +3176,7 @@ async function renderLibrary(el) {
         </div>
         <div style="display:flex;gap:8px;align-items:center">
             <span class="badge" style="background:rgba(34,197,94,0.15);color:#22c55e;border:1px solid rgba(34,197,94,0.3);font-size:12px;padding:4px 10px">${installedCount} installed</span>
+            <button class="btn btn-primary" onclick="openTemplateBuilder()" id="create-custom-btn">🛠️ Create Custom Recipe</button>
         </div>
     </div>
 
@@ -2677,13 +3198,21 @@ async function renderLibrary(el) {
     </div>
 
     <div class="library-grid">
-        ${filtered.length > 0 ? filtered.map(renderLibraryCard).join('') :
-            `<div class="empty-state" style="grid-column:1/-1">
+        ${libraryActiveCategory === 'custom' ? '' : (filtered.length > 0 ? filtered.map(renderLibraryCard).join('') : '')}
+        ${customCards}
+        ${filtered.length === 0 && !customCards ? `
+            <div class="empty-state" style="grid-column:1/-1">
                 <div class="empty-icon">🔍</div>
                 <p class="empty-text">No workflows match "${esc(librarySearchQuery)}"</p>
                 <button class="btn btn-ghost" onclick="librarySearchQuery='';libraryActiveCategory='all';renderLibrary($('#content'))">Clear Filters</button>
-            </div>`
-        }
+            </div>` : ''}
+        ${libraryActiveCategory === 'custom' && customTemplates.length === 0 ? `
+            <div class="empty-state" style="grid-column:1/-1">
+                <div class="empty-icon">🛠️</div>
+                <p class="empty-text">No custom recipes yet</p>
+                <p style="color:var(--text-muted);font-size:13px;margin-bottom:16px">Create your own automation from scratch using the visual builder</p>
+                <button class="btn btn-primary" onclick="openTemplateBuilder()">🛠️ Create Custom Recipe</button>
+            </div>` : ''}
     </div>`;
 
     // Focus search if user was typing
