@@ -23,6 +23,7 @@ import { githubCommentAction } from './actions/comment.js';
 import { githubCloneRepoAction } from './actions/clone-repo.js';
 import { githubCreatePrAction } from './actions/create-pr.js';
 import { githubFetchReviewsAction } from './actions/github-fetch-reviews.js';
+import { githubCreateReviewAction } from './actions/create-review.js';
 
 interface GitHubConfig {
     webhookSecret: string;
@@ -39,6 +40,7 @@ export class GitHubIntegration implements Integration {
         'github-clone-repo': githubCloneRepoAction,
         'github-create-pr': githubCreatePrAction,
         'github-fetch-reviews': githubFetchReviewsAction,
+        'github-create-review': githubCreateReviewAction,
     };
 
     private config: GitHubConfig = { webhookSecret: '' };
