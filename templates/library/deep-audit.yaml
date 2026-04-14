@@ -43,7 +43,7 @@ steps:
         {{#if inputs.focus}}Focus area: {{inputs.focus}}{{/if}}
 
         ## Step 1: Detect Project Type
-        Auto-detect from the codebase:
+        Auto-detect from codebase:
         - **Rust** (Cargo.toml) → unsafe, error handling, API design, performance
         - **TypeScript/React** (package.json with react) → component design, state management, bundle size
         - **TypeScript/Node** (package.json without react) → error handling, types, async patterns
@@ -73,8 +73,11 @@ steps:
         ## Step 3: Synthesize
 
         1. Deduplicate findings
-        2. Rank by severity: CRITICAL > HIGH > MEDIUM > LOW
-        3. Score the code X/10 with per-dimension breakdown
+        2. Map findings to P1/P2/P3 priority system:
+           - **P1** (blocking): Bugs, crashes, security vulns, data loss, broken contracts
+           - **P2** (should fix): Missing error handling, untested logic, perf issues, validation gaps
+           - **P3** (nice to have): Readability, naming, minor duplication, docs
+        3. Score code X/10 with per-dimension breakdown
         4. List top 5 actionable fixes
 
         ## Rules
@@ -82,10 +85,12 @@ steps:
         - Cite specific file:line for every finding
         - Do not suggest stylistic changes unless they affect correctness
         - Keep findings succinct — one sentence per issue
-        - If genuinely good code, say so, but still find the edges
+        - If genuinely good code, say so, but still find edges
 
         ## Output Format
-        ```
+
+        Start with project info and score:
+
         PROJECT: [detected type]
         SCORE: X/10
 
@@ -94,18 +99,40 @@ steps:
           Architecture & Quality: X/10
           Standards & Style:      X/10
 
-        CRITICAL:
-        - [finding with file:line]
+        ---
 
-        HIGH:
-        - [finding with file:line]
+        Then list findings with standardized format:
 
-        MEDIUM:
-        - [finding with file:line]
+        ### Summary
+        [One-sentence overview of findings]
 
-        TOP 5 FIXES:
-        1. [specific actionable fix]
+        ### Issues Found
+        [Count] total issues: [X] P1 (blocking), [Y] P2 (should fix), [Z] P3 (nice to have)
+
+        ---
+
+        Then for each issue found, output exactly this format:
+
         ```
+        ❗/⚠️/ℹ️ P{1-3} — [Specific, descriptive title]
+
+        **File:** `path/to/file.ts:L42-L50`
+
+        **Problem:** [What is wrong and WHY it's a problem. Be concrete.]
+
+        **Fix:** [Exact suggestion — show code if possible]
+
+        ---
+        ```
+
+        End with:
+
+        ### TOP 5 FIXES
+        1. [specific actionable fix]
+        2. [specific actionable fix]
+        3. [specific actionable fix]
+        4. [specific actionable fix]
+        5. [specific actionable fix]
 
   - action: github-comment
     condition: "{{steps.audit.review}}"

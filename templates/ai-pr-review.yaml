@@ -1,7 +1,7 @@
 # AI-Powered PR Review
 #
-# Clones the repo, fetches the PR diff, sends both to Claude for a
-# contextual review, and posts a comment.
+# Clones repo, fetches the PR diff, sends both to Claude for a
+# contextual review, and posts a comment or review.
 # Works with both the Anthropic API (ANTHROPIC_API_KEY) and Claude Code CLI.
 #
 # Usage:
@@ -10,6 +10,12 @@
 #     trigger:
 #       event: pull_request.opened
 #       repo: "my-org/my-repo"
+#     params:
+#       use_actual_review: true  # Post as actual GitHub review (default: false)
+#
+# Note: When use_actual_review is true, you must also enable
+# gh-cli integration in your config (requires gh CLI to be
+# installed and authenticated).
 
 trigger:
   source: github
@@ -86,7 +92,17 @@ steps:
 
         ## Output Format
 
-        For each issue found, output exactly this format:
+        Start with a summary:
+
+        ### Summary
+        [One-sentence overview of findings]
+
+        ### Issues Found
+        [Count] total issues: [X] P1 (blocking), [Y] P2 (should fix), [Z] P3 (nice to have)
+
+        ---
+
+        Then for each issue found, output exactly this format:
 
         ```
         ❗/⚠️/ℹ️ P{1-3} — [Specific, descriptive title]
@@ -114,7 +130,11 @@ steps:
             cumulative risk means this PR needs another pass)
           - A P2 issue indicates missing tests for significant new logic
 
-        After the decision, list a one-line summary of each issue for quick reference.
+        After the decision, list a one-line summary of each issue for quick reference:
+
+        ### Quick Reference
+        - P1: [title] • [title]
+        - P2: [title] • [title] • [title]
 
 
         ## Rules
@@ -129,6 +149,7 @@ steps:
         - No `Co-Authored-By` or AI attribution in the output.
         - If genuinely no issues: output "No issues found." then `# ✅ APPROVE`
 
+  # Fallback: Post as comment (default behavior for backward compatibility)
   - action: github-comment
     params:
       body: |

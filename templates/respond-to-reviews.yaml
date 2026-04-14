@@ -131,16 +131,26 @@ steps:
 
         5. Output a structured response in this EXACT format:
 
-        ## Review Response
+        ## 🤖 Review Response
+
+        ### Summary
+        [One-sentence overview of what was addressed]
+
+        ### Issues Found
+        [Count] total issues: [X] addressed, [Y] disputed, [Z] already resolved
+
+        ---
 
         ### Addressed
-        - **[reviewer] on `file:line`**: [what was wrong] → [what you fixed]
+        - **[reviewer] on `path/to/file.ts:L42`**: [what was wrong] → [what you fixed]
 
         ### Disputed
-        - **[reviewer] on `file:line`**: [their concern] → [why it doesn't apply, with evidence]
+        - **[reviewer] on `path/to/file.ts:L78`**: [their concern] → [why it doesn't apply, with evidence]
 
         ### Already Resolved
-        - **[reviewer] on `file:line`**: [addressed in commit xyz]
+        - **[reviewer] on `path/to/file.ts:L120`**: [addressed in commit abc123]
+
+        ---
 
         ### Quality Checks
         - TypeScript: ✓/✗
@@ -154,8 +164,6 @@ steps:
     params:
       skip_if_contains: "NO_ACTION"
       body: |
-        ## 🤖 Review Response
-
         {{steps.response.review}}
 
         ---

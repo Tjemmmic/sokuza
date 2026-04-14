@@ -1,6 +1,6 @@
 # Security Audit
 #
-# Clones the repo, runs a comprehensive security analysis using Claude Code
+# Clones repo, runs a comprehensive security analysis using Claude Code
 # with tool access, and posts findings as a PR comment.
 #
 # Usage:
@@ -58,14 +58,41 @@ steps:
            - Overly permissive CORS
            - Stack traces in production error responses
 
+        ## Priority Levels
+
+        - **P1** (blocking): Security vulnerabilities that WILL cause issues:
+          secrets in code, SQL injection, XSS, auth bypass, data exposure
+
+        - **P2** (should fix): Security risks that could cause issues:
+          missing input validation, insecure defaults, weak auth checks
+
+        - **P3** (nice to have): Security best practices:
+          minor security improvements, documentation gaps, config improvements
+
         ## Output Format
 
-        For each finding:
+        Start with a summary:
+
+        ### Summary
+        [One-sentence overview of findings]
+
+        ### Issues Found
+        [Count] total issues: [X] P1 (blocking), [Y] P2 (should fix), [Z] P3 (nice to have)
+
+        ---
+
+        Then for each issue found, output exactly this format:
+
         ```
-        🔴/🟡/🟢 [SEVERITY] — [Title]
-        File: path/to/file.ts:L42
-        Risk: [What could go wrong]
-        Fix: [How to fix it]
+        ❗/⚠️/ℹ️ P{1-3} — [Specific, descriptive title]
+
+        **File:** `path/to/file.ts:L42`
+
+        **Risk:** [What could go wrong and impact]
+
+        **Fix:** [How to fix it]
+
+        ---
         ```
 
         End with a summary: X critical, Y warnings, Z informational.
