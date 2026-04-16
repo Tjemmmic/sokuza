@@ -544,6 +544,54 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
         return { deliveries: deps.getWebhookDeliveries(workflow) };
     });
 
+    // ─── AI Provider Test ────────────────────────────────────────────────
+
+    server.post('/api/ai/test', async (request, reply) => {
+        const body = (request.body ?? {}) as { provider?: string; prompt?: string };
+        const config = deps.getConfig();
+        if (!config.ai) {
+            return reply.status(503).send({ error: 'No AI providers configured' });
+        }
+
+        const { resolveProvider, runCompletion } = await import('../core/ai-providers.js');
+
+        let provider;
+        try {
+            provider = resolveProvider(config.ai, body.provider);
+        } catch (err: any) {
+            return reply.status(400).send({ error: err.message });
+        }
+
+        const prompt = body.prompt ?? 'Reply with exactly: OK';
+        const start = Date.now();
+
+        try {
+            const result = await runCompletion(provider, {
+                systemPrompt: 'You are a test assistant. Follow instructions exactly.',
+                userMessage: prompt,
+                logger,
+            });
+
+            return {
+                ok: true,
+                provider: provider.name,
+                kind: provider.kind,
+                model: result.model,
+                response: result.text.slice(0, 500),
+                durationMs: Date.now() - start,
+                usage: result.usage,
+            };
+        } catch (err: any) {
+            return {
+                ok: false,
+                provider: provider.name,
+                kind: provider.kind,
+                error: err.message,
+                durationMs: Date.now() - start,
+            };
+        }
+    });
+
     // ─── Queue ──────────────────────────────────────────────────────────
 
     server.get('/api/queue', async () => {
