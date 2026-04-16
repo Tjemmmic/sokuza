@@ -65,11 +65,7 @@ export class WorkflowQueue {
 
         if (resolvedConfig.dedup !== 'none') {
             const existing = this.applyDedup(job);
-            if (!existing) {
-                this.notify(job);
-                return job;
-            }
-            if (existing.status === 'deduped') {
+            if (existing && existing.status === 'deduped') {
                 this.notify(existing);
                 return existing;
             }
@@ -81,8 +77,6 @@ export class WorkflowQueue {
             'Job enqueued',
         );
         this.notify(job);
-
-        this.scheduleTick();
 
         return job;
     }
@@ -134,7 +128,6 @@ export class WorkflowQueue {
         this.insertByPriority(job);
         this.notify(job);
         this.logger.info({ jobId: job.id, workflow: job.workflow.name }, 'Job retried');
-        this.scheduleTick();
         return true;
     }
 
@@ -211,34 +204,6 @@ export class WorkflowQueue {
 
     // ─── Internal ─────────────────────────────────────────────────────────
 
-    private tickScheduled = false;
-
-    private scheduleTick(): void {
-        if (this.tickScheduled) return;
-        this.tickScheduled = true;
-        queueMicrotask(() => {
-            this.tickScheduled = false;
-            this.tick();
-        });
-    }
-
-    private tick(): void {
-        while (this.concurrencyCount < this.maxConcurrency && this.queue.length > 0) {
-            const job = this.queue[0];
-            const jobConcurrency = job.resolvedConfig.concurrency;
-
-            const sameWorkflowRunning = this.countRunningByWorkflow(job.workflow.name);
-            if (sameWorkflowRunning >= jobConcurrency) break;
-
-            this.queue.shift();
-            this.startJob(job);
-        }
-
-        if (this.queue.length > 0 && this.concurrencyCount < this.maxConcurrency) {
-            setTimeout(() => this.tick(), 50);
-        }
-    }
-
     private async startJob(job: QueueJob): Promise<void> {
         job.status = 'running';
         job.startedAt = new Date().toISOString();
@@ -267,12 +232,32 @@ export class WorkflowQueue {
 
     // Called by the engine to run a job's workflow. Separated from startJob
     // so the engine injects the real action registry.
+    /** Check if a queued job can start based on concurrency limits. */
+    canStart(job: QueueJob): boolean {
+        if (job.status !== 'queued') return false;
+        if (this.concurrencyCount >= this.maxConcurrency) return false;
+        const sameWorkflowRunning = this.countRunningByWorkflow(job.workflow.name);
+        return sameWorkflowRunning < job.resolvedConfig.concurrency;
+    }
+
+    /**
+     * Called by the engine to start executing a queued job.
+     * Handles lifecycle: queued → running → completed/failed.
+     */
     async runJob(
         job: QueueJob,
         actions: Map<string, ActionHandler>,
         integrationConfigs: Record<string, IntegrationConfig>,
         ai: AIProviderRegistry | undefined,
     ): Promise<void> {
+        if (job.status === 'deduped') return;
+
+        // Remove from queue and start
+        const idx = this.queue.findIndex((j) => j.id === job.id);
+        if (idx !== -1) this.queue.splice(idx, 1);
+
+        await this.startJob(job);
+
         const ac = this.abortControllers.get(job.id);
         const signal = ac?.signal;
 
@@ -308,8 +293,6 @@ export class WorkflowQueue {
                     'Job finished',
                 );
             }
-
-            this.scheduleTick();
         }
     }
 
@@ -327,7 +310,6 @@ export class WorkflowQueue {
             job.startedAt = undefined;
             this.insertByPriority(job);
             this.notify(job);
-            this.scheduleTick();
         }, delay);
         this.retryTimers.set(job.id, timer);
     }

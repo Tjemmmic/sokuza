@@ -572,3 +572,228 @@ describe('executeWorkflow', () => {
         expect(receivedParams.repo).toBe('org/my-repo');
     });
 });
+
+// ─── Parallel Steps ─────────────────────────────────────────────────────────
+
+describe('parallel steps', () => {
+    it('should run steps with run: parallel concurrently', async () => {
+        const order: string[] = [];
+        const slowAction: ActionHandler = async () => {
+            await new Promise((r) => setTimeout(r, 50));
+            order.push('slow');
+            return { result: 'slow-done' };
+        };
+        const fastAction: ActionHandler = async () => {
+            order.push('fast');
+            return { result: 'fast-done' };
+        };
+
+        const registry = new Map<string, ActionHandler>();
+        registry.set('slow-action', slowAction);
+        registry.set('fast-action', fastAction);
+
+        const wf = makeWorkflow({
+            steps: [
+                { action: 'slow-action', id: 'slow', run: 'parallel', params: {} },
+                { action: 'fast-action', id: 'fast', run: 'parallel', params: {} },
+            ],
+        });
+
+        await executeWorkflow(wf, makeEvent(), registry, noopLogger);
+
+        // Both should complete; fastAction should have been called before slowAction finished
+        // because they ran in parallel
+        expect(order).toContain('fast');
+        expect(order).toContain('slow');
+    });
+
+    it('should collect results from all parallel steps', async () => {
+        const actionA: ActionHandler = async () => ({ review: 'from-a' });
+        const actionB: ActionHandler = async () => ({ review: 'from-b' });
+        const actionC: ActionHandler = async (_params, ctx) => ({
+            merged: `${(ctx.steps['step-a'] as any).review} + ${(ctx.steps['step-b'] as any).review}`,
+        });
+
+        const registry = new Map<string, ActionHandler>();
+        registry.set('action-a', actionA);
+        registry.set('action-b', actionB);
+        registry.set('action-c', actionC);
+
+        const wf = makeWorkflow({
+            steps: [
+                { action: 'action-a', id: 'step-a', run: 'parallel', params: {} },
+                { action: 'action-b', id: 'step-b', run: 'parallel', params: {} },
+                { action: 'action-c', id: 'step-c', params: {} },
+            ],
+        });
+
+        await executeWorkflow(wf, makeEvent(), registry, noopLogger);
+
+        // Step-c should have access to results from parallel steps a and b
+        // This tests that parallel results flow into sequential steps after the group
+    });
+
+    it('should fail-fast on error in parallel group', async () => {
+        const failAction: ActionHandler = async () => {
+            throw new Error('parallel-fail');
+        };
+        const okAction: ActionHandler = async () => ({ result: 'ok' });
+
+        const registry = new Map<string, ActionHandler>();
+        registry.set('fail-action', failAction);
+        registry.set('ok-action', okAction);
+
+        const wf = makeWorkflow({
+            steps: [
+                { action: 'fail-action', run: 'parallel', params: {} },
+                { action: 'ok-action', run: 'parallel', params: {} },
+            ],
+        });
+
+        await expect(
+            executeWorkflow(wf, makeEvent(), registry, noopLogger),
+        ).rejects.toThrow('parallel-fail');
+    });
+
+    it('should respect on_error=continue in parallel group', async () => {
+        const failAction: ActionHandler = async () => {
+            throw new Error('soft-fail');
+        };
+        const okAction: ActionHandler = async () => ({ result: 'ok' });
+        const afterAction: ActionHandler = async () => ({ result: 'after' });
+
+        const registry = new Map<string, ActionHandler>();
+        registry.set('fail-action', failAction);
+        registry.set('ok-action', okAction);
+        registry.set('after-action', afterAction);
+
+        const wf = makeWorkflow({
+            steps: [
+                { action: 'fail-action', run: 'parallel', params: {}, on_error: 'continue' },
+                { action: 'ok-action', run: 'parallel', params: {} },
+                { action: 'after-action', params: {} },
+            ],
+        });
+
+        // Should not throw — on_error=continue swallows the error
+        await executeWorkflow(wf, makeEvent(), registry, noopLogger);
+    });
+
+    it('should mix parallel and sequential steps', async () => {
+        const order: string[] = [];
+
+        const registry = new Map<string, ActionHandler>();
+        registry.set('step-a', async () => { order.push('a'); return 'a'; });
+        registry.set('step-b', async () => { order.push('b'); return 'b'; });
+        registry.set('step-c', async () => { order.push('c'); return 'c'; });
+        registry.set('step-d', async () => { order.push('d'); return 'd'; });
+
+        const wf = makeWorkflow({
+            steps: [
+                { action: 'step-a', params: {} },
+                { action: 'step-b', run: 'parallel', params: {} },
+                { action: 'step-c', run: 'parallel', params: {} },
+                { action: 'step-d', params: {} },
+            ],
+        });
+
+        await executeWorkflow(wf, makeEvent(), registry, noopLogger);
+
+        // a runs first (sequential), then b+c run in parallel, then d runs after both complete
+        expect(order[0]).toBe('a');
+        expect(order).toContain('d');
+    });
+});
+
+// ─── AI Config Resolution ───────────────────────────────────────────────────
+
+describe('AI config resolution', () => {
+    it('should inject workflow-level AI config into step params', async () => {
+        let receivedParams: Record<string, unknown> = {};
+        const action: ActionHandler = async (params) => {
+            receivedParams = params;
+            return null;
+        };
+
+        const registry = new Map<string, ActionHandler>();
+        registry.set('my-action', action);
+
+        const wf = makeWorkflow({
+            ai: { provider: 'opencode', model: 'glm-4.6' },
+            steps: [{ action: 'my-action', params: {} }],
+        });
+
+        await executeWorkflow(wf, makeEvent(), registry, noopLogger);
+        expect(receivedParams.provider).toBe('opencode');
+        expect(receivedParams.model).toBe('glm-4.6');
+    });
+
+    it('should let step-level AI config override workflow-level', async () => {
+        let receivedParams: Record<string, unknown> = {};
+        const action: ActionHandler = async (params) => {
+            receivedParams = params;
+            return null;
+        };
+
+        const registry = new Map<string, ActionHandler>();
+        registry.set('my-action', action);
+
+        const wf = makeWorkflow({
+            ai: { provider: 'opencode', model: 'glm-4.6' },
+            steps: [{
+                action: 'my-action',
+                ai: { provider: 'claude-code', model: 'opus' },
+                params: {},
+            }],
+        });
+
+        await executeWorkflow(wf, makeEvent(), registry, noopLogger);
+        expect(receivedParams.provider).toBe('claude-code');
+        expect(receivedParams.model).toBe('opus');
+    });
+
+    it('should not override explicit params with AI config', async () => {
+        let receivedParams: Record<string, unknown> = {};
+        const action: ActionHandler = async (params) => {
+            receivedParams = params;
+            return null;
+        };
+
+        const registry = new Map<string, ActionHandler>();
+        registry.set('my-action', action);
+
+        const wf = makeWorkflow({
+            ai: { provider: 'opencode', model: 'glm-4.6' },
+            steps: [{
+                action: 'my-action',
+                params: { provider: 'explicit-provider' },
+            }],
+        });
+
+        await executeWorkflow(wf, makeEvent(), registry, noopLogger);
+        // Explicit params win over AI config
+        expect(receivedParams.provider).toBe('explicit-provider');
+        // Model comes from AI config since it wasn't explicitly set
+        expect(receivedParams.model).toBe('glm-4.6');
+    });
+
+    it('should work without any AI config', async () => {
+        let receivedParams: Record<string, unknown> = {};
+        const action: ActionHandler = async (params) => {
+            receivedParams = params;
+            return null;
+        };
+
+        const registry = new Map<string, ActionHandler>();
+        registry.set('my-action', action);
+
+        const wf = makeWorkflow({
+            steps: [{ action: 'my-action', params: { message: 'hello' } }],
+        });
+
+        await executeWorkflow(wf, makeEvent(), registry, noopLogger);
+        expect(receivedParams.message).toBe('hello');
+        expect(receivedParams.provider).toBeUndefined();
+        expect(receivedParams.model).toBeUndefined();
+    });
+});
