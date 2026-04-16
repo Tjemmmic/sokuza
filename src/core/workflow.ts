@@ -250,6 +250,12 @@ export async function executeWorkflow(
     logger.info({ workflow: workflow.name }, 'Workflow completed');
 }
 
+interface ParallelStepResult {
+    index: number;
+    stepId?: string;
+    result: unknown;
+}
+
 async function runParallelGroup(
     workflow: WorkflowDefinition,
     groupSteps: Array<{ index: number; step: WorkflowStepDefinition }>,
@@ -262,7 +268,7 @@ async function runParallelGroup(
     logger: Logger,
 ): Promise<void> {
     const settled = await Promise.allSettled(
-        groupSteps.map(async ({ index, step }) => {
+        groupSteps.map(async ({ index, step }): Promise<ParallelStepResult | undefined> => {
             const ctx = makeContext(event, results, steps, integrationConfigs, aiRegistry, logger);
 
             if (shouldSkip(step, ctx)) {
@@ -270,13 +276,13 @@ async function runParallelGroup(
                     { workflow: workflow.name, step: index, action: step.action, condition: step.condition },
                     'Parallel step condition is falsy, skipping',
                 );
-                return;
+                return undefined;
             }
 
             const handler = actionRegistry.get(step.action);
             if (!handler) {
                 logger.warn({ action: step.action, step: index }, 'Unknown action, skipping');
-                return;
+                return undefined;
             }
 
             const aiConfig = mergeAIConfig(step.ai, workflow.ai);
@@ -284,9 +290,8 @@ async function runParallelGroup(
             const resolvedParams = applyAIConfigToParams(baseParams, aiConfig);
 
             const result = await handler(resolvedParams, ctx);
-            results[index] = result;
-            if (step.id) steps[step.id] = result;
             logger.info({ workflow: workflow.name, step: index, id: step.id, action: step.action }, 'Parallel step completed');
+            return { index, stepId: step.id, result };
         }),
     );
 
@@ -302,6 +307,10 @@ async function runParallelGroup(
             } else {
                 throw outcome.reason;
             }
+        } else if (outcome.value) {
+            const { index, stepId, result } = outcome.value;
+            results[index] = result;
+            if (stepId) steps[stepId] = result;
         }
     }
 }
