@@ -294,6 +294,39 @@ export class SokuzaEngine {
         return this.queue;
     }
 
+    /** Preview which workflows match an event without running them */
+    previewEvent(event: EventPayload): { matched: string[]; unmatched: Array<{ name: string; reason: string }> } {
+        const matched: string[] = [];
+        const unmatched: Array<{ name: string; reason: string }> = [];
+
+        for (const wf of this.config.workflows) {
+            if (wf.enabled === false) {
+                unmatched.push({ name: wf.name, reason: 'workflow is disabled' });
+                continue;
+            }
+
+            const triggerSources = toArray(wf.trigger.source);
+            if (!triggerSources.includes(event.source)) {
+                unmatched.push({ name: wf.name, reason: `source mismatch: workflow expects [${triggerSources.join(', ')}], got "${event.source}"` });
+                continue;
+            }
+
+            const triggerEvents = toArray(wf.trigger.event);
+            if (event.source !== 'manual' && !triggerEvents.includes(event.event)) {
+                unmatched.push({ name: wf.name, reason: `event mismatch: workflow expects [${triggerEvents.join(', ')}], got "${event.event}"` });
+                continue;
+            }
+
+            if (matchesTrigger(wf, event)) {
+                matched.push(wf.name);
+            } else {
+                unmatched.push({ name: wf.name, reason: 'filter or shorthand conditions not met' });
+            }
+        }
+
+        return { matched, unmatched };
+    }
+
     /** Boot the engine: initialize integrations, start the HTTP server */
     async start(): Promise<void> {
         this.logger.info('Starting Sokuza engine...');
@@ -325,6 +358,7 @@ export class SokuzaEngine {
             getRunHistory: (name?) => this.getRunHistory(name),
             getConfig: () => this.getConfig(),
             getQueue: () => this.queue,
+            previewEvent: (event) => this.previewEvent(event),
         });
 
         for (const integration of this.integrations.values()) {

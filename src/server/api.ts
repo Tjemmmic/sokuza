@@ -3,7 +3,7 @@ import type { Logger } from 'pino';
 import { readFile, writeFile, readdir } from 'node:fs/promises';
 import { join, basename, extname } from 'node:path';
 import yaml from 'js-yaml';
-import type { SokuzaConfig, WorkflowRunRecord } from '../core/types.js';
+import type { SokuzaConfig, EventPayload, WorkflowRunRecord } from '../core/types.js';
 import type { WorkflowQueue } from '../core/queue.js';
 import type { ConfigStore } from '../core/config-store.js';
 
@@ -20,6 +20,7 @@ interface ApiDeps {
     getRunHistory: (workflowName?: string) => WorkflowRunRecord[];
     getConfig: () => SokuzaConfig;
     getQueue?: () => WorkflowQueue;
+    previewEvent: (event: EventPayload) => { matched: string[]; unmatched: Array<{ name: string; reason: string }> };
 }
 
 export interface EventEntry {
@@ -579,6 +580,14 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
     });
 
     // ─── Events (REST — persisted history) ──────────────────────────────
+
+    server.post('/api/events/preview', async (request, reply) => {
+        const body = request.body as { event?: EventPayload } | null;
+        if (!body?.event?.source || !body?.event?.event) {
+            return reply.status(400).send({ error: 'event.source and event.event are required' });
+        }
+        return deps.previewEvent(body.event);
+    });
 
     server.get('/api/events', async () => {
         return { events: deps.getRecentEvents() };
