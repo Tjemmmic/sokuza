@@ -4,6 +4,7 @@ import { readFile, writeFile, readdir } from 'node:fs/promises';
 import { join, basename, extname } from 'node:path';
 import yaml from 'js-yaml';
 import type { SokuzaConfig, WorkflowRunRecord } from '../core/types.js';
+import type { WorkflowQueue } from '../core/queue.js';
 
 interface ApiDeps {
     logger: Logger;
@@ -17,6 +18,7 @@ interface ApiDeps {
     rerunWorkflow: (runId: string) => Promise<{ ok: boolean; error?: string; runId?: string }>;
     getRunHistory: (workflowName?: string) => WorkflowRunRecord[];
     getConfig: () => SokuzaConfig;
+    getQueue?: () => WorkflowQueue;
 }
 
 export interface EventEntry {

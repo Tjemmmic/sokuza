@@ -5,17 +5,20 @@ import type {
     EventHandler,
     EventPayload,
     Integration,
+    QueueJob,
     SokuzaConfig,
     WorkflowDefinition,
     WorkflowRunRecord,
 } from './types.js';
 import { readFile } from 'node:fs/promises';
 import yaml from 'js-yaml';
-import { executeWorkflow, matchesTrigger } from './workflow.js';
+import { matchesTrigger } from './workflow.js';
 import { createServer } from '../server/server.js';
 import { registerApiRoutes } from '../server/api.js';
 import type { FastifyInstance } from 'fastify';
 import { resolve, join } from 'node:path';
+import { WorkflowQueue } from './queue.js';
+import { resolveQueueConfig } from './queue-config.js';
 
 const MAX_RECENT_EVENTS = 100;
 const MAX_RUN_HISTORY = 200;
@@ -26,6 +29,9 @@ export class SokuzaEngine {
     private server: FastifyInstance | null = null;
     readonly logger: Logger;
     private config: SokuzaConfig;
+
+    // ─── Queue ────────────────────────────────────────────────────────────
+    private queue: WorkflowQueue;
 
     // ─── Dashboard state ────────────────────────────────────────────────
     private recentEvents: Array<{ event: EventPayload; timestamp: string; matchedWorkflows: string[] }> = [];
@@ -44,13 +50,15 @@ export class SokuzaEngine {
                 options: { colorize: true },
             },
         });
+
+        this.queue = new WorkflowQueue(this.logger);
+        this.queue.setOnJobUpdate((job) => this.onJobUpdate(job));
     }
 
     /** Register an integration plugin and its actions */
     registerIntegration(integration: Integration): void {
         this.integrations.set(integration.name, integration);
 
-        // Auto-register integration-owned actions
         if (integration.actions) {
             for (const [name, handler] of Object.entries(integration.actions)) {
                 this.actions.set(name, handler);
@@ -69,7 +77,7 @@ export class SokuzaEngine {
         this.logger.info({ action: name }, 'Registered action');
     }
 
-    /** Handle an incoming event — match against workflows and execute */
+    /** Handle an incoming event — match against workflows and enqueue */
     private handleEvent: EventHandler = async (event: EventPayload) => {
         this.logger.info(
             { source: event.source, event: event.event, action: event.action },
@@ -80,7 +88,6 @@ export class SokuzaEngine {
             matchesTrigger(wf, event),
         );
 
-        // Track for dashboard
         const entry = {
             event,
             timestamp: new Date().toISOString(),
@@ -90,7 +97,6 @@ export class SokuzaEngine {
         if (this.recentEvents.length > MAX_RECENT_EVENTS) {
             this.recentEvents.pop();
         }
-        // Notify SSE subscribers
         for (const cb of this.eventSubscribers) {
             cb(entry);
         }
@@ -105,15 +111,14 @@ export class SokuzaEngine {
 
         this.logger.info(
             { count: matchedWorkflows.length },
-            'Matched workflows, executing',
+            'Matched workflows, enqueuing',
         );
 
-        // Run matched workflows concurrently
-        await Promise.allSettled(
-            matchedWorkflows.map((wf) =>
-                executeWorkflow(wf, event, this.actions, this.logger, this.config.integrations, this.config.ai),
-            ),
-        );
+        for (const wf of matchedWorkflows) {
+            const resolvedConfig = resolveQueueConfig(wf, event, this.config.queue, this.config.ai);
+            const job = this.queue.enqueue(wf, event, resolvedConfig);
+            this.processQueueJob(job);
+        }
     };
 
     /** Run a specific workflow by name with manual inputs */
@@ -121,7 +126,6 @@ export class SokuzaEngine {
         workflowName: string,
         inputs: Record<string, unknown> = {},
     ): Promise<{ ok: boolean; error?: string; runId?: string }> {
-        // Re-read config to get latest workflows
         await this.reloadConfig();
 
         const workflow = this.config.workflows.find((wf) => wf.name === workflowName);
@@ -129,7 +133,6 @@ export class SokuzaEngine {
             return { ok: false, error: `Workflow "${workflowName}" not found` };
         }
 
-        // ─── Create run record ───────────────────────────────────────────
         const runId = `run_${Date.now()}_${++this.runIdCounter}`;
         const runRecord: WorkflowRunRecord = {
             id: runId,
@@ -143,15 +146,11 @@ export class SokuzaEngine {
 
         const startTime = Date.now();
 
-        // Construct a manual EventPayload
         const triggerEvents = Array.isArray(workflow.trigger.event) ? workflow.trigger.event : [workflow.trigger.event];
         const triggerRepos = workflow.trigger.repo
             ? (Array.isArray(workflow.trigger.repo) ? workflow.trigger.repo : [workflow.trigger.repo])
             : [];
 
-        // ─── Enrich payload from smart picker inputs ─────────────────────
-        // When users select a PR/issue via picker, the value is a rich object.
-        // We synthesize webhook-shaped payload fields so actions work unchanged.
         const payload: Record<string, unknown> = { inputs };
         const metadata: Record<string, unknown> = {
             triggeredBy: 'dashboard',
@@ -166,7 +165,6 @@ export class SokuzaEngine {
             const obj = val as Record<string, unknown>;
 
             if (def.type === 'github-pr' && obj.number) {
-                // Synthesize pull_request shape for actions
                 const repoStr = (obj.repo as string) ?? triggerRepos[0] ?? '';
                 const [owner, repoName] = repoStr.split('/');
                 payload.pull_request = {
@@ -179,7 +177,7 @@ export class SokuzaEngine {
                     labels: ((obj.labels as string[]) ?? []).map((n: string) => ({ name: n })),
                     draft: obj.draft,
                 };
-                payload.action = 'opened'; // Actions expect this
+                payload.action = 'opened';
                 metadata.repo = repoStr;
                 metadata.owner = owner;
                 metadata.repoName = repoName;
@@ -211,8 +209,6 @@ export class SokuzaEngine {
             metadata,
         };
 
-        // Execute the target workflow directly (not via handleEvent broadcast)
-        // This ensures only the specific workflow runs, not all workflows
         const entry = {
             event,
             timestamp: new Date().toISOString(),
@@ -224,8 +220,13 @@ export class SokuzaEngine {
 
         this.logger.info({ source: event.source, action: event.action }, 'Received event');
 
+        const resolvedConfig = resolveQueueConfig(workflow, event, this.config.queue, this.config.ai);
+        resolvedConfig.priority = 'high';
+
+        const job = this.queue.enqueue(workflow, event, resolvedConfig);
+
         try {
-            await executeWorkflow(workflow, event, this.actions, this.logger, this.config.integrations, this.config.ai);
+            await this.processQueueJobAndWait(job);
             runRecord.status = 'success';
             runRecord.durationMs = Date.now() - startTime;
         } catch (err: any) {
@@ -242,7 +243,6 @@ export class SokuzaEngine {
         try {
             const raw = await readFile(this.configPath, 'utf-8');
 
-            // Interpolate env vars, same as loadConfig does
             const interpolated = raw.replace(
                 /\$\{([A-Z_][A-Z0-9_]*)\}/g,
                 (_match, varName: string) => process.env[varName] ?? '',
@@ -250,7 +250,6 @@ export class SokuzaEngine {
             const parsed = yaml.load(interpolated) as SokuzaConfig;
 
             if (parsed?.workflows && Array.isArray(parsed.workflows)) {
-                // Normalize: expand templates + resolve shorthands (same as loadConfig)
                 const { normalizeWorkflow } = await import('./templates.js');
                 const normalized = await Promise.all(
                     parsed.workflows.map((wf: unknown) =>
@@ -298,11 +297,15 @@ export class SokuzaEngine {
         return status;
     }
 
+    /** Get the queue instance (for API access) */
+    getQueue(): WorkflowQueue {
+        return this.queue;
+    }
+
     /** Boot the engine: initialize integrations, start the HTTP server */
     async start(): Promise<void> {
         this.logger.info('Starting Sokuza engine...');
 
-        // Initialize each configured integration
         for (const [name, integration] of this.integrations) {
             const config = this.config.integrations[name];
             if (config) {
@@ -311,10 +314,8 @@ export class SokuzaEngine {
             }
         }
 
-        // Create and configure the server
         this.server = createServer(this.logger);
 
-        // Mount dashboard API routes
         const templateDir = join(resolve(this.configPath, '..'), 'templates');
         registerApiRoutes(this.server, {
             logger: this.logger,
@@ -331,14 +332,13 @@ export class SokuzaEngine {
             rerunWorkflow: (runId) => this.rerunWorkflow(runId),
             getRunHistory: (name?) => this.getRunHistory(name),
             getConfig: () => this.getConfig(),
+            getQueue: () => this.queue,
         });
 
-        // Mount integration webhook routes
         for (const integration of this.integrations.values()) {
             integration.registerRoutes(this.server, this.handleEvent);
         }
 
-        // Start listening
         const { port, host } = this.config.server;
         await this.server.listen({ port, host: host ?? '0.0.0.0' });
         this.logger.info({ port, host }, '🚀 Sokuza is listening');
@@ -347,8 +347,69 @@ export class SokuzaEngine {
     /** Graceful shutdown */
     async stop(): Promise<void> {
         this.logger.info('Shutting down Sokuza engine...');
+        await this.queue.shutdown();
         if (this.server) {
             await this.server.close();
+        }
+    }
+
+    // ─── Queue processing ────────────────────────────────────────────────
+
+    private async processQueueJob(job: QueueJob): Promise<void> {
+        if (job.status === 'deduped') return;
+
+        try {
+            await this.queue.runJob(
+                job,
+                this.actions,
+                this.config.integrations,
+                this.config.ai,
+            );
+        } catch {
+            // runJob handles errors internally via job status
+        }
+    }
+
+    private processQueueJobAndWait(job: QueueJob): Promise<void> {
+        if (job.status === 'deduped') {
+            return Promise.resolve();
+        }
+
+        return new Promise<void>((resolve, reject) => {
+            const originalUpdate = this.queue['onJobUpdate'];
+            const handler = (updatedJob: QueueJob) => {
+                if (updatedJob.id !== job.id) return;
+                if (updatedJob.status === 'completed') {
+                    this.queue.setOnJobUpdate(originalUpdate!);
+                    resolve();
+                } else if (updatedJob.status === 'failed' || updatedJob.status === 'cancelled') {
+                    this.queue.setOnJobUpdate(originalUpdate!);
+                    reject(new Error(updatedJob.error ?? 'Job failed'));
+                }
+            };
+            this.queue.setOnJobUpdate(handler);
+
+            this.processQueueJob(job).catch(reject);
+        });
+    }
+
+    private onJobUpdate(job: QueueJob): void {
+        for (const cb of this.eventSubscribers) {
+            cb({
+                type: 'queue-update',
+                job: {
+                    id: job.id,
+                    workflowName: job.workflow.name,
+                    status: job.status,
+                    priority: job.priority,
+                    dedupKey: job.dedupKey,
+                    error: job.error,
+                    enqueuedAt: job.enqueuedAt,
+                    startedAt: job.startedAt,
+                    completedAt: job.completedAt,
+                },
+                timestamp: new Date().toISOString(),
+            });
         }
     }
 }
