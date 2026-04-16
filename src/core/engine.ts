@@ -10,8 +10,6 @@ import type {
     WorkflowDefinition,
     WorkflowRunRecord,
 } from './types.js';
-import { readFile } from 'node:fs/promises';
-import yaml from 'js-yaml';
 import { matchesTrigger } from './workflow.js';
 import { toArray } from './types.js';
 import { createServer } from '../server/server.js';
@@ -244,26 +242,14 @@ export class SokuzaEngine {
         return { ok: true, runId };
     }
 
-    /** Reload config from disk */
+    /** Reload config from disk — workflows, AI, queue, integrations */
     private async reloadConfig(): Promise<void> {
         try {
-            const raw = await readFile(this.configPath, 'utf-8');
-
-            const interpolated = raw.replace(
-                /\$\{([A-Z_][A-Z0-9_]*)\}/g,
-                (_match, varName: string) => process.env[varName] ?? '',
-            );
-            const parsed = yaml.load(interpolated) as SokuzaConfig;
-
-            if (parsed?.workflows && Array.isArray(parsed.workflows)) {
-                const { normalizeWorkflow } = await import('./templates.js');
-                const normalized = await Promise.all(
-                    parsed.workflows.map((wf: unknown) =>
-                        normalizeWorkflow(wf as Record<string, unknown>),
-                    ),
-                );
-                this.config.workflows = normalized;
-            }
+            const reloaded = await this.configStore.reloadAndNormalize();
+            if (reloaded.workflows) this.config.workflows = reloaded.workflows;
+            if (reloaded.ai) this.config.ai = reloaded.ai;
+            if (reloaded.queue) this.config.queue = reloaded.queue;
+            if (reloaded.integrations) this.config.integrations = reloaded.integrations;
         } catch {
             // Keep existing config on read failure
         }
