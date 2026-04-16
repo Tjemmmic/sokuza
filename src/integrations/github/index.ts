@@ -46,15 +46,8 @@ export class GitHubIntegration implements Integration {
     private config: GitHubConfig = { webhookSecret: '' };
 
     async initialize(config: IntegrationConfig): Promise<void> {
-        const webhookSecret = config.webhookSecret as string | undefined;
-        if (!webhookSecret) {
-            throw new Error(
-                'GitHub integration requires a "webhookSecret" in config',
-            );
-        }
-
         this.config = {
-            webhookSecret,
+            webhookSecret: (config.webhookSecret as string) ?? '',
             token: config.token as string | undefined,
             repos: config.repos as GitHubConfig['repos'],
         };
