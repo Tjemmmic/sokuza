@@ -2,9 +2,11 @@ import type { Logger } from 'pino';
 import type {
     ActionContext,
     ActionHandler,
+    AIStepConfig,
     EventPayload,
     IntegrationConfig,
     WorkflowDefinition,
+    WorkflowStepDefinition,
 } from './types.js';
 import type { AIProviderRegistry } from './ai-providers.js';
 import { loadAIProviders } from './ai-providers.js';
@@ -109,8 +111,79 @@ function matchesFilter(
     return String(actual) === expected;
 }
 
+type StepGroup = {
+    kind: 'sequential';
+    steps: Array<{ index: number; step: WorkflowStepDefinition }>;
+} | {
+    kind: 'parallel';
+    steps: Array<{ index: number; step: WorkflowStepDefinition }>;
+};
+
+function groupSteps(steps: WorkflowStepDefinition[]): StepGroup[] {
+    const groups: StepGroup[] = [];
+    let i = 0;
+    while (i < steps.length) {
+        if (steps[i].run === 'parallel') {
+            const parallelSteps: Array<{ index: number; step: WorkflowStepDefinition }> = [];
+            while (i < steps.length && steps[i].run === 'parallel') {
+                parallelSteps.push({ index: i, step: steps[i] });
+                i++;
+            }
+            groups.push({ kind: 'parallel', steps: parallelSteps });
+        } else {
+            groups.push({ kind: 'sequential', steps: [{ index: i, step: steps[i] }] });
+            i++;
+        }
+    }
+    return groups;
+}
+
+function mergeAIConfig(
+    stepConfig: AIStepConfig | undefined,
+    workflowConfig: AIStepConfig | undefined,
+): AIStepConfig | undefined {
+    if (!stepConfig && !workflowConfig) return undefined;
+    return { ...workflowConfig, ...stepConfig };
+}
+
+function applyAIConfigToParams(
+    params: Record<string, unknown>,
+    aiConfig: AIStepConfig | undefined,
+): Record<string, unknown> {
+    if (!aiConfig) return params;
+    const merged = { ...params };
+    if (aiConfig.provider && merged.provider === undefined) {
+        merged.provider = aiConfig.provider;
+    }
+    if (aiConfig.model && merged.model === undefined) {
+        merged.model = aiConfig.model;
+    }
+    return merged;
+}
+
+function makeContext(
+    event: EventPayload,
+    results: Record<number, unknown>,
+    steps: Record<string, unknown>,
+    integrationConfigs: Record<string, IntegrationConfig>,
+    ai: AIProviderRegistry,
+    logger: Logger,
+): ActionContext {
+    return { event, results, steps, integrationConfigs, ai, logger };
+}
+
+function shouldSkip(step: WorkflowStepDefinition, ctx: ActionContext): boolean {
+    if (!step.condition) return false;
+    const condValue = interpolateString(step.condition, ctx);
+    const isTruthy = condValue !== '' && condValue !== 'false' && condValue !== '0' && condValue !== 'undefined' && condValue !== 'null';
+    return !isTruthy;
+}
+
 /**
- * Run all steps of a workflow sequentially, passing context between them.
+ * Run all steps of a workflow. Consecutive steps with `run: parallel` are
+ * executed concurrently with fail-fast semantics. All other steps run
+ * sequentially. Step-level and workflow-level AI config is resolved and
+ * injected into action params.
  */
 export async function executeWorkflow(
     workflow: WorkflowDefinition,
@@ -119,83 +192,118 @@ export async function executeWorkflow(
     logger: Logger,
     integrationConfigs: Record<string, IntegrationConfig> = {},
     ai?: AIProviderRegistry,
+    _signal?: AbortSignal,
 ): Promise<void> {
     const results: Record<number, unknown> = {};
     const steps: Record<string, unknown> = {};
 
-    // Fall back to default providers if the caller did not supply a registry
-    // (keeps legacy test paths working).
     const aiRegistry: AIProviderRegistry = ai ?? loadAIProviders(undefined);
 
     logger.info({ workflow: workflow.name }, 'Executing workflow');
 
-    for (let i = 0; i < workflow.steps.length; i++) {
-        const step = workflow.steps[i];
-        const handler = actionRegistry.get(step.action);
+    const groups = groupSteps(workflow.steps);
 
-        if (!handler) {
-            logger.warn(
-                { action: step.action, step: i },
-                'Unknown action, skipping step',
-            );
-            continue;
-        }
+    for (const group of groups) {
+        if (group.kind === 'sequential') {
+            const { index, step } = group.steps[0];
+            const ctx = makeContext(event, results, steps, integrationConfigs, aiRegistry, logger);
 
-        const context: ActionContext = {
-            event,
-            results,
-            steps,
-            integrationConfigs,
-            ai: aiRegistry,
-            logger,
-        };
-
-        // ─── Conditional execution ──────────────────────────────────────
-        if (step.condition) {
-            const condValue = interpolateString(step.condition, context);
-            const isTruthy = condValue !== '' && condValue !== 'false' && condValue !== '0' && condValue !== 'undefined' && condValue !== 'null';
-            if (!isTruthy) {
+            if (shouldSkip(step, ctx)) {
                 logger.info(
-                    { workflow: workflow.name, step: i, action: step.action, condition: step.condition, resolved: condValue },
+                    { workflow: workflow.name, step: index, action: step.action, condition: step.condition },
                     'Step condition is falsy, skipping',
                 );
                 continue;
             }
-        }
 
-        // Interpolate template expressions in step params
-        const resolvedParams = interpolateParams(step.params, context);
-
-        try {
-            const result = await handler(resolvedParams, context);
-            results[i] = result;
-
-            // Store by step ID if provided
-            if (step.id) {
-                steps[step.id] = result;
-            }
-
-            logger.info(
-                { workflow: workflow.name, step: i, id: step.id, action: step.action },
-                'Step completed',
-            );
-        } catch (err) {
-            if (step.on_error === 'continue') {
-                logger.warn(
-                    { workflow: workflow.name, step: i, action: step.action, err },
-                    'Step failed (on_error=continue), proceeding to next step',
-                );
+            const handler = actionRegistry.get(step.action);
+            if (!handler) {
+                logger.warn({ action: step.action, step: index }, 'Unknown action, skipping step');
                 continue;
             }
-            logger.error(
-                { workflow: workflow.name, step: i, action: step.action, err },
-                'Step failed',
+
+            const aiConfig = mergeAIConfig(step.ai, workflow.ai);
+            const baseParams = interpolateParams(step.params, ctx);
+            const resolvedParams = applyAIConfigToParams(baseParams, aiConfig);
+
+            try {
+                const result = await handler(resolvedParams, ctx);
+                results[index] = result;
+                if (step.id) steps[step.id] = result;
+                logger.info({ workflow: workflow.name, step: index, id: step.id, action: step.action }, 'Step completed');
+            } catch (err) {
+                if (step.on_error === 'continue') {
+                    logger.warn({ workflow: workflow.name, step: index, action: step.action, err }, 'Step failed (on_error=continue), proceeding');
+                    continue;
+                }
+                logger.error({ workflow: workflow.name, step: index, action: step.action, err }, 'Step failed');
+                throw err;
+            }
+        } else {
+            await runParallelGroup(
+                workflow, group.steps, event, results, steps,
+                actionRegistry, integrationConfigs, aiRegistry, logger,
             );
-            throw err;
         }
     }
 
     logger.info({ workflow: workflow.name }, 'Workflow completed');
+}
+
+async function runParallelGroup(
+    workflow: WorkflowDefinition,
+    groupSteps: Array<{ index: number; step: WorkflowStepDefinition }>,
+    event: EventPayload,
+    results: Record<number, unknown>,
+    steps: Record<string, unknown>,
+    actionRegistry: Map<string, ActionHandler>,
+    integrationConfigs: Record<string, IntegrationConfig>,
+    aiRegistry: AIProviderRegistry,
+    logger: Logger,
+): Promise<void> {
+    const settled = await Promise.allSettled(
+        groupSteps.map(async ({ index, step }) => {
+            const ctx = makeContext(event, results, steps, integrationConfigs, aiRegistry, logger);
+
+            if (shouldSkip(step, ctx)) {
+                logger.info(
+                    { workflow: workflow.name, step: index, action: step.action, condition: step.condition },
+                    'Parallel step condition is falsy, skipping',
+                );
+                return;
+            }
+
+            const handler = actionRegistry.get(step.action);
+            if (!handler) {
+                logger.warn({ action: step.action, step: index }, 'Unknown action, skipping');
+                return;
+            }
+
+            const aiConfig = mergeAIConfig(step.ai, workflow.ai);
+            const baseParams = interpolateParams(step.params, ctx);
+            const resolvedParams = applyAIConfigToParams(baseParams, aiConfig);
+
+            const result = await handler(resolvedParams, ctx);
+            results[index] = result;
+            if (step.id) steps[step.id] = result;
+            logger.info({ workflow: workflow.name, step: index, id: step.id, action: step.action }, 'Parallel step completed');
+        }),
+    );
+
+    for (let i = 0; i < settled.length; i++) {
+        const outcome = settled[i];
+        if (outcome.status === 'rejected') {
+            const { step } = groupSteps[i];
+            if (step.on_error === 'continue') {
+                logger.warn(
+                    { workflow: workflow.name, action: step.action, err: outcome.reason },
+                    'Parallel step failed (on_error=continue)',
+                );
+            } else {
+                throw outcome.reason;
+            }
+        }
+    }
 }
 
 // ─── Template Interpolation ─────────────────────────────────────────────────
