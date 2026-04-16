@@ -7,6 +7,8 @@ export interface SokuzaConfig {
     workflows: WorkflowDefinition[];
     /** AI provider registry (see src/core/ai-providers.ts). */
     ai?: import('./ai-providers.js').AIProviderRegistry;
+    /** Queue configuration for concurrency, dedup, priority, and timeouts. */
+    queue?: QueueConfig;
 }
 
 export interface ServerConfig {
@@ -71,6 +73,13 @@ export function toArray<T>(value: OneOrMany<T> | undefined): T[] {
 
 // ─── Workflows ──────────────────────────────────────────────────────────────
 
+export interface AIStepConfig {
+    /** Registered provider name, e.g. "claude-code", "opencode", "anthropic". */
+    provider?: string;
+    /** Model override, e.g. "opus", "sonnet", "glm-4.6". */
+    model?: string;
+}
+
 export interface WorkflowDefinition {
     name: string;
     /** Human-readable description of what this workflow does */
@@ -83,6 +92,10 @@ export interface WorkflowDefinition {
     steps: WorkflowStepDefinition[];
     /** Input definitions for manual triggers — the dashboard renders a form from these */
     inputs?: WorkflowInput[];
+    /** Inline queue overrides for this workflow (highest priority). */
+    queue?: Partial<QueueSettings>;
+    /** Workflow-level AI config — default provider/model for all steps. */
+    ai?: AIStepConfig;
 }
 
 /** Defines a user-facing input field for manual workflow triggers */
@@ -138,6 +151,10 @@ export interface WorkflowStepDefinition {
     condition?: string;
     /** Error handling: 'stop' (default) halts the workflow, 'continue' skips to next step */
     on_error?: 'stop' | 'continue';
+    /** Execution hint: 'parallel' groups consecutive steps to run concurrently. */
+    run?: 'parallel';
+    /** Step-level AI config override. */
+    ai?: AIStepConfig;
 }
 
 // ─── Actions ────────────────────────────────────────────────────────────────
@@ -180,3 +197,69 @@ export interface WorkflowRunRecord {
     /** Error message if status is 'error' */
     error?: string;
 }
+
+// ─── Queue ───────────────────────────────────────────────────────────────────
+
+export type DedupStrategy = 'latest-wins' | 'drop-duplicate' | 'none';
+export type JobPriority = 'critical' | 'high' | 'normal' | 'low';
+export type JobStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled' | 'deduped';
+
+export interface QueueSettings {
+    /** Max concurrent jobs in this scope (default: 3). */
+    concurrency: number;
+    /** How to handle duplicate jobs (default: 'latest-wins'). */
+    dedup: DedupStrategy;
+    /** Template expression for dedup key. Supports {{workflow.name}}, {{event.metadata.*}}, etc. */
+    dedup_key: string;
+    /** Job priority (default: 'normal'). */
+    priority: JobPriority;
+    /** Max execution time in seconds (default: 300). */
+    timeout: number;
+    /** Max retry attempts on failure (default: 0). */
+    retry: number;
+    /** Seconds between retry attempts (default: 30). */
+    retry_delay: number;
+}
+
+export interface QueueConfig {
+    /** Default queue settings applied to all workflows. */
+    defaults?: Partial<QueueSettings>;
+    /** Per-provider overrides keyed by registered provider name. */
+    per_provider?: Record<string, Partial<QueueSettings>>;
+    /** Per-workflow overrides keyed by workflow name. */
+    per_workflow?: Record<string, Partial<QueueSettings>>;
+    /** Per-repo overrides keyed by "owner/repo". */
+    per_repo?: Record<string, Partial<QueueSettings>>;
+}
+
+export interface ResolvedQueueConfig {
+    concurrency: number;
+    dedup: DedupStrategy;
+    dedupKey: string;
+    priority: JobPriority;
+    timeout: number;
+    retry: number;
+    retryDelay: number;
+}
+
+export interface QueueJob {
+    id: string;
+    workflow: WorkflowDefinition;
+    event: EventPayload;
+    status: JobStatus;
+    priority: JobPriority;
+    resolvedConfig: ResolvedQueueConfig;
+    enqueuedAt: string;
+    startedAt?: string;
+    completedAt?: string;
+    error?: string;
+    dedupKey: string;
+    attempts: number;
+}
+
+export const JOB_PRIORITY_ORDER: Record<JobPriority, number> = {
+    critical: 0,
+    high: 1,
+    normal: 2,
+    low: 3,
+};
