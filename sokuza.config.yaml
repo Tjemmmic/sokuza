@@ -1,6 +1,58 @@
 server:
   port: 3500
   host: 0.0.0.0
+
+# ─── AI providers ────────────────────────────────────────────────────────────
+# Registered providers can be referenced by name from any workflow that uses
+# `ai-review` or `ai-agent`. If omitted, sokuza auto-registers `claude-code`
+# (CLI) and `anthropic` (direct API) using their default settings.
+ai:
+  # Provider to use when a workflow does not specify one.
+  default_provider: claude-code
+
+  providers:
+    # Direct Anthropic API (used when ANTHROPIC_API_KEY is set).
+    anthropic:
+      kind: anthropic-api
+      api_key: ${ANTHROPIC_API_KEY}
+      default_model: claude-sonnet-4-20250514
+
+    # Claude Code CLI (uses your ~/.claude subscription).
+    claude-code:
+      kind: cli
+      command: claude
+      args_style: claude-code
+      default_model: sonnet
+
+    # ZAI GLM via its Anthropic-compatible API endpoint. Use this for
+    # `ai-review` when you want GLM completions at subscription pricing.
+    zai-glm:
+      kind: anthropic-api
+      base_url: https://api.z.ai/api/anthropic
+      api_key: ${ZAI_API_KEY}
+      default_model: glm-4.6
+
+    # ZAI GLM via the Claude Code binary + env-var redirection. Use this
+    # for `ai-agent` — you get Claude Code's full tool-use loop but
+    # completions are served by GLM instead of Anthropic.
+    zai-glm-agent:
+      kind: cli
+      command: claude
+      args_style: claude-code
+      default_model: glm-4.6
+      env:
+        ANTHROPIC_BASE_URL: https://api.z.ai/api/anthropic
+        ANTHROPIC_AUTH_TOKEN: ${ZAI_API_KEY}
+
+    # Opencode CLI — native multi-provider support (OpenAI, Google, Groq,
+    # OpenRouter, Ollama, ZAI, …). Configure the desired backend in
+    # opencode's own config. Requires `opencode` binary on PATH.
+    opencode:
+      kind: cli
+      command: opencode
+      args_style: opencode
+      default_model: glm-4.6
+
 integrations:
   github:
     webhookSecret: ${GITHUB_WEBHOOK_SECRET}

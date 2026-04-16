@@ -5,6 +5,7 @@ import type {
     EventPayload,
     WorkflowDefinition,
 } from '../core/types.js';
+import { loadAIProviders } from '../core/ai-providers.js';
 import pino from 'pino';
 
 const mockLogger = pino({ level: 'silent' });
@@ -44,6 +45,7 @@ function makeContext(overrides: Partial<ActionContext> = {}): ActionContext {
         results: {},
         steps: {},
         integrationConfigs: {},
+        ai: loadAIProviders(undefined),
         logger: mockLogger,
         ...overrides,
     };

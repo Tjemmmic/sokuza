@@ -1,11 +1,8 @@
-import Anthropic from '@anthropic-ai/sdk';
-import { spawn } from 'node:child_process';
 import type { ActionHandler } from '../core/types.js';
 import { truncateDiff, DEFAULT_MAX_CHARS } from '../core/diff-truncator.js';
 import { generateCodeReviewPrompt } from './review-templates.js';
+import { resolveProvider, runCompletion } from '../core/ai-providers.js';
 
-const DEFAULT_MODEL = 'claude-sonnet-4-20250514';
-const DEFAULT_CLI_MODEL = 'opus';
 const DEFAULT_MAX_TOKENS = 4096;
 
 /**
@@ -17,23 +14,26 @@ const DEFAULT_SYSTEM_PROMPT = generateCodeReviewPrompt();
 /**
  * "ai-review" action.
  *
- * Sends a code diff to Claude for review and returns the review text.
- * Supports two providers:
+ * Sends a code diff to the configured AI provider for review and returns
+ * the review text. The provider is looked up from the registry built at
+ * startup from the `ai:` block of `sokuza.config.yaml` (see
+ * `src/core/ai-providers.ts`), so any Anthropic-API, OpenAI-compatible,
+ * or CLI provider works without action-level changes.
  *
- * 1. **"api"** (default) — direct Anthropic API via SDK
- * 2. **"claude-code"** — uses the `claude` CLI (for small diffs only)
- *
- * Large diffs are automatically truncated to fit within Claude's context.
+ * Large diffs are automatically truncated to fit within the model's
+ * context budget.
  *
  * Params:
- *   - provider: "api" | "claude-code" (default: "api" if key available)
- *   - model: Claude model (default: "claude-sonnet-4-20250514" for API, "sonnet" for CLI)
+ *   - provider: Registered provider name (e.g. "anthropic", "zai-glm",
+ *               "claude-code"). Falls back to the registry default.
+ *               Legacy values "api" and "claude-code" still work.
+ *   - model: Model override (defaults to provider.defaultModel)
  *   - prompt: System prompt for the review
  *   - diff: The code diff to review (auto-resolved from previous steps)
  *   - context: Optional additional context (PR title, description, etc.)
- *   - max_tokens: Max response tokens (default: 4096, API only)
- *   - max_diff_chars: Max diff characters before truncation (default: 100K)
- *   - api_key: Anthropic API key (API provider only)
+ *   - max_tokens: Max response tokens (API providers, default 4096)
+ *   - max_diff_chars: Max diff characters before truncation
+ *   - workdir: CWD for CLI providers
  *
  * Returns: { review, model, provider, usage?, truncation? }
  */
@@ -84,8 +84,9 @@ export const aiReviewAction: ActionHandler = async (params, context) => {
             : 'Diff fits within budget',
     );
 
-    // ─── Determine provider ─────────────────────────────────────────────
-    const provider = resolveProvider(params);
+    // ─── Resolve provider via registry ──────────────────────────────────
+    const provider = resolveProvider(context.ai, params.provider as string | undefined);
+
     const systemPrompt = (params.prompt as string) ?? DEFAULT_SYSTEM_PROMPT;
     const additionalContext = params.context as string | undefined;
 
@@ -131,32 +132,24 @@ export const aiReviewAction: ActionHandler = async (params, context) => {
     userMessage += `## Diff\n\`\`\`diff\n${truncation.diff}\n\`\`\``;
 
     context.logger.info(
-        { provider, promptLength: userMessage.length },
+        { provider: provider.name, kind: provider.kind, promptLength: userMessage.length },
         'Sending diff to AI for review',
     );
 
-    const workdir = params.workdir as string | undefined;
+    const completion = await runCompletion(provider, {
+        systemPrompt,
+        userMessage,
+        model: params.model as string | undefined,
+        maxTokens: (params.max_tokens as number) ?? DEFAULT_MAX_TOKENS,
+        workdir: params.workdir as string | undefined,
+        logger: context.logger,
+    });
 
-    const result = provider === 'claude-code'
-        ? await reviewWithClaudeCode(
-            userMessage,
-            systemPrompt,
-            (params.model as string) ?? DEFAULT_CLI_MODEL,
-            context.logger,
-            workdir,
-        )
-        : await reviewWithApi(
-            userMessage,
-            systemPrompt,
-            (params.model as string) ?? DEFAULT_MODEL,
-            (params.api_key as string) ?? process.env.ANTHROPIC_API_KEY!,
-            (params.max_tokens as number) ?? DEFAULT_MAX_TOKENS,
-            context.logger,
-        );
-
-    // Attach truncation metadata
     return {
-        ...result,
+        review: completion.text,
+        model: completion.model,
+        provider: completion.provider,
+        usage: completion.usage,
         truncation: truncation.originalChars !== truncation.finalChars
             ? {
                 summary: truncation.summary,
@@ -166,148 +159,3 @@ export const aiReviewAction: ActionHandler = async (params, context) => {
             : undefined,
     };
 };
-
-// ─── Provider Resolution ────────────────────────────────────────────────────
-
-function resolveProvider(params: Record<string, unknown>): 'api' | 'claude-code' {
-    const explicit = params.provider as string | undefined;
-    if (explicit === 'claude-code') return 'claude-code';
-    if (explicit === 'api') return 'api';
-
-    // Default to API if key is available, otherwise claude-code
-    if (process.env.ANTHROPIC_API_KEY || params.api_key) return 'api';
-    return 'claude-code';
-}
-
-// ─── Anthropic API Provider ─────────────────────────────────────────────────
-
-async function reviewWithApi(
-    userMessage: string,
-    systemPrompt: string,
-    model: string,
-    apiKey: string,
-    maxTokens: number,
-    logger: import('pino').Logger,
-) {
-    if (!apiKey) {
-        throw new Error(
-            'ai-review (api provider): requires ANTHROPIC_API_KEY env var or params.api_key.',
-        );
-    }
-
-    const client = new Anthropic({ apiKey });
-
-    const response = await client.messages.create({
-        model,
-        max_tokens: maxTokens,
-        system: systemPrompt,
-        messages: [{ role: 'user', content: userMessage }],
-    });
-
-    const review = response.content
-        .filter((block) => block.type === 'text')
-        .map((block) => {
-            if (block.type === 'text') return block.text;
-            return '';
-        })
-        .join('\n');
-
-    logger.info(
-        {
-            provider: 'api',
-            model: response.model,
-            inputTokens: response.usage.input_tokens,
-            outputTokens: response.usage.output_tokens,
-        },
-        'AI review completed (API)',
-    );
-
-    return {
-        review,
-        model: response.model,
-        provider: 'api' as const,
-        usage: {
-            input_tokens: response.usage.input_tokens,
-            output_tokens: response.usage.output_tokens,
-        },
-    };
-}
-
-// ─── Claude Code CLI Provider ───────────────────────────────────────────────
-
-async function reviewWithClaudeCode(
-    userMessage: string,
-    systemPrompt: string,
-    model: string,
-    logger: import('pino').Logger,
-    workdir?: string,
-) {
-    const args = [
-        '--print',
-        '--model', model,
-        '--output-format', 'text',
-        '--no-session-persistence',
-        '--system-prompt', systemPrompt,
-    ];
-
-    logger.info(
-        { model, messageLength: userMessage.length, workdir: workdir ?? '(none)' },
-        'Running Claude Code CLI',
-    );
-
-    return new Promise<{ review: string; model: string; provider: 'claude-code' }>((resolve, reject) => {
-        const child = spawn('claude', args, {
-            env: { ...process.env },
-            cwd: workdir || undefined,
-            stdio: ['pipe', 'pipe', 'pipe'],
-        });
-
-        const chunks: Buffer[] = [];
-        const stderrChunks: Buffer[] = [];
-
-        child.stdout.on('data', (chunk: Buffer) => chunks.push(chunk));
-        child.stderr.on('data', (chunk: Buffer) => stderrChunks.push(chunk));
-
-        child.on('error', (err: Error) => {
-            logger.error({ err: err.message }, 'Claude Code CLI spawn error');
-            reject(new Error(`Claude Code CLI failed to spawn: ${err.message}`));
-        });
-
-        child.on('close', (code: number | null) => {
-            const stdout = Buffer.concat(chunks).toString('utf-8');
-            const stderr = Buffer.concat(stderrChunks).toString('utf-8');
-
-            if (stderr) {
-                logger.debug({ stderr: stderr.slice(0, 1000) }, 'Claude Code CLI stderr');
-            }
-
-            if (code !== 0) {
-                logger.error(
-                    { code, stderr: stderr.slice(0, 500), stdout: stdout.slice(0, 500) },
-                    'Claude Code CLI exited with error',
-                );
-                reject(new Error(
-                    `Claude Code CLI exited with code ${code}${stderr ? `\nstderr: ${stderr.slice(0, 500)}` : ''}${stdout ? `\nstdout: ${stdout.slice(0, 500)}` : ''}`,
-                ));
-                return;
-            }
-
-            const review = stdout.trim();
-
-            logger.info(
-                { provider: 'claude-code', model, reviewLength: review.length },
-                'AI review completed (Claude Code CLI)',
-            );
-
-            resolve({
-                review,
-                model,
-                provider: 'claude-code' as const,
-            });
-        });
-
-        // Write the prompt to stdin (no size limit unlike CLI args)
-        child.stdin.write(userMessage);
-        child.stdin.end();
-    });
-}

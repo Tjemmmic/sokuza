@@ -5,6 +5,8 @@ export interface SokuzaConfig {
     server: ServerConfig;
     integrations: Record<string, IntegrationConfig>;
     workflows: WorkflowDefinition[];
+    /** AI provider registry (see src/core/ai-providers.ts). */
+    ai?: import('./ai-providers.js').AIProviderRegistry;
 }
 
 export interface ServerConfig {
@@ -149,6 +151,8 @@ export interface ActionContext {
     steps: Record<string, unknown>;
     /** Integration configs from sokuza.config.yaml */
     integrationConfigs: Record<string, IntegrationConfig>;
+    /** AI provider registry (populated from the config's `ai:` block). */
+    ai: import('./ai-providers.js').AIProviderRegistry;
     logger: import('pino').Logger;
 }
 

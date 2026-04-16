@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { aiReviewAction } from '../actions/ai-review.js';
+import { loadAIProviders } from '../core/ai-providers.js';
 import type { ActionContext } from '../core/types.js';
 import pino from 'pino';
 import { EventEmitter } from 'node:events';
@@ -19,6 +20,7 @@ function makeContext(overrides: Partial<ActionContext> = {}): ActionContext {
         results: {},
         steps: {},
         integrationConfigs: {},
+        ai: loadAIProviders(undefined),
         logger: mockLogger,
         ...overrides,
     };
@@ -84,20 +86,32 @@ describe('aiReviewAction', () => {
         await expect(aiReviewAction({}, context)).rejects.toThrow('no diff provided');
     });
 
-    it('should use API provider when ANTHROPIC_API_KEY is set', async () => {
+    it('should use anthropic provider when ANTHROPIC_API_KEY is set', async () => {
         process.env.ANTHROPIC_API_KEY = 'test-key';
         const context = makeContext({
+            ai: loadAIProviders(undefined), // re-load so env var is picked up
             steps: { fetch_diff: { diff: '+added\n-removed', files: ['a.ts'] } },
         });
 
         const result = (await aiReviewAction({}, context)) as Record<string, unknown>;
-        expect(result.provider).toBe('api');
+        expect(result.provider).toBe('anthropic');
         expect(result.review).toContain('looks good overall');
     });
 
-    it('should throw when API provider forced but no key', async () => {
+    it('should accept legacy "api" provider alias', async () => {
+        process.env.ANTHROPIC_API_KEY = 'test-key';
+        const context = makeContext({
+            ai: loadAIProviders(undefined),
+            steps: { fetch_diff: { diff: '+added\n-removed' } },
+        });
+
+        const result = (await aiReviewAction({ provider: 'api' }, context)) as Record<string, unknown>;
+        expect(result.provider).toBe('anthropic');
+    });
+
+    it('should throw when anthropic provider forced but no key', async () => {
         const context = makeContext({ steps: { fd: { diff: 'x' } } });
-        await expect(aiReviewAction({ provider: 'api' }, context)).rejects.toThrow('requires ANTHROPIC_API_KEY');
+        await expect(aiReviewAction({ provider: 'anthropic' }, context)).rejects.toThrow('missing api_key');
     });
 
     it('should auto-detect claude-code when no key is set', async () => {
@@ -112,7 +126,10 @@ describe('aiReviewAction', () => {
     it('should force claude-code even with API key', async () => {
         process.env.ANTHROPIC_API_KEY = 'test-key';
         mockSpawn.mockReturnValue(createMockChild('Forced CLI'));
-        const context = makeContext({ steps: { fd: { diff: 'diff' } } });
+        const context = makeContext({
+            ai: loadAIProviders(undefined),
+            steps: { fd: { diff: 'diff' } },
+        });
 
         const result = (await aiReviewAction({ provider: 'claude-code' }, context)) as Record<string, unknown>;
         expect(result.provider).toBe('claude-code');

@@ -3,6 +3,7 @@ import { resolve } from 'node:path';
 import yaml from 'js-yaml';
 import type { SokuzaConfig } from './types.js';
 import { normalizeWorkflow } from './templates.js';
+import { loadAIProviders } from './ai-providers.js';
 
 const DEFAULT_CONFIG_NAME = 'sokuza.config.yaml';
 
@@ -56,6 +57,10 @@ async function validateConfig(raw: Record<string, unknown>): Promise<SokuzaConfi
         ),
     );
 
+    // Build the AI provider registry from the optional `ai:` block.
+    // When omitted, loadAIProviders registers built-in defaults.
+    const ai = loadAIProviders(raw.ai as Record<string, unknown> | undefined);
+
     return {
         server: {
             port: server.port as number,
@@ -63,6 +68,7 @@ async function validateConfig(raw: Record<string, unknown>): Promise<SokuzaConfi
         },
         integrations: integrations as SokuzaConfig['integrations'],
         workflows,
+        ai,
     };
 }
 

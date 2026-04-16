@@ -111,7 +111,7 @@ export class SokuzaEngine {
         // Run matched workflows concurrently
         await Promise.allSettled(
             matchedWorkflows.map((wf) =>
-                executeWorkflow(wf, event, this.actions, this.logger, this.config.integrations),
+                executeWorkflow(wf, event, this.actions, this.logger, this.config.integrations, this.config.ai),
             ),
         );
     };
@@ -225,7 +225,7 @@ export class SokuzaEngine {
         this.logger.info({ source: event.source, action: event.action }, 'Received event');
 
         try {
-            await executeWorkflow(workflow, event, this.actions, this.logger, this.config.integrations);
+            await executeWorkflow(workflow, event, this.actions, this.logger, this.config.integrations, this.config.ai);
             runRecord.status = 'success';
             runRecord.durationMs = Date.now() - startTime;
         } catch (err: any) {

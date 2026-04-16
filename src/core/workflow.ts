@@ -6,6 +6,8 @@ import type {
     IntegrationConfig,
     WorkflowDefinition,
 } from './types.js';
+import type { AIProviderRegistry } from './ai-providers.js';
+import { loadAIProviders } from './ai-providers.js';
 import { toArray } from './types.js';
 
 /**
@@ -116,9 +118,14 @@ export async function executeWorkflow(
     actionRegistry: Map<string, ActionHandler>,
     logger: Logger,
     integrationConfigs: Record<string, IntegrationConfig> = {},
+    ai?: AIProviderRegistry,
 ): Promise<void> {
     const results: Record<number, unknown> = {};
     const steps: Record<string, unknown> = {};
+
+    // Fall back to default providers if the caller did not supply a registry
+    // (keeps legacy test paths working).
+    const aiRegistry: AIProviderRegistry = ai ?? loadAIProviders(undefined);
 
     logger.info({ workflow: workflow.name }, 'Executing workflow');
 
@@ -139,6 +146,7 @@ export async function executeWorkflow(
             results,
             steps,
             integrationConfigs,
+            ai: aiRegistry,
             logger,
         };
 
