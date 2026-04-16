@@ -19,8 +19,10 @@ import { registerApiRoutes } from '../server/api.js';
 import type { FastifyInstance } from 'fastify';
 import { resolve, join } from 'node:path';
 import { WorkflowQueue } from './queue.js';
+import type { JobExecutor } from './queue.js';
 import { resolveQueueConfig } from './queue-config.js';
 import { ConfigStore } from './config-store.js';
+import { executeWorkflow } from './workflow.js';
 
 const MAX_RECENT_EVENTS = 100;
 const MAX_RUN_HISTORY = 200;
@@ -64,6 +66,11 @@ export class SokuzaEngine {
 
         this.queue = new WorkflowQueue(this.logger);
         this.queue.setOnJobUpdate((job) => this.broadcastJobUpdate(job));
+        this.queue.setExecutor(this.createJobExecutor(), {
+            integrationConfigs: config.integrations,
+            ai: config.ai,
+            recordWebhookDelivery: (d) => this.recordWebhookDelivery(d),
+        });
         this.configStore = new ConfigStore(this.configPath, this.logger);
     }
 
@@ -149,7 +156,6 @@ export class SokuzaEngine {
             const resolvedConfig = resolveQueueConfig(wf, event, this.config.queue, this.config.ai);
             const job = this.queue.enqueue(wf, event, resolvedConfig);
             job.configHash = this.getConfigHash();
-            this.processQueueJob(job);
         }
     };
 
@@ -258,8 +264,14 @@ export class SokuzaEngine {
         const job = this.queue.enqueue(workflow, event, resolvedConfig);
         job.configHash = this.getConfigHash();
 
+        if (job.status === 'deduped') {
+            runRecord.status = 'success';
+            runRecord.durationMs = 0;
+            return { ok: true, runId };
+        }
+
         try {
-            await this.processQueueJobAndWait(job);
+            await this.waitForJob(job);
             runRecord.status = 'success';
             runRecord.durationMs = Date.now() - startTime;
         } catch (err: any) {
@@ -282,6 +294,11 @@ export class SokuzaEngine {
             if (reloaded.ai) this.config.ai = reloaded.ai;
             if (reloaded.queue) this.config.queue = reloaded.queue;
             if (reloaded.integrations) this.config.integrations = reloaded.integrations;
+            this.queue.setExecutor(this.createJobExecutor(), {
+                integrationConfigs: this.config.integrations,
+                ai: this.config.ai,
+                recordWebhookDelivery: (d) => this.recordWebhookDelivery(d),
+            });
         } catch {
             // Keep existing config on read failure
         }
@@ -465,27 +482,28 @@ export class SokuzaEngine {
 
     // ─── Queue processing ────────────────────────────────────────────────
 
-    private async processQueueJob(job: QueueJob): Promise<void> {
-        if (job.status === 'deduped') return;
-
-        try {
-            await this.queue.runJob(
-                job,
-                this.actions,
-                this.config.integrations,
-                this.config.ai,
-                (delivery) => this.recordWebhookDelivery(delivery),
-            );
-        } catch {
-            // runJob handles errors internally via job status
-        }
+    private createJobExecutor(): JobExecutor {
+        const actions = this.actions;
+        const logger = this.logger;
+        return async (job, integrationConfigs, ai, recordWebhookDelivery) => {
+            try {
+                await executeWorkflow(
+                    job.workflow, job.event, actions, logger,
+                    integrationConfigs, ai, undefined, recordWebhookDelivery,
+                );
+                if (job.status === 'running') {
+                    job.status = 'completed';
+                }
+            } catch (err: any) {
+                if (job.status !== 'cancelled') {
+                    job.status = 'failed';
+                    job.error = err.message ?? 'Workflow execution failed';
+                }
+            }
+        };
     }
 
-    private processQueueJobAndWait(job: QueueJob): Promise<void> {
-        if (job.status === 'deduped') {
-            return Promise.resolve();
-        }
-
+    private waitForJob(job: QueueJob): Promise<void> {
         return new Promise<void>((resolve, reject) => {
             let settled = false;
             const unsubscribe = this.queue.onJobUpdate((updatedJob: QueueJob) => {
@@ -501,13 +519,6 @@ export class SokuzaEngine {
                     unsubscribe();
                     reject(new Error(updatedJob.error ?? 'Job failed'));
                 }
-            });
-
-            this.processQueueJob(job).catch((err) => {
-                if (settled) return;
-                settled = true;
-                unsubscribe();
-                reject(err);
             });
         });
     }

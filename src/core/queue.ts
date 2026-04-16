@@ -1,6 +1,5 @@
 import type { Logger } from 'pino';
 import type {
-    ActionHandler,
     ActionContext,
     EventPayload,
     IntegrationConfig,
@@ -15,6 +14,12 @@ import type { AIProviderRegistry } from './ai-providers.js';
 import { executeWorkflow } from './workflow.js';
 
 type JobCallback = (job: QueueJob) => void;
+export type JobExecutor = (
+    job: QueueJob,
+    integrationConfigs: Record<string, IntegrationConfig>,
+    ai: AIProviderRegistry | undefined,
+    recordWebhookDelivery?: ActionContext['recordWebhookDelivery'],
+) => Promise<void>;
 
 export class WorkflowQueue {
     private queue: QueueJob[] = [];
@@ -37,6 +42,16 @@ export class WorkflowQueue {
 
     private jobIdCounter = 0;
 
+    private executor: JobExecutor | null = null;
+    private executorContext: {
+        integrationConfigs: Record<string, IntegrationConfig>;
+        ai: AIProviderRegistry | undefined;
+        recordWebhookDelivery?: ActionContext['recordWebhookDelivery'];
+    } | null = null;
+
+    private tickScheduled = false;
+    private shuttingDown = false;
+
     constructor(logger: Logger, maxConcurrency = 10, maxHistory = 200) {
         this.logger = logger;
         this.maxConcurrency = maxConcurrency;
@@ -50,6 +65,15 @@ export class WorkflowQueue {
     onJobUpdate(cb: JobCallback): () => void {
         this.jobUpdateCallbacks.add(cb);
         return () => { this.jobUpdateCallbacks.delete(cb); };
+    }
+
+    setExecutor(executor: JobExecutor, context: {
+        integrationConfigs: Record<string, IntegrationConfig>;
+        ai: AIProviderRegistry | undefined;
+        recordWebhookDelivery?: ActionContext['recordWebhookDelivery'];
+    }): void {
+        this.executor = executor;
+        this.executorContext = context;
     }
 
     enqueue(
@@ -83,6 +107,7 @@ export class WorkflowQueue {
             'Job enqueued',
         );
         this.notify(job);
+        this.scheduleTick();
 
         return job;
     }
@@ -134,6 +159,7 @@ export class WorkflowQueue {
         this.insertByPriority(job);
         this.notify(job);
         this.logger.info({ jobId: job.id, workflow: job.workflow.name }, 'Job retried');
+        this.scheduleTick();
         return true;
     }
 
@@ -175,7 +201,9 @@ export class WorkflowQueue {
         };
     }
 
-    async shutdown(): Promise<void> {
+    async shutdown(timeoutMs = 30_000): Promise<void> {
+        this.shuttingDown = true;
+
         for (const [id] of this.retryTimers) {
             clearTimeout(this.retryTimers.get(id));
         }
@@ -186,8 +214,25 @@ export class WorkflowQueue {
             if (ac) ac.abort();
         }
 
-        while (this.running.size > 0) {
+        const deadline = Date.now() + timeoutMs;
+        while (this.running.size > 0 && Date.now() < deadline) {
             await new Promise((r) => setTimeout(r, 100));
+        }
+
+        if (this.running.size > 0) {
+            this.logger.warn(
+                { remaining: this.running.size },
+                'Shutdown timeout reached, force-clearing remaining jobs',
+            );
+            for (const [id, job] of this.running) {
+                job.status = 'failed';
+                job.error = 'Shut down before completion';
+                job.completedAt = new Date().toISOString();
+                this.clearTimer(id);
+                this.abortControllers.delete(id);
+                this.releaseConcurrency(job);
+            }
+            this.running.clear();
         }
 
         for (const [id] of this.timers) {
@@ -199,16 +244,43 @@ export class WorkflowQueue {
     executeNow(
         workflow: WorkflowDefinition,
         event: EventPayload,
-        actions: Map<string, ActionHandler>,
-        logger: Logger,
         integrationConfigs: Record<string, IntegrationConfig>,
         ai: AIProviderRegistry | undefined,
         _signal?: AbortSignal,
     ): Promise<void> {
-        return executeWorkflow(workflow, event, actions, logger, integrationConfigs, ai, _signal, undefined);
+        return executeWorkflow(workflow, event, new Map(), this.logger, integrationConfigs, ai, _signal, undefined);
     }
 
-    // ─── Internal ─────────────────────────────────────────────────────────
+    // ─── Internal: tick-based drain ──────────────────────────────────────
+
+    private scheduleTick(): void {
+        if (this.tickScheduled || this.shuttingDown) return;
+        this.tickScheduled = true;
+        setTimeout(() => {
+            this.tickScheduled = false;
+            this.tick();
+        }, 0);
+    }
+
+    private tick(): void {
+        if (this.shuttingDown || !this.executor || !this.executorContext) return;
+
+        while (this.queue.length > 0) {
+            if (this.concurrencyCount >= this.maxConcurrency) break;
+
+            const job = this.queue[0];
+            const sameWorkflowRunning = this.countRunningByWorkflow(job.workflow.name);
+            if (sameWorkflowRunning >= job.resolvedConfig.concurrency) break;
+
+            this.queue.shift();
+            this.startJob(job);
+
+            const { integrationConfigs, ai, recordWebhookDelivery } = this.executorContext;
+            this.executor(job, integrationConfigs, ai, recordWebhookDelivery)
+                .catch(() => {})
+                .finally(() => this.onJobCompleted(job));
+        }
+    }
 
     private async startJob(job: QueueJob): Promise<void> {
         job.status = 'running';
@@ -236,71 +308,30 @@ export class WorkflowQueue {
         );
     }
 
-    // Called by the engine to run a job's workflow. Separated from startJob
-    // so the engine injects the real action registry.
-    /** Check if a queued job can start based on concurrency limits. */
-    canStart(job: QueueJob): boolean {
-        if (job.status !== 'queued') return false;
-        if (this.concurrencyCount >= this.maxConcurrency) return false;
-        const sameWorkflowRunning = this.countRunningByWorkflow(job.workflow.name);
-        return sameWorkflowRunning < job.resolvedConfig.concurrency;
-    }
-
-    /**
-     * Called by the engine to start executing a queued job.
-     * Handles lifecycle: queued → running → completed/failed.
-     */
-    async runJob(
-        job: QueueJob,
-        actions: Map<string, ActionHandler>,
-        integrationConfigs: Record<string, IntegrationConfig>,
-        ai: AIProviderRegistry | undefined,
-        recordWebhookDelivery?: ActionContext['recordWebhookDelivery'],
-    ): Promise<void> {
-        if (job.status === 'deduped') return;
-
-        // Remove from queue and start
-        const idx = this.queue.findIndex((j) => j.id === job.id);
-        if (idx !== -1) this.queue.splice(idx, 1);
-
-        await this.startJob(job);
-
-        const ac = this.abortControllers.get(job.id);
-        const signal = ac?.signal;
-
-        try {
-            await executeWorkflow(
-                job.workflow, job.event, actions, this.logger,
-                integrationConfigs, ai, undefined, recordWebhookDelivery,
-            );
+    private onJobCompleted(job: QueueJob): void {
+        if (job.status === 'running') {
             job.status = 'completed';
-        } catch (err: any) {
-            if (signal?.aborted) {
-                job.status = job.status === 'cancelled' ? 'cancelled' : 'failed';
-                job.error = 'Timed out';
-            } else {
-                job.status = 'failed';
-                job.error = err.message ?? 'Workflow execution failed';
-            }
-        } finally {
-            job.completedAt = new Date().toISOString();
-            this.clearTimer(job.id);
-            this.abortControllers.delete(job.id);
-            this.releaseConcurrency(job);
-            this.running.delete(job.id);
-            this.removeFromDedup(job);
-
-            if (job.status === 'failed' && job.attempts < job.resolvedConfig.retry + 1) {
-                this.scheduleRetry(job);
-            } else {
-                this.addToHistory(job);
-                this.notify(job);
-                this.logger.info(
-                    { jobId: job.id, workflow: job.workflow.name, status: job.status, durationMs: job.completedAt && job.startedAt ? new Date(job.completedAt).getTime() - new Date(job.startedAt).getTime() : undefined },
-                    'Job finished',
-                );
-            }
         }
+
+        job.completedAt = new Date().toISOString();
+        this.clearTimer(job.id);
+        this.abortControllers.delete(job.id);
+        this.releaseConcurrency(job);
+        this.running.delete(job.id);
+        this.removeFromDedup(job);
+
+        if (job.status === 'failed' && job.attempts < job.resolvedConfig.retry + 1) {
+            this.scheduleRetry(job);
+        } else {
+            this.addToHistory(job);
+            this.notify(job);
+            this.logger.info(
+                { jobId: job.id, workflow: job.workflow.name, status: job.status, durationMs: job.completedAt && job.startedAt ? new Date(job.completedAt).getTime() - new Date(job.startedAt).getTime() : undefined },
+                'Job finished',
+            );
+        }
+
+        this.scheduleTick();
     }
 
     private scheduleRetry(job: QueueJob): void {
@@ -317,9 +348,12 @@ export class WorkflowQueue {
             job.startedAt = undefined;
             this.insertByPriority(job);
             this.notify(job);
+            this.scheduleTick();
         }, delay);
         this.retryTimers.set(job.id, timer);
     }
+
+    // ─── Dedup ───────────────────────────────────────────────────────────
 
     private applyDedup(newJob: QueueJob): QueueJob | null {
         const key = newJob.dedupKey;
@@ -344,7 +378,6 @@ export class WorkflowQueue {
                 );
                 return deduped;
             }
-            // latest-wins: replace the existing queued job
             const idx = this.queue.indexOf(existingQueued);
             if (idx !== -1) this.queue.splice(idx, 1);
             existingQueued.status = 'deduped';
@@ -373,8 +406,6 @@ export class WorkflowQueue {
                 );
                 return deduped;
             }
-            // latest-wins: let the running job finish, queue the new one.
-            // The running job's result is effectively stale.
             this.logger.info(
                 { oldJobId: existingId, newJobId: newJob.id, dedupKey: key },
                 'Running job will be superseded (latest-wins)',
@@ -385,6 +416,8 @@ export class WorkflowQueue {
         this.dedupMap.delete(key);
         return null;
     }
+
+    // ─── Helpers ─────────────────────────────────────────────────────────
 
     private insertByPriority(job: QueueJob): void {
         const p = JOB_PRIORITY_ORDER[job.priority] ?? 2;
@@ -408,7 +441,7 @@ export class WorkflowQueue {
         }
     }
 
-    private releaseConcurrency(job: QueueJob): void {
+    private releaseConcurrency(_job: QueueJob): void {
         this.concurrencyCount = Math.max(0, this.concurrencyCount - 1);
     }
 

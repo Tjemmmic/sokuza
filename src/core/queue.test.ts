@@ -3,6 +3,8 @@ import { WorkflowQueue } from './queue.js';
 import type { QueueJob, EventPayload, WorkflowDefinition, ResolvedQueueConfig } from './types.js';
 import type { Logger } from 'pino';
 import pino from 'pino';
+import type { ActionContext, IntegrationConfig } from './types.js';
+import type { AIProviderRegistry } from './ai-providers.js';
 
 function makeLogger(): Logger {
     return pino({ level: 'silent' });
@@ -260,6 +262,109 @@ describe('WorkflowQueue', () => {
                 makeResolvedConfig({ dedupKey: 'shutdown-test' }),
             );
             await expect(queue.shutdown()).resolves.toBeUndefined();
+        });
+
+        it('should respect timeout and force-clear remaining jobs', async () => {
+            const q = new WorkflowQueue(makeLogger(), 1, 10);
+            let resolveExec: () => void = () => {};
+            q.setExecutor(
+                async () => new Promise<void>((r) => { resolveExec = r; }),
+                { integrationConfigs: {}, ai: undefined },
+            );
+
+            q.enqueue(makeWorkflow(), makeEvent(), makeResolvedConfig({ dedup: 'none', dedupKey: 'hang' }));
+
+            await new Promise((r) => setTimeout(r, 50));
+            expect(q.getJobs('running')).toHaveLength(1);
+
+            const shutdownPromise = q.shutdown(100);
+            await expect(shutdownPromise).resolves.toBeUndefined();
+        });
+    });
+
+    describe('concurrency', () => {
+        it('should respect maxConcurrency via tick', async () => {
+            const q = new WorkflowQueue(makeLogger(), 2, 10);
+            const started: string[] = [];
+            const resolvers: Array<() => void> = [];
+
+            q.setExecutor(
+                async (job) => {
+                    started.push(job.id);
+                    await new Promise<void>((r) => { resolvers.push(r); });
+                },
+                { integrationConfigs: {}, ai: undefined },
+            );
+
+            const j1 = q.enqueue(makeWorkflow({ name: 'wf1' }), makeEvent(), makeResolvedConfig({ dedup: 'none', dedupKey: 'c1', concurrency: 10 }));
+            const j2 = q.enqueue(makeWorkflow({ name: 'wf2' }), makeEvent(), makeResolvedConfig({ dedup: 'none', dedupKey: 'c2', concurrency: 10 }));
+            const j3 = q.enqueue(makeWorkflow({ name: 'wf3' }), makeEvent(), makeResolvedConfig({ dedup: 'none', dedupKey: 'c3', concurrency: 10 }));
+
+            await new Promise((r) => setTimeout(r, 50));
+
+            expect(started).toHaveLength(2);
+            expect(q.getJobs('running')).toHaveLength(2);
+            expect(q.getJobs('queued')).toHaveLength(1);
+
+            resolvers[0]();
+            await new Promise((r) => setTimeout(r, 50));
+
+            expect(started).toHaveLength(3);
+            expect(q.getJobs('queued')).toHaveLength(0);
+
+            resolvers[1]();
+            resolvers[2]();
+            await new Promise((r) => setTimeout(r, 50));
+        });
+
+        it('should respect per-workflow concurrency', async () => {
+            const q = new WorkflowQueue(makeLogger(), 10, 10);
+            const started: string[] = [];
+            const resolvers: Array<() => void> = [];
+
+            q.setExecutor(
+                async (job) => {
+                    started.push(job.id);
+                    await new Promise<void>((r) => { resolvers.push(r); });
+                },
+                { integrationConfigs: {}, ai: undefined },
+            );
+
+            const wf = makeWorkflow({ name: 'limited-wf' });
+            const j1 = q.enqueue(wf, makeEvent(), makeResolvedConfig({ dedup: 'none', dedupKey: 'pw1', concurrency: 1 }));
+            const j2 = q.enqueue(wf, makeEvent(), makeResolvedConfig({ dedup: 'none', dedupKey: 'pw2', concurrency: 1 }));
+
+            await new Promise((r) => setTimeout(r, 50));
+
+            expect(started).toHaveLength(1);
+            expect(q.getJobs('queued')).toHaveLength(1);
+
+            resolvers[0]();
+            await new Promise((r) => setTimeout(r, 50));
+
+            expect(started).toHaveLength(2);
+
+            resolvers[1]();
+            await new Promise((r) => setTimeout(r, 50));
+        });
+
+        it('should drain retried jobs', async () => {
+            const q = new WorkflowQueue(makeLogger(), 5, 10);
+            let attempt = 0;
+
+            q.setExecutor(
+                async (job) => {
+                    attempt++;
+                    if (attempt === 1) throw new Error('first fail');
+                },
+                { integrationConfigs: {}, ai: undefined },
+            );
+
+            const job = q.enqueue(makeWorkflow(), makeEvent(), makeResolvedConfig({ dedup: 'none', dedupKey: 'retry-drain', retry: 1, retryDelay: 0 }));
+
+            await new Promise((r) => setTimeout(r, 200));
+
+            expect(job.status).toBe('completed');
         });
     });
 });
