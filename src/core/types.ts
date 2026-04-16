@@ -155,6 +155,8 @@ export interface WorkflowStepDefinition {
     run?: 'parallel';
     /** Step-level AI config override. */
     ai?: AIStepConfig;
+    /** Per-step timeout in seconds. Overrides workflow-level timeout for this step. */
+    timeout?: number;
 }
 
 // ─── Actions ────────────────────────────────────────────────────────────────

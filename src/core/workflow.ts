@@ -146,6 +146,17 @@ function mergeAIConfig(
     return { ...workflowConfig, ...stepConfig };
 }
 
+function withTimeout<T>(promise: Promise<T>, seconds: number | undefined, message: string): Promise<T> {
+    if (!seconds || seconds <= 0) return promise;
+    return new Promise<T>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error(message)), seconds * 1000);
+        promise.then(
+            (val) => { clearTimeout(timer); resolve(val); },
+            (err) => { clearTimeout(timer); reject(err); },
+        );
+    });
+}
+
 function applyAIConfigToParams(
     params: Record<string, unknown>,
     aiConfig: AIStepConfig | undefined,
@@ -230,7 +241,11 @@ export async function executeWorkflow(
             const resolvedParams = applyAIConfigToParams(baseParams, aiConfig);
 
             try {
-                const result = await handler(resolvedParams, ctx);
+                const result = await withTimeout(
+                    handler(resolvedParams, ctx),
+                    step.timeout,
+                    `Step ${index} (${step.action}) timed out after ${step.timeout}s`,
+                );
                 results[index] = result;
                 if (step.id) steps[step.id] = result;
                 logger.info({ workflow: workflow.name, step: index, id: step.id, action: step.action }, 'Step completed');
@@ -294,7 +309,11 @@ async function runParallelGroup(
             const baseParams = interpolateParams(step.params, ctx);
             const resolvedParams = applyAIConfigToParams(baseParams, aiConfig);
 
-            const result = await handler(resolvedParams, ctx);
+            const result = await withTimeout(
+                handler(resolvedParams, ctx),
+                step.timeout,
+                `Parallel step ${index} (${step.action}) timed out after ${step.timeout}s`,
+            );
             logger.info({ workflow: workflow.name, step: index, id: step.id, action: step.action }, 'Parallel step completed');
             return { index, stepId: step.id, result };
         }),

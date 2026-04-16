@@ -820,4 +820,37 @@ describe('AI config resolution', () => {
         expect(capturedCtx!.workflowName).toBe('ctx-test-wf');
         expect(capturedCtx!.recordWebhookDelivery).toBe(recorder);
     });
+
+    it('enforces per-step timeout', async () => {
+        const slowAction: ActionHandler = async () => {
+            await new Promise((resolve) => setTimeout(resolve, 5000));
+            return 'done';
+        };
+
+        const registry = new Map<string, ActionHandler>();
+        registry.set('slow-action', slowAction);
+
+        const wf = makeWorkflow({
+            steps: [{ action: 'slow-action', params: {}, timeout: 0.1 }],
+        });
+
+        await expect(
+            executeWorkflow(wf, makeEvent(), registry, noopLogger),
+        ).rejects.toThrow(/timed out/);
+    });
+
+    it('allows step without timeout to complete normally', async () => {
+        const fastAction: ActionHandler = async () => 'done';
+
+        const registry = new Map<string, ActionHandler>();
+        registry.set('fast-action', fastAction);
+
+        const wf = makeWorkflow({
+            steps: [{ action: 'fast-action', params: {} }],
+        });
+
+        await expect(
+            executeWorkflow(wf, makeEvent(), registry, noopLogger),
+        ).resolves.toBeUndefined();
+    });
 });
