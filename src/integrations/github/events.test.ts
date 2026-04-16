@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { canonicalEventName, extractRepoName } from './events.js';
+import { canonicalEventName, extractRepoName, SUPPORTED_GITHUB_EVENTS } from './events.js';
 
 describe('canonicalEventName', () => {
     it('joins header event and body action', () => {
@@ -41,5 +41,14 @@ describe('extractRepoName', () => {
     it('returns undefined when repository is missing full_name', () => {
         const payload = { repository: { id: 12345 } };
         expect(extractRepoName(payload)).toBeUndefined();
+    });
+});
+
+describe('SUPPORTED_GITHUB_EVENTS', () => {
+    it('includes core events', () => {
+        expect(SUPPORTED_GITHUB_EVENTS).toContain('issues.opened');
+        expect(SUPPORTED_GITHUB_EVENTS).toContain('pull_request.opened');
+        expect(SUPPORTED_GITHUB_EVENTS).toContain('push');
+        expect(SUPPORTED_GITHUB_EVENTS).toContain('issue_comment.created');
     });
 });

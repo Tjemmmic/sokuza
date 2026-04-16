@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { createServer } from '../server/server.js';
 import { registerApiRoutes } from '../server/api.js';
 import { ConfigStore } from '../core/config-store.js';
+import { matchesTrigger } from '../core/workflow.js';
 import type { FastifyInstance } from 'fastify';
 import type { EventPayload, SokuzaConfig } from '../core/types.js';
 import pino from 'pino';
@@ -49,38 +50,15 @@ function previewEvent(event: EventPayload) {
     const unmatched: Array<{ name: string; reason: string }> = [];
 
     for (const wf of mockConfig.workflows) {
-        if (wf.enabled === false) {
-            unmatched.push({ name: wf.name, reason: 'workflow is disabled' });
-            continue;
-        }
-
-        const sources = Array.isArray(wf.trigger.source) ? wf.trigger.source : [wf.trigger.source];
-        if (!sources.includes(event.source)) {
-            unmatched.push({ name: wf.name, reason: `source mismatch` });
-            continue;
-        }
-
-        const events = Array.isArray(wf.trigger.event) ? wf.trigger.event : [wf.trigger.event];
-        if (event.source !== 'manual' && !events.includes(event.event)) {
-            unmatched.push({ name: wf.name, reason: `event mismatch` });
-            continue;
-        }
-
-        if (wf.trigger.filters) {
-            let filtersMet = true;
-            for (const [key, val] of Object.entries(wf.trigger.filters)) {
-                const parts = key.split('.');
-                let obj: any = event;
-                for (const p of parts) obj = obj?.[p];
-                if (obj !== val) { filtersMet = false; break; }
-            }
-            if (!filtersMet) {
-                unmatched.push({ name: wf.name, reason: 'filter or shorthand conditions not met' });
-                continue;
+        if (matchesTrigger(wf, event)) {
+            matched.push(wf.name);
+        } else {
+            if (wf.enabled === false) {
+                unmatched.push({ name: wf.name, reason: 'workflow is disabled' });
+            } else {
+                unmatched.push({ name: wf.name, reason: 'trigger conditions not met' });
             }
         }
-
-        matched.push(wf.name);
     }
 
     return { matched, unmatched };
@@ -137,9 +115,9 @@ describe('POST /api/events/preview', () => {
         expect(body.matched).toContain('pr-review');
         expect(body.unmatched).toEqual(
             expect.arrayContaining([
-                expect.objectContaining({ name: 'issue-triage', reason: expect.stringContaining('event mismatch') }),
+                expect.objectContaining({ name: 'issue-triage' }),
                 expect.objectContaining({ name: 'disabled-wf', reason: expect.stringContaining('disabled') }),
-                expect.objectContaining({ name: 'filtered-pr', reason: expect.stringContaining('filter') }),
+                expect.objectContaining({ name: 'filtered-pr' }),
             ]),
         );
     });

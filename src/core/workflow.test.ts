@@ -608,11 +608,15 @@ describe('parallel steps', () => {
     });
 
     it('should collect results from all parallel steps', async () => {
+        let capturedResult: Record<string, unknown> | null = null;
         const actionA: ActionHandler = async () => ({ review: 'from-a' });
         const actionB: ActionHandler = async () => ({ review: 'from-b' });
-        const actionC: ActionHandler = async (_params, ctx) => ({
-            merged: `${(ctx.steps['step-a'] as any).review} + ${(ctx.steps['step-b'] as any).review}`,
-        });
+        const actionC: ActionHandler = async (_params, ctx) => {
+            capturedResult = {
+                merged: `${(ctx.steps['step-a'] as any).review} + ${(ctx.steps['step-b'] as any).review}`,
+            };
+            return capturedResult;
+        };
 
         const registry = new Map<string, ActionHandler>();
         registry.set('action-a', actionA);
@@ -629,8 +633,7 @@ describe('parallel steps', () => {
 
         await executeWorkflow(wf, makeEvent(), registry, noopLogger);
 
-        // Step-c should have access to results from parallel steps a and b
-        // This tests that parallel results flow into sequential steps after the group
+        expect(capturedResult).toEqual({ merged: 'from-a + from-b' });
     });
 
     it('should fail-fast on error in parallel group', async () => {
