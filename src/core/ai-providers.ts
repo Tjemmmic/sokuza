@@ -715,6 +715,9 @@ function spawnCli(opts: SpawnCliOptions): Promise<string> {
         });
 
         // Write payload via stdin (no arg size limit, no escaping headaches).
+        child.stdin.on('error', (err) => {
+            logger.debug({ provider: providerName, err: err.message }, 'stdin write error (child may have exited early)');
+        });
         child.stdin.write(stdin);
         child.stdin.end();
     });

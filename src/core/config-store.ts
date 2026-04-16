@@ -11,10 +11,18 @@ export class ConfigStore {
     private readonly configPath: string;
     private readonly logger: Logger;
     private cache: Record<string, unknown> | null = null;
+    private writeLock: Promise<void> = Promise.resolve();
 
     constructor(configPath: string, logger: Logger) {
         this.configPath = resolve(configPath);
         this.logger = logger;
+    }
+
+    private withLock<T>(fn: () => Promise<T>): Promise<T> {
+        const prev = this.writeLock;
+        let resolve!: () => void;
+        this.writeLock = new Promise<void>((r) => { resolve = r; });
+        return prev.then(() => fn()).finally(resolve);
     }
 
     async read(): Promise<Record<string, unknown>> {
@@ -30,15 +38,19 @@ export class ConfigStore {
     }
 
     async write(data: Record<string, unknown>): Promise<void> {
-        const yamlStr = yaml.dump(data, { lineWidth: 120, noRefs: true });
-        await this.atomicWrite(yamlStr);
-        this.invalidateCache();
+        return this.withLock(async () => {
+            const yamlStr = yaml.dump(data, { lineWidth: 120, noRefs: true });
+            await this.atomicWrite(yamlStr);
+            this.invalidateCache();
+        });
     }
 
     async writeRaw(rawYaml: string): Promise<void> {
-        yaml.load(rawYaml);
-        await this.atomicWrite(rawYaml);
-        this.invalidateCache();
+        return this.withLock(async () => {
+            yaml.load(rawYaml);
+            await this.atomicWrite(rawYaml);
+            this.invalidateCache();
+        });
     }
 
     invalidateCache(): void {
@@ -48,22 +60,28 @@ export class ConfigStore {
     async update<T>(
         mutator: (config: Record<string, unknown>) => T,
     ): Promise<T> {
-        const config = await this.read();
-        const result = mutator(config);
-        await this.write(config);
-        return result;
+        return this.withLock(async () => {
+            const config = await this.read();
+            const result = mutator(config);
+            const yamlStr = yaml.dump(config, { lineWidth: 120, noRefs: true });
+            await this.atomicWrite(yamlStr);
+            this.invalidateCache();
+            return result;
+        });
     }
 
     async updateRaw<T>(
         mutator: (config: Record<string, unknown>) => T,
     ): Promise<T> {
-        const raw = await this.readRaw();
-        const config = yaml.load(raw) as Record<string, unknown>;
-        const result = mutator(config);
-        const yamlStr = yaml.dump(config, { lineWidth: 120, noRefs: true });
-        await this.atomicWrite(yamlStr);
-        this.invalidateCache();
-        return result;
+        return this.withLock(async () => {
+            const raw = await this.readRaw();
+            const config = yaml.load(raw) as Record<string, unknown>;
+            const result = mutator(config);
+            const yamlStr = yaml.dump(config, { lineWidth: 120, noRefs: true });
+            await this.atomicWrite(yamlStr);
+            this.invalidateCache();
+            return result;
+        });
     }
 
     async reloadAndNormalize(): Promise<Partial<SokuzaConfig>> {

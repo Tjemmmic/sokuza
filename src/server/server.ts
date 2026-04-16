@@ -37,12 +37,13 @@ export function createServer(logger: Logger): FastifyInstance {
     const dashboardDir = getDashboardDir();
 
     server.get('/', async (_request, reply) => {
-        return serveFile(reply, join(dashboardDir, 'index.html'));
+        return serveFile(reply, join(dashboardDir, 'index.html'), dashboardDir);
     });
 
     server.get('/dashboard/*', async (request, reply) => {
         const file = (request.params as Record<string, string>)['*'];
-        return serveFile(reply, join(dashboardDir, file));
+        const safePath = file.replace(/[^a-zA-Z0-9._/-]/g, '').replace(/\.\./g, '');
+        return serveFile(reply, join(dashboardDir, safePath), dashboardDir);
     });
 
     // ─── Global error handler ──────────────────────────────────────────────
@@ -54,7 +55,14 @@ export function createServer(logger: Logger): FastifyInstance {
     return server;
 }
 
-async function serveFile(reply: any, filePath: string): Promise<void> {
+async function serveFile(reply: any, filePath: string, allowedDir?: string): Promise<void> {
+    if (allowedDir) {
+        const resolved = resolve(filePath);
+        if (!resolved.startsWith(resolve(allowedDir))) {
+            reply.status(403).send({ error: 'Forbidden' });
+            return;
+        }
+    }
     try {
         const content = await readFile(filePath);
         const ext = extname(filePath);

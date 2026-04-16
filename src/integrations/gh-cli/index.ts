@@ -71,12 +71,12 @@ export class GhCliIntegration implements Integration {
     readonly name = 'gh-cli';
     readonly supportedEvents = [...SUPPORTED_EVENTS];
     readonly actions: Record<string, ActionHandler> = {
-        'github-clone-repo': ghCloneRepoAction,
-        'github-fetch-diff': ghFetchDiffAction,
-        'github-comment': ghCommentAction,
-        'github-fetch-reviews': ghFetchReviewsAction,
-        'github-create-pr': ghCreatePrAction,
-        'github-review': ghReviewAction,
+        'gh-cli-clone-repo': ghCloneRepoAction,
+        'gh-cli-fetch-diff': ghFetchDiffAction,
+        'gh-cli-comment': ghCommentAction,
+        'gh-cli-fetch-reviews': ghFetchReviewsAction,
+        'gh-cli-create-pr': ghCreatePrAction,
+        'gh-cli-review': ghReviewAction,
     };
 
     private username = '';

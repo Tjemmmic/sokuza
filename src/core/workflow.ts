@@ -105,6 +105,7 @@ function matchesFilter(
 
     // Standard dot-path resolution
     const actual = resolvePath(event, filterKey);
+    if (actual === undefined || actual === null) return false;
     if (CASE_INSENSITIVE_PATHS.has(filterKey)) {
         return String(actual).toLowerCase() === expected.toLowerCase();
     }
@@ -367,9 +368,15 @@ export function interpolateParams(
     return result;
 }
 
+const ALLOWED_INTERPOLATION_PREFIXES = ['event.', 'results.', 'steps.', 'metadata.'];
+
 function interpolateString(template: string, context: ActionContext): string {
     return template.replace(/\{\{(.+?)\}\}/g, (_match, path: string) => {
-        const value = resolvePath(context, path.trim());
+        const trimmed = path.trim();
+        if (!ALLOWED_INTERPOLATION_PREFIXES.some(p => trimmed.startsWith(p))) {
+            return '';
+        }
+        const value = resolvePath(context, trimmed);
         return value !== undefined ? String(value) : '';
     });
 }

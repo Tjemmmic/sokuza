@@ -25,6 +25,10 @@ interface ApiDeps {
     getWebhookDeliveries: (workflowName?: string) => WebhookDelivery[];
 }
 
+function sanitizeFileName(name: string): string {
+    return name.replace(/[^a-zA-Z0-9_-]/g, '-');
+}
+
 export interface EventEntry {
     event: { source: string; event: string; action?: string; metadata: Record<string, unknown> };
     timestamp: string;
@@ -487,16 +491,17 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
 
     server.put('/api/templates/:name', async (request, reply) => {
         const { name } = request.params as { name: string };
+        const safeName = sanitizeFileName(name);
         const body = request.body as { content: string };
         if (!body?.content) {
             return reply.status(400).send({ error: 'Template content required' });
         }
 
-        const filePath = join(deps.getTemplateDir(), `${name}.yaml`);
+        const filePath = join(deps.getTemplateDir(), `${safeName}.yaml`);
         try {
-            await readFile(filePath, 'utf-8'); // check it exists
+            await readFile(filePath, 'utf-8');
         } catch {
-            return reply.status(404).send({ error: `Template "${name}" not found` });
+            return reply.status(404).send({ error: `Template "${safeName}" not found` });
         }
 
         try {
@@ -506,13 +511,14 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
         }
 
         await writeFile(filePath, body.content, 'utf-8');
-        logger.info({ template: name }, 'Template updated via dashboard');
+        logger.info({ template: safeName }, 'Template updated via dashboard');
         return { ok: true };
     });
 
     server.delete('/api/templates/:name', async (request, reply) => {
         const { name } = request.params as { name: string };
-        const filePath = join(deps.getTemplateDir(), `${name}.yaml`);
+        const safeName = sanitizeFileName(name);
+        const filePath = join(deps.getTemplateDir(), `${safeName}.yaml`);
 
         try {
             await readFile(filePath, 'utf-8');

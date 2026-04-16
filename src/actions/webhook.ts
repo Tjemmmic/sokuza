@@ -34,6 +34,7 @@ export const webhookAction: ActionHandler = async (params, context) => {
             method,
             headers,
             body: JSON.stringify(body),
+            signal: AbortSignal.timeout(30_000),
         });
 
         statusCode = response.status;

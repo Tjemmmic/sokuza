@@ -420,20 +420,39 @@ export class GitHubPollIntegration implements Integration {
     // ─── Helpers ────────────────────────────────────────────────────────
 
     private async apiGet(url: string): Promise<unknown> {
-        const res = await fetch(url, {
-            headers: {
-                Authorization: `Bearer ${this.config.token}`,
-                Accept: 'application/vnd.github+json',
-                'X-GitHub-Api-Version': '2022-11-28',
-            },
-        });
+        return this.apiGetAllPages(url);
+    }
 
-        if (res.status === 304) return []; // Not modified
-        if (!res.ok) {
-            throw new Error(`GitHub API ${res.status}: ${res.statusText}`);
+    private async apiGetAllPages(url: string): Promise<unknown[]> {
+        const all: unknown[] = [];
+        let nextUrl: string | null = url;
+
+        while (nextUrl) {
+            const res = await fetch(nextUrl, {
+                headers: {
+                    Authorization: `Bearer ${this.config.token}`,
+                    Accept: 'application/vnd.github+json',
+                    'X-GitHub-Api-Version': '2022-11-28',
+                },
+            });
+
+            if (res.status === 304) break;
+            if (!res.ok) {
+                throw new Error(`GitHub API ${res.status}: ${res.statusText}`);
+            }
+
+            const data = await res.json() as unknown[];
+            if (!Array.isArray(data)) return data;
+            all.push(...data);
+
+            const link = res.headers?.get?.('link');
+            if (!link) break;
+
+            const nextMatch = link.match(/<([^>]+)>;\s*rel="next"/);
+            nextUrl = nextMatch ? nextMatch[1] : null;
         }
 
-        return await res.json();
+        return all;
     }
 
     private async emit(
