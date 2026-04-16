@@ -62,6 +62,8 @@ export interface AIProvider {
 export interface AIProviderRegistry {
     providers: Map<string, AIProvider>;
     defaultProvider: string;
+    /** Ordered list of provider names to try on failure. */
+    fallbackChain: string[];
 }
 
 // ─── Legacy aliases ─────────────────────────────────────────────────────────
@@ -126,7 +128,23 @@ export function loadAIProviders(
         );
     }
 
-    return { providers, defaultProvider };
+    // ─── Parse fallback chain ────────────────────────────────────────────
+    const fallbackChain: string[] = [];
+    const rawFallbacks = raw?.fallback_providers;
+    if (Array.isArray(rawFallbacks)) {
+        for (const name of rawFallbacks) {
+            if (typeof name !== 'string') continue;
+            if (!providers.has(name)) {
+                throw new Error(
+                    `ai.fallback_providers: "${name}" is not a registered provider. ` +
+                    `Known: ${[...providers.keys()].join(', ')}`,
+                );
+            }
+            fallbackChain.push(name);
+        }
+    }
+
+    return { providers, defaultProvider, fallbackChain };
 }
 
 function parseProvider(name: string, raw: Record<string, unknown>): AIProvider {
@@ -237,6 +255,62 @@ export async function runCompletion(
         case 'cli':
             return runCliCompletion(provider, { ...request, model });
     }
+}
+
+/**
+ * Run a completion with automatic fallback to alternative providers.
+ * Tries the primary provider first, then each fallback in order.
+ */
+export async function runCompletionWithFallback(
+    registry: AIProviderRegistry,
+    providerName: string | undefined,
+    request: CompletionRequest,
+): Promise<CompletionResult> {
+    const primary = resolveProvider(registry, providerName);
+    const chain = [primary.name, ...registry.fallbackChain.filter(n => n !== primary.name)];
+
+    let lastError: Error | undefined;
+    for (const name of chain) {
+        const provider = registry.providers.get(name)!;
+        try {
+            return await runCompletion(provider, request);
+        } catch (err: any) {
+            lastError = err;
+            request.logger.warn(
+                { provider: name, error: err.message },
+                'AI provider failed, trying next fallback',
+            );
+        }
+    }
+    throw lastError ?? new Error('All AI providers failed');
+}
+
+/**
+ * Run an agentic session with automatic fallback to alternative CLI providers.
+ */
+export async function runAgentWithFallback(
+    registry: AIProviderRegistry,
+    providerName: string | undefined,
+    request: AgentRequest,
+): Promise<AgentResult> {
+    const primary = resolveProvider(registry, providerName);
+    const chain = [primary.name, ...registry.fallbackChain.filter(n => n !== primary.name)];
+
+    let lastError: Error | undefined;
+    for (const name of chain) {
+        const provider = registry.providers.get(name)!;
+        if (provider.kind !== 'cli') continue;
+        try {
+            return await runAgent(provider, request);
+        } catch (err: any) {
+            lastError = err;
+            request.logger.warn(
+                { provider: name, error: err.message },
+                'AI agent provider failed, trying next fallback',
+            );
+        }
+    }
+    throw lastError ?? new Error('All AI agent providers failed');
 }
 
 async function runAnthropicCompletion(

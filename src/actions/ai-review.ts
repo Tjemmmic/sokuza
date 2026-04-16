@@ -1,7 +1,7 @@
 import type { ActionHandler } from '../core/types.js';
 import { truncateDiff, DEFAULT_MAX_CHARS } from '../core/diff-truncator.js';
 import { generateCodeReviewPrompt } from './review-templates.js';
-import { resolveProvider, runCompletion } from '../core/ai-providers.js';
+import { runCompletionWithFallback } from '../core/ai-providers.js';
 
 const DEFAULT_MAX_TOKENS = 4096;
 
@@ -85,8 +85,6 @@ export const aiReviewAction: ActionHandler = async (params, context) => {
     );
 
     // ─── Resolve provider via registry ──────────────────────────────────
-    const provider = resolveProvider(context.ai, params.provider as string | undefined);
-
     const systemPrompt = (params.prompt as string) ?? DEFAULT_SYSTEM_PROMPT;
     const additionalContext = params.context as string | undefined;
 
@@ -132,11 +130,11 @@ export const aiReviewAction: ActionHandler = async (params, context) => {
     userMessage += `## Diff\n\`\`\`diff\n${truncation.diff}\n\`\`\``;
 
     context.logger.info(
-        { provider: provider.name, kind: provider.kind, promptLength: userMessage.length },
+        { promptLength: userMessage.length },
         'Sending diff to AI for review',
     );
 
-    const completion = await runCompletion(provider, {
+    const completion = await runCompletionWithFallback(context.ai, params.provider as string | undefined, {
         systemPrompt,
         userMessage,
         model: params.model as string | undefined,

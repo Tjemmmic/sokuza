@@ -553,7 +553,7 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
             return reply.status(503).send({ error: 'No AI providers configured' });
         }
 
-        const { resolveProvider, runCompletion } = await import('../core/ai-providers.js');
+        const { resolveProvider, runCompletionWithFallback } = await import('../core/ai-providers.js');
 
         let provider;
         try {
@@ -566,7 +566,7 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
         const start = Date.now();
 
         try {
-            const result = await runCompletion(provider, {
+            const result = await runCompletionWithFallback(config.ai, body.provider, {
                 systemPrompt: 'You are a test assistant. Follow instructions exactly.',
                 userMessage: prompt,
                 logger,
@@ -574,8 +574,7 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
 
             return {
                 ok: true,
-                provider: provider.name,
-                kind: provider.kind,
+                provider: result.provider,
                 model: result.model,
                 response: result.text.slice(0, 500),
                 durationMs: Date.now() - start,

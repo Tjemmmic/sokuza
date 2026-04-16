@@ -1,5 +1,5 @@
 import type { ActionHandler } from '../core/types.js';
-import { resolveProvider, runAgent } from '../core/ai-providers.js';
+import { runAgentWithFallback } from '../core/ai-providers.js';
 
 /**
  * "ai-agent" action.
@@ -35,14 +35,11 @@ export const aiAgentAction: ActionHandler = async (params, context) => {
         throw new Error('ai-agent: prompt is required');
     }
 
-    const provider = resolveProvider(context.ai, params.provider as string | undefined);
     const outputFormat = (params.output_format as 'text' | 'json') ?? 'text';
     const allowedTools = params.allowed_tools as string[] | undefined;
 
     context.logger.info(
         {
-            provider: provider.name,
-            kind: provider.kind,
             workdir,
             promptLength: prompt.length,
             tools: allowedTools,
@@ -50,7 +47,7 @@ export const aiAgentAction: ActionHandler = async (params, context) => {
         'Running AI agent in repo',
     );
 
-    const result = await runAgent(provider, {
+    const result = await runAgentWithFallback(context.ai, params.provider as string | undefined, {
         prompt,
         workdir,
         model: params.model as string | undefined,

@@ -186,4 +186,33 @@ describe('buildCliArgs', () => {
         });
         expect(args).toEqual(['run', '--model', 'glm-4.6', '--format', 'json']);
     });
+
+    it('parses fallback_providers from config', () => {
+        const reg = loadAIProviders({
+            providers: {
+                'zai-glm': {
+                    kind: 'anthropic-api',
+                    base_url: 'https://api.z.ai/api/anthropic',
+                    api_key: 'zai-key',
+                    default_model: 'glm-4.6',
+                },
+            },
+            default_provider: 'anthropic',
+            fallback_providers: ['claude-code', 'zai-glm'],
+        });
+        expect(reg.fallbackChain).toEqual(['claude-code', 'zai-glm']);
+    });
+
+    it('rejects unknown provider in fallback chain', () => {
+        expect(() =>
+            loadAIProviders({
+                fallback_providers: ['nonexistent'],
+            }),
+        ).toThrow(/not a registered provider/);
+    });
+
+    it('returns empty fallback chain when not configured', () => {
+        const reg = loadAIProviders(undefined);
+        expect(reg.fallbackChain).toEqual([]);
+    });
 });
