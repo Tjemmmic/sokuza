@@ -24,6 +24,7 @@ import { ConfigStore } from './config-store.js';
 const MAX_RECENT_EVENTS = 100;
 const MAX_RUN_HISTORY = 200;
 const MAX_WEBHOOK_DELIVERIES = 200;
+const MAX_SEEN_DELIVERY_IDS = 1000;
 
 export class SokuzaEngine {
     private integrations = new Map<string, Integration>();
@@ -45,6 +46,7 @@ export class SokuzaEngine {
     private runHistory: WorkflowRunRecord[] = [];
     private webhookDeliveries: WebhookDelivery[] = [];
     private webhookDeliveryIdCounter = 0;
+    private seenDeliveryIds = new Set<string>();
     private runIdCounter = 0;
 
     constructor(config: SokuzaConfig, configPath?: string) {
@@ -87,6 +89,25 @@ export class SokuzaEngine {
 
     /** Handle an incoming event — match against workflows and enqueue */
     private handleEvent: EventHandler = async (event: EventPayload) => {
+        const deliveryId = event.metadata?.deliveryId as string | undefined;
+        if (deliveryId) {
+            if (this.seenDeliveryIds.has(deliveryId)) {
+                this.logger.info(
+                    { deliveryId, source: event.source, event: event.event },
+                    'Deduplicating event — delivery ID already seen',
+                );
+                return;
+            }
+            this.seenDeliveryIds.add(deliveryId);
+            if (this.seenDeliveryIds.size > MAX_SEEN_DELIVERY_IDS) {
+                const iter = this.seenDeliveryIds.values();
+                for (let i = 0; i < MAX_SEEN_DELIVERY_IDS / 2; i++) {
+                    const val = iter.next().value;
+                    if (val !== undefined) this.seenDeliveryIds.delete(val);
+                }
+            }
+        }
+
         this.logger.info(
             { source: event.source, event: event.event, action: event.action },
             'Received event',
