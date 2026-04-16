@@ -736,22 +736,45 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
             'Access-Control-Allow-Origin': '*',
         });
 
+        let alive = true;
+
         reply.raw.write('data: {"type":"connected"}\n\n');
 
         const unsubscribe = deps.addEventSubscriber((event) => {
+            if (!alive) return;
             try {
                 reply.raw.write(`data: ${JSON.stringify(event)}\n\n`);
-            } catch { /* client disconnected */ }
+            } catch {
+                alive = false;
+                unsubscribe();
+                clearInterval(heartbeat);
+            }
         });
 
         const heartbeat = setInterval(() => {
-            try { reply.raw.write(': heartbeat\n\n'); } catch { /* */ }
+            if (!alive) { clearInterval(heartbeat); return; }
+            try { reply.raw.write(': heartbeat\n\n'); } catch {
+                alive = false;
+                unsubscribe();
+                clearInterval(heartbeat);
+            }
         }, 30_000);
 
-        request.raw.on('close', () => {
+        const cleanup = () => {
+            if (!alive) return;
+            alive = false;
             unsubscribe();
             clearInterval(heartbeat);
-        });
+        };
+
+        request.raw.on('close', cleanup);
+
+        setTimeout(() => {
+            if (alive) {
+                cleanup();
+                try { reply.raw.end(); } catch { /* */ }
+            }
+        }, 86_400_000);
     });
 
     // ─── GitHub Proxy (for smart pickers) ───────────────────────────────

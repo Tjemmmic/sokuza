@@ -1,3 +1,4 @@
+import { rm } from 'node:fs/promises';
 import type { Logger } from 'pino';
 import type {
     ActionContext,
@@ -211,63 +212,72 @@ export async function executeWorkflow(
 ): Promise<void> {
     const results: Record<number, unknown> = {};
     const steps: Record<string, unknown> = {};
+    const tempPaths: string[] = [];
 
     const aiRegistry: AIProviderRegistry = ai ?? loadAIProviders(undefined);
 
     logger.info({ workflow: workflow.name }, 'Executing workflow');
 
-    const groups = groupSteps(workflow.steps);
+    try {
+        const groups = groupSteps(workflow.steps);
 
-    for (const group of groups) {
-        if (group.kind === 'sequential') {
-            const { index, step } = group.steps[0];
-            const ctx = makeContext(event, results, steps, integrationConfigs, aiRegistry, logger, workflow.name, recordWebhookDelivery);
+        for (const group of groups) {
+            if (group.kind === 'sequential') {
+                const { index, step } = group.steps[0];
+                const ctx = makeContext(event, results, steps, integrationConfigs, aiRegistry, logger, workflow.name, recordWebhookDelivery);
 
-            if (shouldSkip(step, ctx)) {
-                logger.info(
-                    { workflow: workflow.name, step: index, action: step.action, condition: step.condition },
-                    'Step condition is falsy, skipping',
-                );
-                continue;
-            }
-
-            const handler = actionRegistry.get(step.action);
-            if (!handler) {
-                logger.warn({ action: step.action, step: index }, 'Unknown action, skipping step');
-                continue;
-            }
-
-            const aiConfig = mergeAIConfig(step.ai, workflow.ai);
-            const baseParams = interpolateParams(step.params, ctx);
-            const resolvedParams = applyAIConfigToParams(baseParams, aiConfig);
-
-            try {
-                const result = await withTimeout(
-                    handler(resolvedParams, ctx),
-                    step.timeout,
-                    `Step ${index} (${step.action}) timed out after ${step.timeout}s`,
-                );
-                results[index] = result;
-                if (step.id) steps[step.id] = result;
-                logger.info({ workflow: workflow.name, step: index, id: step.id, action: step.action }, 'Step completed');
-            } catch (err) {
-                if (step.on_error === 'continue') {
-                    logger.warn({ workflow: workflow.name, step: index, action: step.action, err }, 'Step failed (on_error=continue), proceeding');
+                if (shouldSkip(step, ctx)) {
+                    logger.info(
+                        { workflow: workflow.name, step: index, action: step.action, condition: step.condition },
+                        'Step condition is falsy, skipping',
+                    );
                     continue;
                 }
-                logger.error({ workflow: workflow.name, step: index, action: step.action, err }, 'Step failed');
-                throw err;
-            }
-        } else {
-            await runParallelGroup(
-                workflow, group.steps, event, results, steps,
-                actionRegistry, integrationConfigs, aiRegistry, logger,
-                recordWebhookDelivery,
-            );
-        }
-    }
 
-    logger.info({ workflow: workflow.name }, 'Workflow completed');
+                const handler = actionRegistry.get(step.action);
+                if (!handler) {
+                    logger.warn({ action: step.action, step: index }, 'Unknown action, skipping step');
+                    continue;
+                }
+
+                const aiConfig = mergeAIConfig(step.ai, workflow.ai);
+                const baseParams = interpolateParams(step.params, ctx);
+                const resolvedParams = applyAIConfigToParams(baseParams, aiConfig);
+
+                try {
+                    const result = await withTimeout(
+                        handler(resolvedParams, ctx),
+                        step.timeout,
+                        `Step ${index} (${step.action}) timed out after ${step.timeout}s`,
+                    );
+                    collectTempPath(result, tempPaths);
+                    results[index] = result;
+                    if (step.id) steps[step.id] = result;
+                    logger.info({ workflow: workflow.name, step: index, id: step.id, action: step.action }, 'Step completed');
+                } catch (err) {
+                    if (step.on_error === 'continue') {
+                        logger.warn({ workflow: workflow.name, step: index, action: step.action, err }, 'Step failed (on_error=continue), proceeding');
+                        continue;
+                    }
+                    logger.error({ workflow: workflow.name, step: index, action: step.action, err }, 'Step failed');
+                    throw err;
+                }
+            } else {
+                const parallelResults = await runParallelGroup(
+                    workflow, group.steps, event, results, steps,
+                    actionRegistry, integrationConfigs, aiRegistry, logger,
+                    recordWebhookDelivery,
+                );
+                for (const pr of parallelResults) {
+                    if (pr) collectTempPath(pr.result, tempPaths);
+                }
+            }
+        }
+
+        logger.info({ workflow: workflow.name }, 'Workflow completed');
+    } finally {
+        await cleanupTempDirs(tempPaths, logger);
+    }
 }
 
 interface ParallelStepResult {
@@ -287,7 +297,7 @@ async function runParallelGroup(
     aiRegistry: AIProviderRegistry,
     logger: Logger,
     recordWebhookDelivery?: import('./types.js').ActionContext['recordWebhookDelivery'],
-): Promise<void> {
+): Promise<ParallelStepResult[]> {
     const settled = await Promise.allSettled(
         groupSteps.map(async ({ index, step }): Promise<ParallelStepResult | undefined> => {
             const ctx = makeContext(event, results, steps, integrationConfigs, aiRegistry, logger, workflow.name, recordWebhookDelivery);
@@ -320,6 +330,8 @@ async function runParallelGroup(
         }),
     );
 
+    const collected: ParallelStepResult[] = [];
+
     for (let i = 0; i < settled.length; i++) {
         const outcome = settled[i];
         if (outcome.status === 'rejected') {
@@ -336,6 +348,30 @@ async function runParallelGroup(
             const { index, stepId, result } = outcome.value;
             results[index] = result;
             if (stepId) steps[stepId] = result;
+            collected.push(outcome.value);
+        }
+    }
+
+    return collected;
+}
+
+// ─── Temp directory cleanup ──────────────────────────────────────────────────
+
+function collectTempPath(result: unknown, paths: string[]): void {
+    if (!result || typeof result !== 'object') return;
+    const obj = result as Record<string, unknown>;
+    if (typeof obj.path === 'string' && obj.path.includes('sokuza-repo-')) {
+        paths.push(obj.path);
+    }
+}
+
+async function cleanupTempDirs(paths: string[], logger: Logger): Promise<void> {
+    for (const dir of paths) {
+        try {
+            await rm(dir, { recursive: true, force: true });
+            logger.debug({ path: dir }, 'Cleaned up temp directory');
+        } catch (err: any) {
+            logger.warn({ path: dir, err: err.message }, 'Failed to clean up temp directory');
         }
     }
 }

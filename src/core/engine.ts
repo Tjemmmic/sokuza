@@ -23,6 +23,7 @@ import type { JobExecutor } from './queue.js';
 import { resolveQueueConfig } from './queue-config.js';
 import { ConfigStore } from './config-store.js';
 import { executeWorkflow } from './workflow.js';
+import { resetTemplateCache } from './templates.js';
 
 const MAX_RECENT_EVENTS = 100;
 const MAX_RUN_HISTORY = 200;
@@ -286,6 +287,7 @@ export class SokuzaEngine {
     /** Reload config from disk — workflows, AI, queue, integrations */
     private async reloadConfig(): Promise<void> {
         try {
+            resetTemplateCache();
             const reloaded = await this.configStore.reloadAndNormalize();
             if (reloaded.workflows) {
                 this.config.workflows = reloaded.workflows;
