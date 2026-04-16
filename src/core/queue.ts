@@ -32,7 +32,7 @@ export class WorkflowQueue {
 
     private readonly logger: Logger;
 
-    private onJobUpdate?: JobCallback;
+    private jobUpdateCallbacks = new Set<JobCallback>();
 
     private jobIdCounter = 0;
 
@@ -43,7 +43,12 @@ export class WorkflowQueue {
     }
 
     setOnJobUpdate(cb: JobCallback): void {
-        this.onJobUpdate = cb;
+        this.jobUpdateCallbacks.add(cb);
+    }
+
+    onJobUpdate(cb: JobCallback): () => void {
+        this.jobUpdateCallbacks.add(cb);
+        return () => { this.jobUpdateCallbacks.delete(cb); };
     }
 
     enqueue(
@@ -440,7 +445,9 @@ export class WorkflowQueue {
     }
 
     private notify(job: QueueJob): void {
-        this.onJobUpdate?.(job);
+        for (const cb of this.jobUpdateCallbacks) {
+            cb(job);
+        }
     }
 }
 

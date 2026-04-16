@@ -13,6 +13,7 @@ import type {
 import { readFile } from 'node:fs/promises';
 import yaml from 'js-yaml';
 import { matchesTrigger } from './workflow.js';
+import { toArray } from './types.js';
 import { createServer } from '../server/server.js';
 import { registerApiRoutes } from '../server/api.js';
 import type { FastifyInstance } from 'fastify';
@@ -52,7 +53,7 @@ export class SokuzaEngine {
         });
 
         this.queue = new WorkflowQueue(this.logger);
-        this.queue.setOnJobUpdate((job) => this.onJobUpdate(job));
+        this.queue.setOnJobUpdate((job) => this.broadcastJobUpdate(job));
     }
 
     /** Register an integration plugin and its actions */
@@ -339,6 +340,8 @@ export class SokuzaEngine {
             integration.registerRoutes(this.server, this.handleEvent);
         }
 
+        this.startCronSchedules();
+
         const { port, host } = this.config.server;
         await this.server.listen({ port, host: host ?? '0.0.0.0' });
         this.logger.info({ port, host }, '🚀 Sokuza is listening');
@@ -347,6 +350,10 @@ export class SokuzaEngine {
     /** Graceful shutdown */
     async stop(): Promise<void> {
         this.logger.info('Shutting down Sokuza engine...');
+
+        this.stopCronSchedules();
+        this.stopPollingIntegrations();
+
         await this.queue.shutdown();
         if (this.server) {
             await this.server.close();
@@ -376,24 +383,32 @@ export class SokuzaEngine {
         }
 
         return new Promise<void>((resolve, reject) => {
-            const originalUpdate = this.queue['onJobUpdate'];
-            const handler = (updatedJob: QueueJob) => {
+            let settled = false;
+            const unsubscribe = this.queue.onJobUpdate((updatedJob: QueueJob) => {
                 if (updatedJob.id !== job.id) return;
                 if (updatedJob.status === 'completed') {
-                    this.queue.setOnJobUpdate(originalUpdate!);
+                    if (settled) return;
+                    settled = true;
+                    unsubscribe();
                     resolve();
                 } else if (updatedJob.status === 'failed' || updatedJob.status === 'cancelled') {
-                    this.queue.setOnJobUpdate(originalUpdate!);
+                    if (settled) return;
+                    settled = true;
+                    unsubscribe();
                     reject(new Error(updatedJob.error ?? 'Job failed'));
                 }
-            };
-            this.queue.setOnJobUpdate(handler);
+            });
 
-            this.processQueueJob(job).catch(reject);
+            this.processQueueJob(job).catch((err) => {
+                if (settled) return;
+                settled = true;
+                unsubscribe();
+                reject(err);
+            });
         });
     }
 
-    private onJobUpdate(job: QueueJob): void {
+    private broadcastJobUpdate(job: QueueJob): void {
         for (const cb of this.eventSubscribers) {
             cb({
                 type: 'queue-update',
@@ -410,6 +425,52 @@ export class SokuzaEngine {
                 },
                 timestamp: new Date().toISOString(),
             });
+        }
+    }
+
+    // ─── Cron scheduling ─────────────────────────────────────────────────
+
+    private startCronSchedules(): void {
+        const cronIntegration = this.integrations.get('cron');
+        if (!cronIntegration) return;
+
+        const cronEvents = new Set<string>();
+        for (const wf of this.config.workflows) {
+            const sources = toArray(wf.trigger.source);
+            if (!sources.includes('cron')) continue;
+
+            const events = toArray(wf.trigger.event);
+            for (const evt of events) {
+                cronEvents.add(evt);
+            }
+        }
+
+        if (!('startSchedule' in cronIntegration)) return;
+
+        for (const eventName of cronEvents) {
+            (cronIntegration as any).startSchedule(eventName);
+            this.logger.info({ schedule: eventName }, 'Cron schedule started');
+        }
+    }
+
+    private stopCronSchedules(): void {
+        const cronIntegration = this.integrations.get('cron');
+        if (!cronIntegration) return;
+        if ('stopAll' in cronIntegration && typeof (cronIntegration as any).stopAll === 'function') {
+            (cronIntegration as any).stopAll();
+        }
+    }
+
+    // ─── Polling integration shutdown ────────────────────────────────────
+
+    private stopPollingIntegrations(): void {
+        for (const integration of this.integrations.values()) {
+            if ('stopPolling' in integration && typeof (integration as any).stopPolling === 'function') {
+                (integration as any).stopPolling();
+            }
+            if ('stop' in integration && typeof (integration as any).stop === 'function' && integration.name !== 'cron') {
+                (integration as any).stop();
+            }
         }
     }
 }
