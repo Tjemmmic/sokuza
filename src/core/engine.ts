@@ -13,6 +13,7 @@ import type {
 } from './types.js';
 import { matchesTrigger } from './workflow.js';
 import { toArray } from './types.js';
+import { createHash } from 'node:crypto';
 import { createServer } from '../server/server.js';
 import { registerApiRoutes } from '../server/api.js';
 import type { FastifyInstance } from 'fastify';
@@ -47,6 +48,7 @@ export class SokuzaEngine {
     private webhookDeliveries: WebhookDelivery[] = [];
     private webhookDeliveryIdCounter = 0;
     private seenDeliveryIds = new Set<string>();
+    private lastConfigHash: string = '';
     private runIdCounter = 0;
 
     constructor(config: SokuzaConfig, configPath?: string) {
@@ -146,6 +148,7 @@ export class SokuzaEngine {
         for (const wf of matchedWorkflows) {
             const resolvedConfig = resolveQueueConfig(wf, event, this.config.queue, this.config.ai);
             const job = this.queue.enqueue(wf, event, resolvedConfig);
+            job.configHash = this.getConfigHash();
             this.processQueueJob(job);
         }
     };
@@ -253,6 +256,7 @@ export class SokuzaEngine {
         resolvedConfig.priority = 'high';
 
         const job = this.queue.enqueue(workflow, event, resolvedConfig);
+        job.configHash = this.getConfigHash();
 
         try {
             await this.processQueueJobAndWait(job);
@@ -271,7 +275,10 @@ export class SokuzaEngine {
     private async reloadConfig(): Promise<void> {
         try {
             const reloaded = await this.configStore.reloadAndNormalize();
-            if (reloaded.workflows) this.config.workflows = reloaded.workflows;
+            if (reloaded.workflows) {
+                this.config.workflows = reloaded.workflows;
+                this.lastConfigHash = '';
+            }
             if (reloaded.ai) this.config.ai = reloaded.ai;
             if (reloaded.queue) this.config.queue = reloaded.queue;
             if (reloaded.integrations) this.config.integrations = reloaded.integrations;
@@ -283,6 +290,14 @@ export class SokuzaEngine {
     /** Get current config */
     getConfig(): SokuzaConfig {
         return this.config;
+    }
+
+    private getConfigHash(): string {
+        if (!this.lastConfigHash) {
+            const yaml = JSON.stringify(this.config.workflows.map(w => w.name));
+            this.lastConfigHash = createHash('sha256').update(yaml).digest('hex').slice(0, 12);
+        }
+        return this.lastConfigHash;
     }
 
     /** Get run history, optionally filtered by workflow name */

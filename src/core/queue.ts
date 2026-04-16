@@ -59,8 +59,8 @@ export class WorkflowQueue {
     ): QueueJob {
         const job: QueueJob = {
             id: `job_${Date.now()}_${++this.jobIdCounter}`,
-            workflow,
-            event,
+            workflow: structuredClone(workflow),
+            event: structuredClone(event),
             status: 'queued',
             priority: resolvedConfig.priority,
             resolvedConfig,

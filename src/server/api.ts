@@ -929,6 +929,13 @@ function serializeJob(job: import('../core/types.js').QueueJob) {
         completedAt: job.completedAt,
         error: job.error,
         attempts: job.attempts,
+        configHash: job.configHash,
+        workflowSnapshot: {
+            name: job.workflow.name,
+            trigger: job.workflow.trigger,
+            stepCount: job.workflow.steps.length,
+            stepActions: job.workflow.steps.map(s => s.action),
+        },
         event: {
             source: job.event.source,
             event: job.event.event,

@@ -283,6 +283,8 @@ export interface QueueJob {
     error?: string;
     dedupKey: string;
     attempts: number;
+    /** Hash of the config file at enqueue time for versioning. */
+    configHash?: string;
 }
 
 export const JOB_PRIORITY_ORDER: Record<JobPriority, number> = {
