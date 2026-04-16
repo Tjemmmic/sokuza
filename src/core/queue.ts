@@ -1,6 +1,7 @@
 import type { Logger } from 'pino';
 import type {
     ActionHandler,
+    ActionContext,
     EventPayload,
     IntegrationConfig,
     JobPriority,
@@ -204,7 +205,7 @@ export class WorkflowQueue {
         ai: AIProviderRegistry | undefined,
         _signal?: AbortSignal,
     ): Promise<void> {
-        return executeWorkflow(workflow, event, actions, logger, integrationConfigs, ai);
+        return executeWorkflow(workflow, event, actions, logger, integrationConfigs, ai, _signal, undefined);
     }
 
     // ─── Internal ─────────────────────────────────────────────────────────
@@ -254,6 +255,7 @@ export class WorkflowQueue {
         actions: Map<string, ActionHandler>,
         integrationConfigs: Record<string, IntegrationConfig>,
         ai: AIProviderRegistry | undefined,
+        recordWebhookDelivery?: ActionContext['recordWebhookDelivery'],
     ): Promise<void> {
         if (job.status === 'deduped') return;
 
@@ -269,7 +271,7 @@ export class WorkflowQueue {
         try {
             await executeWorkflow(
                 job.workflow, job.event, actions, this.logger,
-                integrationConfigs, ai,
+                integrationConfigs, ai, undefined, recordWebhookDelivery,
             );
             job.status = 'completed';
         } catch (err: any) {

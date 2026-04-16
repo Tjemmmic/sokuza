@@ -1,9 +1,5 @@
 import type { ActionHandler } from '../core/types.js';
 
-/**
- * Built-in "webhook" action — POSTs a JSON payload to an external URL.
- * Useful for forwarding events to downstream services.
- */
 export const webhookAction: ActionHandler = async (params, context) => {
     const url = params.url as string;
     if (!url) {
@@ -28,24 +24,48 @@ export const webhookAction: ActionHandler = async (params, context) => {
         'Sending outbound webhook',
     );
 
-    const response = await fetch(url, {
-        method,
-        headers,
-        body: JSON.stringify(body),
-    });
+    let statusCode = 0;
+    let statusText = '';
+    let ok = false;
+    let errorMessage: string | undefined;
 
-    const result = {
-        status: response.status,
-        statusText: response.statusText,
-        ok: response.ok,
-    };
+    try {
+        const response = await fetch(url, {
+            method,
+            headers,
+            body: JSON.stringify(body),
+        });
 
-    if (!response.ok) {
-        context.logger.warn(
-            { ...result, url },
-            'Outbound webhook returned non-OK status',
-        );
+        statusCode = response.status;
+        statusText = response.statusText;
+        ok = response.ok;
+
+        if (!response.ok) {
+            context.logger.warn(
+                { status: statusCode, statusText, url },
+                'Outbound webhook returned non-OK status',
+            );
+        }
+    } catch (err: any) {
+        errorMessage = err.message ?? String(err);
+        context.logger.error({ err, url }, 'Outbound webhook request failed');
     }
 
-    return result;
+    if (context.recordWebhookDelivery) {
+        context.recordWebhookDelivery({
+            workflowName: context.workflowName ?? 'unknown',
+            url,
+            method,
+            statusCode,
+            statusText,
+            ok,
+            error: errorMessage,
+        });
+    }
+
+    if (errorMessage) {
+        throw new Error(`Webhook delivery failed: ${errorMessage}`);
+    }
+
+    return { status: statusCode, statusText, ok };
 };

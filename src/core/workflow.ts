@@ -168,8 +168,10 @@ function makeContext(
     integrationConfigs: Record<string, IntegrationConfig>,
     ai: AIProviderRegistry,
     logger: Logger,
+    workflowName?: string,
+    recordWebhookDelivery?: import('./types.js').ActionContext['recordWebhookDelivery'],
 ): ActionContext {
-    return { event, results, steps, integrationConfigs, ai, logger };
+    return { event, results, steps, integrationConfigs, ai, logger, workflowName, recordWebhookDelivery };
 }
 
 function shouldSkip(step: WorkflowStepDefinition, ctx: ActionContext): boolean {
@@ -193,6 +195,7 @@ export async function executeWorkflow(
     integrationConfigs: Record<string, IntegrationConfig> = {},
     ai?: AIProviderRegistry,
     _signal?: AbortSignal,
+    recordWebhookDelivery?: import('./types.js').ActionContext['recordWebhookDelivery'],
 ): Promise<void> {
     const results: Record<number, unknown> = {};
     const steps: Record<string, unknown> = {};
@@ -206,7 +209,7 @@ export async function executeWorkflow(
     for (const group of groups) {
         if (group.kind === 'sequential') {
             const { index, step } = group.steps[0];
-            const ctx = makeContext(event, results, steps, integrationConfigs, aiRegistry, logger);
+            const ctx = makeContext(event, results, steps, integrationConfigs, aiRegistry, logger, workflow.name, recordWebhookDelivery);
 
             if (shouldSkip(step, ctx)) {
                 logger.info(
@@ -243,6 +246,7 @@ export async function executeWorkflow(
             await runParallelGroup(
                 workflow, group.steps, event, results, steps,
                 actionRegistry, integrationConfigs, aiRegistry, logger,
+                recordWebhookDelivery,
             );
         }
     }
@@ -266,10 +270,11 @@ async function runParallelGroup(
     integrationConfigs: Record<string, IntegrationConfig>,
     aiRegistry: AIProviderRegistry,
     logger: Logger,
+    recordWebhookDelivery?: import('./types.js').ActionContext['recordWebhookDelivery'],
 ): Promise<void> {
     const settled = await Promise.allSettled(
         groupSteps.map(async ({ index, step }): Promise<ParallelStepResult | undefined> => {
-            const ctx = makeContext(event, results, steps, integrationConfigs, aiRegistry, logger);
+            const ctx = makeContext(event, results, steps, integrationConfigs, aiRegistry, logger, workflow.name, recordWebhookDelivery);
 
             if (shouldSkip(step, ctx)) {
                 logger.info(

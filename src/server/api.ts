@@ -3,7 +3,7 @@ import type { Logger } from 'pino';
 import { readFile, writeFile, readdir } from 'node:fs/promises';
 import { join, basename, extname } from 'node:path';
 import yaml from 'js-yaml';
-import type { SokuzaConfig, EventPayload, WorkflowRunRecord } from '../core/types.js';
+import type { SokuzaConfig, EventPayload, WebhookDelivery, WorkflowRunRecord } from '../core/types.js';
 import type { WorkflowQueue } from '../core/queue.js';
 import type { ConfigStore } from '../core/config-store.js';
 
@@ -21,6 +21,7 @@ interface ApiDeps {
     getConfig: () => SokuzaConfig;
     getQueue?: () => WorkflowQueue;
     previewEvent: (event: EventPayload) => { matched: string[]; unmatched: Array<{ name: string; reason: string }> };
+    getWebhookDeliveries: (workflowName?: string) => WebhookDelivery[];
 }
 
 export interface EventEntry {
@@ -534,6 +535,13 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
 
     server.get('/api/actions', async () => {
         return { actions: deps.getRegisteredActions() };
+    });
+
+    // ─── Webhook Deliveries ──────────────────────────────────────────────
+
+    server.get('/api/webhooks/deliveries', async (request) => {
+        const { workflow } = (request.query ?? {}) as { workflow?: string };
+        return { deliveries: deps.getWebhookDeliveries(workflow) };
     });
 
     // ─── Queue ──────────────────────────────────────────────────────────

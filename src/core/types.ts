@@ -171,6 +171,10 @@ export interface ActionContext {
     /** AI provider registry (populated from the config's `ai:` block). */
     ai: import('./ai-providers.js').AIProviderRegistry;
     logger: import('pino').Logger;
+    /** Name of the workflow being executed */
+    workflowName?: string;
+    /** Record an outbound webhook delivery for the delivery log */
+    recordWebhookDelivery?: (delivery: Omit<WebhookDelivery, 'id' | 'timestamp'>) => void;
 }
 
 export type ActionHandler = (
@@ -195,6 +199,28 @@ export interface WorkflowRunRecord {
     /** Duration in milliseconds (set after completion) */
     durationMs?: number;
     /** Error message if status is 'error' */
+    error?: string;
+}
+
+/** A record of an outbound webhook delivery */
+export interface WebhookDelivery {
+    /** Unique delivery identifier */
+    id: string;
+    /** Workflow name that triggered the webhook */
+    workflowName: string;
+    /** Target URL */
+    url: string;
+    /** HTTP method */
+    method: string;
+    /** Response status code */
+    statusCode: number;
+    /** Response status text */
+    statusText: string;
+    /** Whether the response was 2xx */
+    ok: boolean;
+    /** ISO-8601 timestamp */
+    timestamp: string;
+    /** Error message if the request failed entirely */
     error?: string;
 }
 

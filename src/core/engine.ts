@@ -6,6 +6,7 @@ import type {
     EventPayload,
     Integration,
     QueueJob,
+    WebhookDelivery,
     SokuzaConfig,
     WorkflowDefinition,
     WorkflowRunRecord,
@@ -22,6 +23,7 @@ import { ConfigStore } from './config-store.js';
 
 const MAX_RECENT_EVENTS = 100;
 const MAX_RUN_HISTORY = 200;
+const MAX_WEBHOOK_DELIVERIES = 200;
 
 export class SokuzaEngine {
     private integrations = new Map<string, Integration>();
@@ -41,6 +43,8 @@ export class SokuzaEngine {
     private eventSubscribers = new Set<(event: unknown) => void>();
     private configPath: string;
     private runHistory: WorkflowRunRecord[] = [];
+    private webhookDeliveries: WebhookDelivery[] = [];
+    private webhookDeliveryIdCounter = 0;
     private runIdCounter = 0;
 
     constructor(config: SokuzaConfig, configPath?: string) {
@@ -294,6 +298,26 @@ export class SokuzaEngine {
         return this.queue;
     }
 
+    /** Get recent webhook deliveries */
+    getWebhookDeliveries(workflowName?: string): WebhookDelivery[] {
+        if (workflowName) {
+            return this.webhookDeliveries.filter((d) => d.workflowName === workflowName);
+        }
+        return [...this.webhookDeliveries];
+    }
+
+    private recordWebhookDelivery(delivery: Omit<WebhookDelivery, 'id' | 'timestamp'>): void {
+        const record: WebhookDelivery = {
+            ...delivery,
+            id: `wh_${Date.now()}_${++this.webhookDeliveryIdCounter}`,
+            timestamp: new Date().toISOString(),
+        };
+        this.webhookDeliveries.unshift(record);
+        if (this.webhookDeliveries.length > MAX_WEBHOOK_DELIVERIES) {
+            this.webhookDeliveries.pop();
+        }
+    }
+
     /** Preview which workflows match an event without running them */
     previewEvent(event: EventPayload): { matched: string[]; unmatched: Array<{ name: string; reason: string }> } {
         const matched: string[] = [];
@@ -359,6 +383,7 @@ export class SokuzaEngine {
             getConfig: () => this.getConfig(),
             getQueue: () => this.queue,
             previewEvent: (event) => this.previewEvent(event),
+            getWebhookDeliveries: (name?) => this.getWebhookDeliveries(name),
         });
 
         for (const integration of this.integrations.values()) {
@@ -396,6 +421,7 @@ export class SokuzaEngine {
                 this.actions,
                 this.config.integrations,
                 this.config.ai,
+                (delivery) => this.recordWebhookDelivery(delivery),
             );
         } catch {
             // runJob handles errors internally via job status

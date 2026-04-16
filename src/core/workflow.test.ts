@@ -796,4 +796,28 @@ describe('AI config resolution', () => {
         expect(receivedParams.provider).toBeUndefined();
         expect(receivedParams.model).toBeUndefined();
     });
+
+    it('passes recordWebhookDelivery and workflowName to action context', async () => {
+        let capturedCtx: ActionContext | null = null;
+        const action: ActionHandler = async (_params, ctx) => {
+            capturedCtx = ctx;
+            return null;
+        };
+
+        const registry = new Map<string, ActionHandler>();
+        registry.set('my-action', action);
+
+        const deliveries: Array<Record<string, unknown>> = [];
+        const recorder = (d: any) => deliveries.push(d);
+
+        const wf = makeWorkflow({
+            name: 'ctx-test-wf',
+            steps: [{ action: 'my-action', params: {} }],
+        });
+
+        await executeWorkflow(wf, makeEvent(), registry, noopLogger, {}, undefined, undefined, recorder);
+
+        expect(capturedCtx!.workflowName).toBe('ctx-test-wf');
+        expect(capturedCtx!.recordWebhookDelivery).toBe(recorder);
+    });
 });
