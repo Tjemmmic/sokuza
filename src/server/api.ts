@@ -729,6 +729,8 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
     });
 
     server.get('/api/events/stream', async (request, reply) => {
+        reply.hijack();
+
         reply.raw.writeHead(200, {
             'Content-Type': 'text/event-stream',
             'Cache-Control': 'no-cache',
@@ -738,6 +740,15 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
 
         let alive = true;
 
+        const cleanup = () => {
+            if (!alive) return;
+            alive = false;
+            unsubscribe();
+            clearInterval(heartbeat);
+        };
+
+        reply.raw.on('error', cleanup);
+
         reply.raw.write('data: {"type":"connected"}\n\n');
 
         const unsubscribe = deps.addEventSubscriber((event) => {
@@ -745,27 +756,16 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
             try {
                 reply.raw.write(`data: ${JSON.stringify(event)}\n\n`);
             } catch {
-                alive = false;
-                unsubscribe();
-                clearInterval(heartbeat);
+                cleanup();
             }
         });
 
         const heartbeat = setInterval(() => {
             if (!alive) { clearInterval(heartbeat); return; }
             try { reply.raw.write(': heartbeat\n\n'); } catch {
-                alive = false;
-                unsubscribe();
-                clearInterval(heartbeat);
+                cleanup();
             }
         }, 30_000);
-
-        const cleanup = () => {
-            if (!alive) return;
-            alive = false;
-            unsubscribe();
-            clearInterval(heartbeat);
-        };
 
         request.raw.on('close', cleanup);
 

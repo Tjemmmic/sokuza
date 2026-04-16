@@ -58,7 +58,8 @@ export function createServer(logger: Logger): FastifyInstance {
 async function serveFile(reply: any, filePath: string, allowedDir?: string): Promise<void> {
     if (allowedDir) {
         const resolved = resolve(filePath);
-        if (!resolved.startsWith(resolve(allowedDir))) {
+        const allowed = resolve(allowedDir);
+        if (resolved !== allowed && !resolved.startsWith(allowed + '/')) {
             reply.status(403).send({ error: 'Forbidden' });
             return;
         }

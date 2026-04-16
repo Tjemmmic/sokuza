@@ -331,6 +331,7 @@ async function runParallelGroup(
     );
 
     const collected: ParallelStepResult[] = [];
+    let firstError: { reason: unknown; step: WorkflowStepDefinition } | null = null;
 
     for (let i = 0; i < settled.length; i++) {
         const outcome = settled[i];
@@ -341,8 +342,8 @@ async function runParallelGroup(
                     { workflow: workflow.name, action: step.action, err: outcome.reason },
                     'Parallel step failed (on_error=continue)',
                 );
-            } else {
-                throw outcome.reason;
+            } else if (!firstError) {
+                firstError = { reason: outcome.reason, step };
             }
         } else if (outcome.value) {
             const { index, stepId, result } = outcome.value;
@@ -350,6 +351,10 @@ async function runParallelGroup(
             if (stepId) steps[stepId] = result;
             collected.push(outcome.value);
         }
+    }
+
+    if (firstError) {
+        throw firstError.reason;
     }
 
     return collected;
@@ -404,7 +409,9 @@ export function interpolateParams(
     return result;
 }
 
-const ALLOWED_INTERPOLATION_PREFIXES = ['event.', 'results.', 'steps.', 'metadata.'];
+const ALLOWED_INTERPOLATION_PREFIXES = ['event.', 'results.', 'steps.', 'metadata.', 'inputs.'];
+
+const INPUTS_ALIAS_RE = /^inputs\.(.+)$/;
 
 function interpolateString(template: string, context: ActionContext): string {
     return template.replace(/\{\{(.+?)\}\}/g, (_match, path: string) => {
@@ -412,7 +419,10 @@ function interpolateString(template: string, context: ActionContext): string {
         if (!ALLOWED_INTERPOLATION_PREFIXES.some(p => trimmed.startsWith(p))) {
             return '';
         }
-        const value = resolvePath(context, trimmed);
+        const resolved = INPUTS_ALIAS_RE.test(trimmed)
+            ? `event.payload.${trimmed}`
+            : trimmed;
+        const value = resolvePath(context, resolved);
         return value !== undefined ? String(value) : '';
     });
 }
