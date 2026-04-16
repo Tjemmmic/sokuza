@@ -1,0 +1,106 @@
+import { readFile, writeFile, rename, unlink } from 'node:fs/promises';
+import { join, resolve } from 'node:path';
+import yaml from 'js-yaml';
+import type { Logger } from 'pino';
+import type { SokuzaConfig } from './types.js';
+import { normalizeWorkflow } from './templates.js';
+import { loadAIProviders } from './ai-providers.js';
+import { validateQueueConfig } from './queue-config.js';
+
+export class ConfigStore {
+    private readonly configPath: string;
+    private readonly logger: Logger;
+    private cache: Record<string, unknown> | null = null;
+
+    constructor(configPath: string, logger: Logger) {
+        this.configPath = resolve(configPath);
+        this.logger = logger;
+    }
+
+    async read(): Promise<Record<string, unknown>> {
+        if (this.cache) return this.cache;
+        const raw = await readFile(this.configPath, 'utf-8');
+        const interpolated = this.interpolateEnvVars(raw);
+        this.cache = yaml.load(interpolated) as Record<string, unknown>;
+        return this.cache;
+    }
+
+    async readRaw(): Promise<string> {
+        return readFile(this.configPath, 'utf-8');
+    }
+
+    async write(data: Record<string, unknown>): Promise<void> {
+        const yamlStr = yaml.dump(data, { lineWidth: 120, noRefs: true });
+        await this.atomicWrite(yamlStr);
+        this.invalidateCache();
+    }
+
+    async writeRaw(rawYaml: string): Promise<void> {
+        yaml.load(rawYaml);
+        await this.atomicWrite(rawYaml);
+        this.invalidateCache();
+    }
+
+    invalidateCache(): void {
+        this.cache = null;
+    }
+
+    async update<T>(
+        mutator: (config: Record<string, unknown>) => T,
+    ): Promise<T> {
+        const config = await this.read();
+        const result = mutator(config);
+        await this.write(config);
+        return result;
+    }
+
+    async updateRaw<T>(
+        mutator: (config: Record<string, unknown>) => T,
+    ): Promise<T> {
+        const raw = await this.readRaw();
+        const config = yaml.load(raw) as Record<string, unknown>;
+        const result = mutator(config);
+        const yamlStr = yaml.dump(config, { lineWidth: 120, noRefs: true });
+        await this.atomicWrite(yamlStr);
+        this.invalidateCache();
+        return result;
+    }
+
+    async reloadAndNormalize(): Promise<Partial<SokuzaConfig>> {
+        const raw = await readFile(this.configPath, 'utf-8');
+        const interpolated = this.interpolateEnvVars(raw);
+        const parsed = yaml.load(interpolated) as Record<string, unknown>;
+        this.cache = parsed;
+
+        const rawWorkflows = Array.isArray(parsed.workflows) ? parsed.workflows : [];
+        const workflows = await Promise.all(
+            rawWorkflows.map((wf: unknown) =>
+                normalizeWorkflow(wf as Record<string, unknown>),
+            ),
+        );
+
+        const ai = loadAIProviders(parsed.ai as Record<string, unknown> | undefined);
+        const queue = validateQueueConfig(parsed.queue);
+        const integrations = (parsed.integrations ?? {}) as Record<string, import('./types.js').IntegrationConfig>;
+
+        return { workflows, ai, queue, integrations };
+    }
+
+    private async atomicWrite(content: string): Promise<void> {
+        const tmpPath = this.configPath + '.tmp';
+        try {
+            await writeFile(tmpPath, content, 'utf-8');
+            await rename(tmpPath, this.configPath);
+        } catch (err) {
+            try { await unlink(tmpPath); } catch { /* ignore */ }
+            throw err;
+        }
+    }
+
+    private interpolateEnvVars(raw: string): string {
+        return raw.replace(
+            /\$\{([A-Z_][A-Z0-9_]*)\}/g,
+            (_match, varName: string) => process.env[varName] ?? '',
+        );
+    }
+}

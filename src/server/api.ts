@@ -5,10 +5,11 @@ import { join, basename, extname } from 'node:path';
 import yaml from 'js-yaml';
 import type { SokuzaConfig, WorkflowRunRecord } from '../core/types.js';
 import type { WorkflowQueue } from '../core/queue.js';
+import type { ConfigStore } from '../core/config-store.js';
 
 interface ApiDeps {
     logger: Logger;
-    getConfigPath: () => string;
+    configStore: ConfigStore;
     getTemplateDir: () => string;
     getIntegrationStatus: () => Record<string, { enabled: boolean; events: string[] }>;
     getRecentEvents: () => EventEntry[];
@@ -36,7 +37,7 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
     // ─── Config ─────────────────────────────────────────────────────────
 
     server.get('/api/config', async () => {
-        const raw = await readFile(deps.getConfigPath(), 'utf-8');
+        const raw = await deps.configStore.readRaw();
         const parsed = yaml.load(raw) as Record<string, unknown>;
         return { config: parsed };
     });
@@ -44,33 +45,23 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
     server.put('/api/config', async (request, reply) => {
         const body = request.body as Record<string, unknown>;
 
-        let yamlStr: string;
-
-        // Accept raw YAML from Settings editor or Integration setup wizard
-        if (typeof body.__raw_yaml === 'string') {
-            const raw = body.__raw_yaml;
-            try {
-                yaml.load(raw); // Validate it parses
-            } catch (e: any) {
+        try {
+            if (typeof body.__raw_yaml === 'string') {
+                await deps.configStore.writeRaw(body.__raw_yaml);
+            } else if (body.config && typeof (body.config as any).__raw_yaml === 'string') {
+                await deps.configStore.writeRaw((body.config as any).__raw_yaml as string);
+            } else if (body.config) {
+                await deps.configStore.write(body.config as Record<string, unknown>);
+            } else {
+                return reply.status(400).send({ error: 'Missing config in body' });
+            }
+        } catch (e: any) {
+            if (e.message?.includes('YAML')) {
                 return reply.status(400).send({ error: `Invalid YAML: ${e.message}` });
             }
-            yamlStr = raw;
-        } else if (body.config && typeof (body.config as any).__raw_yaml === 'string') {
-            // Legacy: Settings editor used to nest inside config
-            const raw = (body.config as any).__raw_yaml as string;
-            try {
-                yaml.load(raw); // Validate it parses
-            } catch (e: any) {
-                return reply.status(400).send({ error: `Invalid YAML: ${e.message}` });
-            }
-            yamlStr = raw;
-        } else if (body.config) {
-            yamlStr = yaml.dump(body.config, { lineWidth: 120, noRefs: true });
-        } else {
-            return reply.status(400).send({ error: 'Missing config in body' });
+            throw e;
         }
 
-        await writeFile(deps.getConfigPath(), yamlStr, 'utf-8');
         logger.info('Config updated via dashboard');
         return { ok: true };
     });
@@ -78,8 +69,8 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
     // ─── Deck ───────────────────────────────────────────────────────────
 
     server.get('/api/deck', async () => {
-        const raw = await readFile(deps.getConfigPath(), 'utf-8');
-        const parsed = yaml.load(raw) as Record<string, unknown>;
+        const config = await deps.configStore.readRaw();
+        const parsed = yaml.load(config) as Record<string, unknown>;
         const deck = (parsed.deck as string[]) ?? [];
         return { deck };
     });
@@ -90,41 +81,37 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
             return reply.status(400).send({ error: 'Missing id' });
         }
 
-        const raw = await readFile(deps.getConfigPath(), 'utf-8');
-        const parsed = yaml.load(raw) as Record<string, unknown>;
-        const deck = ((parsed.deck as string[]) ?? []);
+        const deck = await deps.configStore.updateRaw((config) => {
+            const deck = ((config.deck as string[]) ?? []);
+            if (!deck.includes(id)) {
+                deck.push(id);
+                config.deck = deck;
+            }
+            return deck;
+        });
 
-        if (!deck.includes(id)) {
-            deck.push(id);
-            parsed.deck = deck;
-            const yamlStr = yaml.dump(parsed, { lineWidth: 120, noRefs: true });
-            await writeFile(deps.getConfigPath(), yamlStr, 'utf-8');
-            logger.info({ id }, 'Added to deck');
-        }
-
+        logger.info({ id }, 'Added to deck');
         return { ok: true, deck };
     });
 
     server.delete('/api/deck/:id', async (request) => {
         const { id } = request.params as { id: string };
 
-        const raw = await readFile(deps.getConfigPath(), 'utf-8');
-        const parsed = yaml.load(raw) as Record<string, unknown>;
-        const deck = ((parsed.deck as string[]) ?? []).filter(d => d !== id);
-        parsed.deck = deck;
+        const deck = await deps.configStore.updateRaw((config) => {
+            const deck = ((config.deck as string[]) ?? []).filter(d => d !== id);
+            config.deck = deck;
+            return deck;
+        });
 
-        const yamlStr = yaml.dump(parsed, { lineWidth: 120, noRefs: true });
-        await writeFile(deps.getConfigPath(), yamlStr, 'utf-8');
         logger.info({ id }, 'Removed from deck');
-
         return { ok: true, deck };
     });
 
     // ─── Workflows ──────────────────────────────────────────────────────
 
     server.get('/api/workflows', async () => {
-        const raw = await readFile(deps.getConfigPath(), 'utf-8');
-        const parsed = yaml.load(raw) as Record<string, unknown>;
+        const config = await deps.configStore.readRaw();
+        const parsed = yaml.load(config) as Record<string, unknown>;
         const workflows = (parsed.workflows as unknown[]) ?? [];
         return { workflows };
     });
@@ -135,19 +122,20 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
             return reply.status(400).send({ error: 'Workflow must have a name' });
         }
 
-        const raw = await readFile(deps.getConfigPath(), 'utf-8');
-        const parsed = yaml.load(raw) as Record<string, unknown>;
-        const workflows = ((parsed.workflows as unknown[]) ?? []) as Record<string, unknown>[];
+        const result = await deps.configStore.updateRaw((config) => {
+            const workflows = ((config.workflows as unknown[]) ?? []) as Record<string, unknown>[];
+            if (workflows.some((w) => w.name === workflow.name)) {
+                return { duplicate: true as const };
+            }
+            workflows.push(workflow);
+            config.workflows = workflows;
+            return { duplicate: false as const };
+        });
 
-        if (workflows.some((w) => w.name === workflow.name)) {
+        if (result.duplicate) {
             return reply.status(409).send({ error: `Workflow "${workflow.name}" already exists` });
         }
 
-        workflows.push(workflow);
-        parsed.workflows = workflows;
-
-        const yamlStr = yaml.dump(parsed, { lineWidth: 120, noRefs: true });
-        await writeFile(deps.getConfigPath(), yamlStr, 'utf-8');
         logger.info({ workflow: workflow.name }, 'Workflow created via dashboard');
         return { ok: true, workflow };
     });
@@ -156,39 +144,38 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
         const { name } = request.params as { name: string };
         const update = request.body as Record<string, unknown>;
 
-        const raw = await readFile(deps.getConfigPath(), 'utf-8');
-        const parsed = yaml.load(raw) as Record<string, unknown>;
-        const workflows = ((parsed.workflows as unknown[]) ?? []) as Record<string, unknown>[];
+        const result = await deps.configStore.updateRaw((config) => {
+            const workflows = ((config.workflows as unknown[]) ?? []) as Record<string, unknown>[];
+            const idx = workflows.findIndex((w) => w.name === name);
+            if (idx === -1) return { found: false as const, workflow: null as Record<string, unknown> | null };
+            workflows[idx] = { ...update, name: update.name ?? name };
+            config.workflows = workflows;
+            return { found: true as const, workflow: workflows[idx] };
+        });
 
-        const idx = workflows.findIndex((w) => w.name === name);
-        if (idx === -1) {
+        if (!result.found) {
             return reply.status(404).send({ error: `Workflow "${name}" not found` });
         }
 
-        workflows[idx] = { ...update, name: update.name ?? name };
-        parsed.workflows = workflows;
-
-        const yamlStr = yaml.dump(parsed, { lineWidth: 120, noRefs: true });
-        await writeFile(deps.getConfigPath(), yamlStr, 'utf-8');
         logger.info({ workflow: name }, 'Workflow updated via dashboard');
-        return { ok: true, workflow: workflows[idx] };
+        return { ok: true, workflow: result.workflow };
     });
 
     server.delete('/api/workflows/:name', async (request, reply) => {
         const { name } = request.params as { name: string };
 
-        const raw = await readFile(deps.getConfigPath(), 'utf-8');
-        const parsed = yaml.load(raw) as Record<string, unknown>;
-        const workflows = ((parsed.workflows as unknown[]) ?? []) as Record<string, unknown>[];
+        const found = await deps.configStore.updateRaw((config) => {
+            const workflows = ((config.workflows as unknown[]) ?? []) as Record<string, unknown>[];
+            const filtered = workflows.filter((w) => w.name !== name);
+            if (filtered.length === workflows.length) return false;
+            config.workflows = filtered;
+            return true;
+        });
 
-        const filtered = workflows.filter((w) => w.name !== name);
-        if (filtered.length === workflows.length) {
+        if (!found) {
             return reply.status(404).send({ error: `Workflow "${name}" not found` });
         }
 
-        parsed.workflows = filtered;
-        const yamlStr = yaml.dump(parsed, { lineWidth: 120, noRefs: true });
-        await writeFile(deps.getConfigPath(), yamlStr, 'utf-8');
         logger.info({ workflow: name }, 'Workflow deleted via dashboard');
         return { ok: true };
     });
@@ -314,8 +301,8 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
     // ─── Issue Actions (config-based quick actions) ─────────────────────
 
     server.get('/api/issue-actions', async () => {
-        const raw = await readFile(deps.getConfigPath(), 'utf-8');
-        const parsed = yaml.load(raw) as Record<string, unknown>;
+        const config = await deps.configStore.readRaw();
+        const parsed = yaml.load(config) as Record<string, unknown>;
         const actions = (parsed.issueActions as unknown[]) ?? [];
         return { actions };
     });
@@ -326,19 +313,20 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
             return reply.status(400).send({ error: 'Issue action must have id and name' });
         }
 
-        const raw = await readFile(deps.getConfigPath(), 'utf-8');
-        const parsed = yaml.load(raw) as Record<string, unknown>;
-        const actions = ((parsed.issueActions as unknown[]) ?? []) as Record<string, unknown>[];
+        const result = await deps.configStore.updateRaw((config) => {
+            const actions = ((config.issueActions as unknown[]) ?? []) as Record<string, unknown>[];
+            if (actions.some((a) => a.id === action.id)) {
+                return { duplicate: true as const };
+            }
+            actions.push(action);
+            config.issueActions = actions;
+            return { duplicate: false as const };
+        });
 
-        if (actions.some((a) => a.id === action.id)) {
+        if (result.duplicate) {
             return reply.status(409).send({ error: `Issue action "${action.id}" already exists` });
         }
 
-        actions.push(action);
-        parsed.issueActions = actions;
-
-        const yamlStr = yaml.dump(parsed, { lineWidth: 120, noRefs: true });
-        await writeFile(deps.getConfigPath(), yamlStr, 'utf-8');
         logger.info({ action: action.id }, 'Issue action created via dashboard');
         return { ok: true, action };
     });
@@ -347,39 +335,38 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
         const { id } = request.params as { id: string };
         const update = request.body as Record<string, unknown>;
 
-        const raw = await readFile(deps.getConfigPath(), 'utf-8');
-        const parsed = yaml.load(raw) as Record<string, unknown>;
-        const actions = ((parsed.issueActions as unknown[]) ?? []) as Record<string, unknown>[];
+        const result = await deps.configStore.updateRaw((config) => {
+            const actions = ((config.issueActions as unknown[]) ?? []) as Record<string, unknown>[];
+            const idx = actions.findIndex((a) => a.id === id);
+            if (idx === -1) return { found: false as const, action: null as Record<string, unknown> | null };
+            actions[idx] = { ...update, id: update.id ?? id };
+            config.issueActions = actions;
+            return { found: true as const, action: actions[idx] };
+        });
 
-        const idx = actions.findIndex((a) => a.id === id);
-        if (idx === -1) {
+        if (!result.found) {
             return reply.status(404).send({ error: `Issue action "${id}" not found` });
         }
 
-        actions[idx] = { ...update, id: update.id ?? id };
-        parsed.issueActions = actions;
-
-        const yamlStr = yaml.dump(parsed, { lineWidth: 120, noRefs: true });
-        await writeFile(deps.getConfigPath(), yamlStr, 'utf-8');
         logger.info({ action: id }, 'Issue action updated via dashboard');
-        return { ok: true, action: actions[idx] };
+        return { ok: true, action: result.action };
     });
 
     server.delete('/api/issue-actions/:id', async (request, reply) => {
         const { id } = request.params as { id: string };
 
-        const raw = await readFile(deps.getConfigPath(), 'utf-8');
-        const parsed = yaml.load(raw) as Record<string, unknown>;
-        const actions = ((parsed.issueActions as unknown[]) ?? []) as Record<string, unknown>[];
+        const found = await deps.configStore.updateRaw((config) => {
+            const actions = ((config.issueActions as unknown[]) ?? []) as Record<string, unknown>[];
+            const filtered = actions.filter((a) => a.id !== id);
+            if (filtered.length === actions.length) return false;
+            config.issueActions = filtered;
+            return true;
+        });
 
-        const filtered = actions.filter((a) => a.id !== id);
-        if (filtered.length === actions.length) {
+        if (!found) {
             return reply.status(404).send({ error: `Issue action "${id}" not found` });
         }
 
-        parsed.issueActions = filtered;
-        const yamlStr = yaml.dump(parsed, { lineWidth: 120, noRefs: true });
-        await writeFile(deps.getConfigPath(), yamlStr, 'utf-8');
         logger.info({ action: id }, 'Issue action deleted via dashboard');
         return { ok: true };
     });
@@ -392,7 +379,7 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
             return reply.status(400).send({ error: 'Missing owner, repo, or issueNumber' });
         }
 
-        const raw = await readFile(deps.getConfigPath(), 'utf-8');
+        const raw = await deps.configStore.readRaw();
         const parsed = yaml.load(raw) as Record<string, unknown>;
         const actions = ((parsed.issueActions as unknown[]) ?? []) as Record<string, unknown>[];
         const action = actions.find((a) => a.id === id);

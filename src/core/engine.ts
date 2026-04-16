@@ -20,6 +20,7 @@ import type { FastifyInstance } from 'fastify';
 import { resolve, join } from 'node:path';
 import { WorkflowQueue } from './queue.js';
 import { resolveQueueConfig } from './queue-config.js';
+import { ConfigStore } from './config-store.js';
 
 const MAX_RECENT_EVENTS = 100;
 const MAX_RUN_HISTORY = 200;
@@ -33,6 +34,9 @@ export class SokuzaEngine {
 
     // ─── Queue ────────────────────────────────────────────────────────────
     private queue: WorkflowQueue;
+
+    // ─── Config store ────────────────────────────────────────────────────
+    private configStore: ConfigStore;
 
     // ─── Dashboard state ────────────────────────────────────────────────
     private recentEvents: Array<{ event: EventPayload; timestamp: string; matchedWorkflows: string[] }> = [];
@@ -54,6 +58,7 @@ export class SokuzaEngine {
 
         this.queue = new WorkflowQueue(this.logger);
         this.queue.setOnJobUpdate((job) => this.broadcastJobUpdate(job));
+        this.configStore = new ConfigStore(this.configPath, this.logger);
     }
 
     /** Register an integration plugin and its actions */
@@ -320,7 +325,7 @@ export class SokuzaEngine {
         const templateDir = join(resolve(this.configPath, '..'), 'templates');
         registerApiRoutes(this.server, {
             logger: this.logger,
-            getConfigPath: () => this.configPath,
+            configStore: this.configStore,
             getTemplateDir: () => templateDir,
             getIntegrationStatus: () => this.getIntegrationStatus(),
             getRecentEvents: () => [...this.recentEvents],
