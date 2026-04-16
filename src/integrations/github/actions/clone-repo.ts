@@ -4,19 +4,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { ActionHandler } from '../../../core/types.js';
 
-/**
- * "github-clone-repo" action.
- *
- * Clones the triggering repo (or any specified repo) to a temp directory.
- * Auto-extracts owner/repo from the event if not explicitly provided.
- *
- * Params:
- *   - repo: "owner/repo" (default: from event metadata)
- *   - ref: git ref to checkout (default: PR head branch or "main")
- *   - depth: clone depth (default: 1 for shallow clone)
- *
- * Returns: { path, repo, ref, sha }
- */
+const DEFAULT_DEPTH = 50;
+const DEFAULT_NON_PR_DEPTH = 1;
+
 export const githubCloneRepoAction: ActionHandler = async (params, context) => {
     const integrationConfig = context.integrationConfigs?.github;
     const token = (integrationConfig as Record<string, unknown>)?.token as string
@@ -26,39 +16,39 @@ export const githubCloneRepoAction: ActionHandler = async (params, context) => {
         throw new Error('github-clone-repo: GITHUB_TOKEN required');
     }
 
-    // Resolve repo and ref
     const repo = (params.repo as string)
         ?? context.event.metadata.repo as string;
     const ref = (params.ref as string)
         ?? (context.event.payload as any)?.pull_request?.head?.ref
-        ?? 'main';
-    const depth = (params.depth as number) ?? 1;
+        ?? '';
+
+    const isPrContext = !!(context.event.metadata.prNumber ?? (context.event.payload as any)?.pull_request?.number);
+    const depth = (params.depth as number) ?? (isPrContext ? DEFAULT_DEPTH : DEFAULT_NON_PR_DEPTH);
 
     if (!repo) {
         throw new Error('github-clone-repo: no repo specified and none found in event metadata');
     }
 
-    // Create temp directory
+    const effectiveRef = ref || 'main';
+
     const tempDir = await mkdtemp(join(tmpdir(), 'sokuza-repo-'));
 
     context.logger.info(
-        { repo, ref, depth, path: tempDir },
+        { repo, ref: effectiveRef, depth, path: tempDir },
         'Cloning repository',
     );
 
-    // Clone with token auth
     const cloneUrl = `https://x-access-token:${token}@github.com/${repo}.git`;
-    await execGit(tempDir, ['clone', '--depth', String(depth), '--branch', ref, cloneUrl, '.']);
+    await execGit(tempDir, ['clone', '--depth', String(depth), '--branch', effectiveRef, cloneUrl, '.']);
 
-    // Get the HEAD sha
     const sha = (await execGitOutput(tempDir, ['rev-parse', 'HEAD'])).trim();
 
     context.logger.info(
-        { repo, ref, sha: sha.slice(0, 8), path: tempDir },
+        { repo, ref: effectiveRef, sha: sha.slice(0, 8), path: tempDir },
         'Repository cloned',
     );
 
-    return { path: tempDir, repo, ref, sha };
+    return { path: tempDir, repo, ref: effectiveRef, sha };
 };
 
 // ─── Git helpers ────────────────────────────────────────────────────────────

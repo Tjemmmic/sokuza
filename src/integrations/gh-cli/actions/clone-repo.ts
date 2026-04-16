@@ -1,8 +1,3 @@
-/**
- * GH CLI powered clone-repo action.
- * Uses `gh repo clone` + `gh pr checkout` — no GITHUB_TOKEN needed.
- */
-
 import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -10,15 +5,20 @@ import { spawn } from 'node:child_process';
 import type { ActionHandler } from '../../../core/types.js';
 import { ghExec } from '../exec.js';
 
+const DEFAULT_DEPTH = 50;
+const DEFAULT_NON_PR_DEPTH = 1;
+
 export const ghCloneRepoAction: ActionHandler = async (params, context) => {
     const repo = (params.repo as string)
         ?? context.event.metadata.repo as string;
     const ref = (params.ref as string)
         ?? (context.event.payload as any)?.pull_request?.head?.ref
         ?? '';
-    const depth = (params.depth as number) ?? 1;
     const prNumber = (context.event.metadata.prNumber as number)
         ?? (context.event.payload as any)?.pull_request?.number;
+    const isPrContext = !!prNumber;
+    const defaultDepth = isPrContext ? DEFAULT_DEPTH : DEFAULT_NON_PR_DEPTH;
+    const depth = (params.depth as number) ?? defaultDepth;
 
     if (!repo) {
         throw new Error('github-clone-repo: no repo specified and none found in event metadata');
