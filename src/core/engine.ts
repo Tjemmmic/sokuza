@@ -302,6 +302,22 @@ export class SokuzaEngine {
         return this.runWorkflowByName(originalRun.workflowName, originalRun.inputs);
     }
 
+    /** Replay a stored event by index (bypasses delivery ID dedup) */
+    replayEvent(eventIndex: number): { ok: boolean; error?: string } {
+        if (eventIndex < 0 || eventIndex >= this.recentEvents.length) {
+            return { ok: false, error: `Event index ${eventIndex} out of range` };
+        }
+
+        const { event } = this.recentEvents[eventIndex];
+        const replayEvent: EventPayload = {
+            ...event,
+            metadata: { ...event.metadata, deliveryId: `replay_${Date.now()}` },
+        };
+
+        this.handleEvent(replayEvent).catch(() => {});
+        return { ok: true };
+    }
+
     /** Get integration status for the dashboard */
     getIntegrationStatus(): Record<string, { enabled: boolean; events: string[] }> {
         const status: Record<string, { enabled: boolean; events: string[] }> = {};
@@ -400,6 +416,7 @@ export class SokuzaEngine {
             getRegisteredActions: () => [...this.actions.keys()],
             runWorkflow: (name, inputs) => this.runWorkflowByName(name, inputs),
             rerunWorkflow: (runId) => this.rerunWorkflow(runId),
+            replayEvent: (idx) => this.replayEvent(idx),
             getRunHistory: (name?) => this.getRunHistory(name),
             getConfig: () => this.getConfig(),
             getQueue: () => this.queue,

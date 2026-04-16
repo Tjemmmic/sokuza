@@ -17,6 +17,7 @@ interface ApiDeps {
     getRegisteredActions: () => string[];
     runWorkflow: (name: string, inputs: Record<string, unknown>) => Promise<{ ok: boolean; error?: string; runId?: string }>;
     rerunWorkflow: (runId: string) => Promise<{ ok: boolean; error?: string; runId?: string }>;
+    replayEvent: (eventIndex: number) => { ok: boolean; error?: string };
     getRunHistory: (workflowName?: string) => WorkflowRunRecord[];
     getConfig: () => SokuzaConfig;
     getQueue?: () => WorkflowQueue;
@@ -707,6 +708,19 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
     });
 
     // ─── Events stream (SSE) ────────────────────────────────────────────
+
+    server.post('/api/events/:index/replay', async (request, reply) => {
+        const { index } = request.params as { index: string };
+        const idx = parseInt(index, 10);
+        if (isNaN(idx)) {
+            return reply.status(400).send({ error: 'Invalid event index' });
+        }
+        const result = deps.replayEvent(idx);
+        if (!result.ok) {
+            return reply.status(404).send({ error: result.error });
+        }
+        return { ok: true, message: `Event ${idx} replayed` };
+    });
 
     server.get('/api/events/stream', async (request, reply) => {
         reply.raw.writeHead(200, {
