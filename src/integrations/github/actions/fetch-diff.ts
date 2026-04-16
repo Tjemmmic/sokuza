@@ -1,15 +1,7 @@
 import { GitHubApiClient } from '../api.js';
 import type { ActionHandler } from '../../../core/types.js';
+import { truncateDiff, DEFAULT_MAX_CHARS } from '../../../core/diff-truncator.js';
 
-/**
- * "github-fetch-diff" action.
- *
- * Fetches the unified diff and file list for a pull request.
- * Automatically extracts owner/repo/pr_number from the event payload,
- * or they can be provided as explicit params.
- *
- * Returns: { diff, files, owner, repo, pr_number }
- */
 export const githubFetchDiffAction: ActionHandler = async (params, context) => {
     const githubConfig = context.integrationConfigs.github;
     const token = (params.token as string) ?? (githubConfig?.token as string);
@@ -48,17 +40,54 @@ export const githubFetchDiffAction: ActionHandler = async (params, context) => {
         'Fetching PR diff from GitHub',
     );
 
-    const [diff, files] = await Promise.all([
-        client.getPullRequestDiff(owner, repo, prNumber),
-        client.getPullRequestFiles(owner, repo, prNumber),
-    ]);
+    const diffResult = await client.getPullRequestDiffWithFallback(owner, repo, prNumber);
 
-    const fileNames = files.map((f) => f.filename as string);
+    let fileNames: string[];
+    if (diffResult.files && diffResult.files.length > 0) {
+        fileNames = diffResult.files.map((f) => f.filename as string);
+    } else {
+        const files = await client.getPullRequestFiles(owner, repo, prNumber);
+        fileNames = files.map((f) => f.filename as string);
+    }
 
-    context.logger.info(
-        { owner, repo, prNumber, fileCount: fileNames.length },
-        'Fetched PR diff',
-    );
+    if (diffResult.source !== 'bulk') {
+        context.logger.warn(
+            {
+                owner,
+                repo,
+                prNumber,
+                source: diffResult.source,
+                incompleteFiles: diffResult.incompleteFiles,
+                fileCount: fileNames.length,
+            },
+            'Bulk diff unavailable, fell back to per-file patches',
+        );
+    } else {
+        context.logger.info(
+            { owner, repo, prNumber, fileCount: fileNames.length },
+            'Fetched PR diff',
+        );
+    }
+
+    let diff = diffResult.diff;
+    let truncationSummary: string | undefined;
+
+    const maxDiffChars = (params.max_diff_chars as number | undefined) ?? DEFAULT_MAX_CHARS;
+    if (diff.length > maxDiffChars) {
+        const truncated = truncateDiff(diff, maxDiffChars);
+        diff = truncated.diff;
+        truncationSummary = truncated.summary;
+        context.logger.info(
+            {
+                originalChars: truncated.originalChars,
+                finalChars: truncated.finalChars,
+                totalFiles: truncated.totalFiles,
+                truncated: truncated.truncatedFiles,
+                skipped: truncated.skippedFiles,
+            },
+            'Diff truncated at fetch time',
+        );
+    }
 
     return {
         diff,
@@ -67,5 +96,8 @@ export const githubFetchDiffAction: ActionHandler = async (params, context) => {
         owner,
         repo,
         pr_number: prNumber,
+        diff_source: diffResult.source,
+        incomplete_files: diffResult.incompleteFiles,
+        truncation: truncationSummary,
     };
 };

@@ -37,6 +37,7 @@ steps:
         You are a senior code reviewer performing a structured inspection of this PR.
 
         ## PR DIFF
+        {{steps.diff.truncation}}
         {{steps.diff.diff}}
 
         ## REVIEW PROTOCOL

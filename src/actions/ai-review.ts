@@ -66,6 +66,9 @@ export const aiReviewAction: ActionHandler = async (params, context) => {
         );
     }
 
+    const diffSource = resolveDiffSource(context);
+    const incompleteFiles = resolveIncompleteFiles(context);
+
     // ─── Truncate large diffs ───────────────────────────────────────────
     const maxDiffChars = (params.max_diff_chars as number) ?? DEFAULT_MAX_CHARS;
     const truncation = truncateDiff(diff, maxDiffChars);
@@ -122,6 +125,14 @@ export const aiReviewAction: ActionHandler = async (params, context) => {
     if (truncation.originalChars !== truncation.finalChars) {
         userMessage += `> **Note:** This diff was truncated (${truncation.summary}). Focus on the code shown.\n\n`;
     }
+    if (diffSource === 'file-patches') {
+        userMessage += '> **Note:** The full diff was too large to fetch in one piece. This diff was assembled from individual file patches. Some context between files may be missing.\n\n';
+    } else if (diffSource === 'summary') {
+        userMessage += '> **Note:** The diff was too large to fetch even as individual file patches. Only a file-level summary is shown. Read the files directly for full details.\n\n';
+    }
+    if (incompleteFiles.length > 0) {
+        userMessage += `> **Note:** The following files had patches too large to include: ${incompleteFiles.map((f) => `\`${f}\``).join(', ')}. Read these files directly if they are relevant.\n\n`;
+    }
     // Include auto-extracted context first, then any manual context
     const combinedContext = [autoContext, additionalContext].filter(Boolean).join('\n\n');
     if (combinedContext) {
@@ -157,3 +168,33 @@ export const aiReviewAction: ActionHandler = async (params, context) => {
             : undefined,
     };
 };
+
+function resolveDiffSource(context: { steps: Record<string, unknown>; results: Record<string | number, unknown> }): string | undefined {
+    for (const result of Object.values(context.steps)) {
+        if (result && typeof result === 'object' && 'diff_source' in (result as Record<string, unknown>)) {
+            return (result as Record<string, unknown>).diff_source as string;
+        }
+    }
+    for (const result of Object.values(context.results)) {
+        if (result && typeof result === 'object' && 'diff_source' in (result as Record<string, unknown>)) {
+            return (result as Record<string, unknown>).diff_source as string;
+        }
+    }
+    return undefined;
+}
+
+function resolveIncompleteFiles(context: { steps: Record<string, unknown>; results: Record<string | number, unknown> }): string[] {
+    for (const result of Object.values(context.steps)) {
+        if (result && typeof result === 'object' && 'incomplete_files' in (result as Record<string, unknown>)) {
+            const files = (result as Record<string, unknown>).incomplete_files;
+            if (Array.isArray(files)) return files as string[];
+        }
+    }
+    for (const result of Object.values(context.results)) {
+        if (result && typeof result === 'object' && 'incomplete_files' in (result as Record<string, unknown>)) {
+            const files = (result as Record<string, unknown>).incomplete_files;
+            if (Array.isArray(files)) return files as string[];
+        }
+    }
+    return [];
+}
