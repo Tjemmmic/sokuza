@@ -120,4 +120,72 @@ describe('truncateDiff', () => {
         expect(result.diff).toContain('@@');
         expect(result.diff).toContain('+line 1');
     });
+
+    it('should skip all files in an all-lock-file diff', () => {
+        const diff = makeMultiDiff([
+            { name: 'package-lock.json', lines: 500 },
+            { name: 'yarn.lock', lines: 500 },
+        ]);
+        const result = truncateDiff(diff, 10000);
+
+        expect(result.diff).toBe('');
+        expect(result.skippedFiles).toBe(2);
+    });
+
+    it('should skip all files with zero budget', () => {
+        const diff = makePatch('src/important.ts', 10);
+        const result = truncateDiff(diff, 0);
+
+        expect(result.diff).toBe('');
+        expect(result.finalChars).toBe(0);
+    });
+
+    it('should handle very small budget by truncating or skipping', () => {
+        const diff = makePatch('src/big.ts', 100);
+        const result = truncateDiff(diff, 50);
+
+        expect(result.finalChars).toBeLessThanOrEqual(50);
+    });
+
+    it('should handle diff with rename header', () => {
+        const diff = `diff --git a/old-name.ts b/new-name.ts
+similarity index 95%
+rename from old-name.ts
+rename to new-name.ts
+--- a/old-name.ts
++++ b/new-name.ts
+@@ -1,3 +1,3 @@
+ import { foo } from './bar';
+-const x = 1;
++const x = 2;
+ export default x;`;
+        const result = truncateDiff(diff, DEFAULT_MAX_CHARS);
+
+        expect(result.totalFiles).toBe(1);
+        expect(result.diff).toContain('diff --git a/old-name.ts b/new-name.ts');
+        expect(result.diff).toContain('rename from old-name.ts');
+    });
+
+    it('should handle diff with binary file marker', () => {
+        const diff = `diff --git a/image.png b/image.png
+Binary files /dev/null and b/image.png differ`;
+        const result = truncateDiff(diff, DEFAULT_MAX_CHARS);
+
+        expect(result.totalFiles).toBe(1);
+        expect(result.fullyIncludedFiles).toBe(1);
+    });
+
+    it('should preserve "No newline at end of file" marker', () => {
+        const diff = `diff --git a/readme.md b/readme.md
+--- a/readme.md
++++ b/readme.md
+@@ -1 +1 @@
+-# Old Title
+\\ No newline at end of file
++# New Title
+\\ No newline at end of file`;
+        const result = truncateDiff(diff, DEFAULT_MAX_CHARS);
+
+        expect(result.diff).toContain('No newline at end of file');
+    });
 });
