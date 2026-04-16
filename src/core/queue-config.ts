@@ -156,7 +156,7 @@ function validatePerEntries(prefix: string, value: unknown): void {
     }
 }
 
-function validateQueueSettings(prefix: string, value: unknown): void {
+export function validateQueueSettings(prefix: string, value: unknown): void {
     if (typeof value !== 'object' || value === null || Array.isArray(value)) {
         throw new Error(`${prefix} must be an object`);
     }

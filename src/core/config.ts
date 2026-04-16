@@ -4,7 +4,7 @@ import yaml from 'js-yaml';
 import type { SokuzaConfig } from './types.js';
 import { normalizeWorkflow } from './templates.js';
 import { loadAIProviders } from './ai-providers.js';
-import { validateQueueConfig } from './queue-config.js';
+import { validateQueueConfig, validateQueueSettings } from './queue-config.js';
 
 const DEFAULT_CONFIG_NAME = 'sokuza.config.yaml';
 
@@ -57,6 +57,13 @@ async function validateConfig(raw: Record<string, unknown>): Promise<SokuzaConfi
             normalizeWorkflow(wf as Record<string, unknown>),
         ),
     );
+
+    for (let i = 0; i < workflows.length; i++) {
+        const wf = workflows[i];
+        if (wf.queue) {
+            validateQueueSettings(`workflows[${i}] (${wf.name}).queue`, wf.queue);
+        }
+    }
 
     // Build the AI provider registry from the optional `ai:` block.
     // When omitted, loadAIProviders registers built-in defaults.

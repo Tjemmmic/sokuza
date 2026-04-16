@@ -72,4 +72,53 @@ workflows: []
             'Config must include a "server" section',
         );
     });
+
+    it('should validate workflow-level queue overrides at startup', async () => {
+        const configContent = `
+server:
+  port: 4000
+workflows:
+  - name: bad-queue-wf
+    trigger:
+      source: manual
+      event: push
+    steps:
+      - action: log
+        params:
+          message: hello
+    queue:
+      concurrency: -5
+`;
+        const configPath = join(TMP_DIR, 'bad-wf-queue.yaml');
+        await writeFile(configPath, configContent);
+
+        await expect(loadConfig(configPath)).rejects.toThrow(
+            /workflows\[0].*queue.*concurrency.*positive/,
+        );
+    });
+
+    it('should accept valid workflow-level queue overrides', async () => {
+        const configContent = `
+server:
+  port: 4000
+workflows:
+  - name: good-queue-wf
+    trigger:
+      source: manual
+      event: push
+    steps:
+      - action: log
+        params:
+          message: hello
+    queue:
+      concurrency: 5
+      timeout: 60
+      dedup: latest-wins
+`;
+        const configPath = join(TMP_DIR, 'good-wf-queue.yaml');
+        await writeFile(configPath, configContent);
+
+        const config = await loadConfig(configPath);
+        expect(config.workflows[0].queue?.concurrency).toBe(5);
+    });
 });
