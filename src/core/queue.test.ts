@@ -366,5 +366,114 @@ describe('WorkflowQueue', () => {
 
             expect(job.status).toBe('completed');
         });
+
+        it('should start other workflows when head-of-queue is blocked by per-workflow concurrency', async () => {
+            const q = new WorkflowQueue(makeLogger(), 10, 10);
+            const started: string[] = [];
+            const resolvers: Array<() => void> = [];
+
+            q.setExecutor(
+                async (job) => {
+                    started.push(job.workflow.name);
+                    await new Promise<void>((r) => { resolvers.push(r); });
+                },
+                { integrationConfigs: {}, ai: undefined },
+            );
+
+            const wfA = makeWorkflow({ name: 'wfA' });
+            const wfB = makeWorkflow({ name: 'wfB' });
+
+            q.enqueue(wfA, makeEvent(), makeResolvedConfig({ dedup: 'none', dedupKey: 'a1', concurrency: 1 }));
+            q.enqueue(wfA, makeEvent(), makeResolvedConfig({ dedup: 'none', dedupKey: 'a2', concurrency: 1 }));
+            q.enqueue(wfB, makeEvent(), makeResolvedConfig({ dedup: 'none', dedupKey: 'b1', concurrency: 1 }));
+
+            await new Promise((r) => setTimeout(r, 50));
+
+            expect(started).toEqual(['wfA', 'wfB']);
+            expect(q.getJobs('running')).toHaveLength(2);
+            expect(q.getJobs('queued')).toHaveLength(1);
+
+            resolvers[0]();
+            resolvers[1]();
+            await new Promise((r) => setTimeout(r, 50));
+
+            expect(started).toEqual(['wfA', 'wfB', 'wfA']);
+            expect(q.getJobs('running')).toHaveLength(1);
+
+            resolvers[2]();
+            await new Promise((r) => setTimeout(r, 50));
+        });
+
+        it('should not double-decrement concurrency when cancelling a running job', async () => {
+            const q = new WorkflowQueue(makeLogger(), 2, 10);
+            const resolvers: Array<() => void> = [];
+
+            q.setExecutor(
+                async (job) => {
+                    await new Promise<void>((r) => { resolvers.push(r); });
+                },
+                { integrationConfigs: {}, ai: undefined },
+            );
+
+            const j1 = q.enqueue(makeWorkflow({ name: 'wf1' }), makeEvent(), makeResolvedConfig({ dedup: 'none', dedupKey: 'dd1', concurrency: 10 }));
+            const j2 = q.enqueue(makeWorkflow({ name: 'wf2' }), makeEvent(), makeResolvedConfig({ dedup: 'none', dedupKey: 'dd2', concurrency: 10 }));
+            q.enqueue(makeWorkflow({ name: 'wf3' }), makeEvent(), makeResolvedConfig({ dedup: 'none', dedupKey: 'dd3', concurrency: 10 }));
+
+            await new Promise((r) => setTimeout(r, 50));
+            expect(q.getJobs('running')).toHaveLength(2);
+
+            q.cancel(j1.id);
+            await new Promise((r) => setTimeout(r, 50));
+
+            const stats = q.getStats();
+            expect(stats.byStatus.running).toBe(2);
+            expect(stats.availableSlots).toBe(0);
+
+            resolvers[0]();
+            resolvers[1]();
+            resolvers[2]();
+            await new Promise((r) => setTimeout(r, 50));
+        });
+
+        it('should not double-decrement concurrency during shutdown force-clear', async () => {
+            const q = new WorkflowQueue(makeLogger(), 2, 10);
+
+            q.setExecutor(
+                async () => {
+                    await new Promise<void>(() => {});
+                },
+                { integrationConfigs: {}, ai: undefined },
+            );
+
+            q.enqueue(makeWorkflow({ name: 'wf1' }), makeEvent(), makeResolvedConfig({ dedup: 'none', dedupKey: 'sc1', concurrency: 10 }));
+            q.enqueue(makeWorkflow({ name: 'wf2' }), makeEvent(), makeResolvedConfig({ dedup: 'none', dedupKey: 'sc2', concurrency: 10 }));
+
+            await new Promise((r) => setTimeout(r, 50));
+            expect(q.getJobs('running')).toHaveLength(2);
+
+            await q.shutdown(50);
+
+            const stats = q.getStats();
+            expect(stats.availableSlots).toBe(2);
+            expect(stats.byStatus.running).toBe(0);
+        });
+
+        it('should mark job as failed when executor throws without setting status', async () => {
+            const q = new WorkflowQueue(makeLogger(), 5, 10);
+
+            q.setExecutor(
+                async () => {
+                    throw new Error('executor blew up');
+                },
+                { integrationConfigs: {}, ai: undefined },
+            );
+
+            const job = q.enqueue(makeWorkflow(), makeEvent(), makeResolvedConfig({ dedup: 'none', dedupKey: 'exc', retry: 0 }));
+
+            await new Promise((r) => setTimeout(r, 50));
+
+            expect(job.status).toBe('failed');
+            expect(job.error).toBe('executor blew up');
+        });
     });
 });

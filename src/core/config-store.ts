@@ -85,23 +85,25 @@ export class ConfigStore {
     }
 
     async reloadAndNormalize(): Promise<Partial<SokuzaConfig>> {
-        const raw = await readFile(this.configPath, 'utf-8');
-        const interpolated = this.interpolateEnvVars(raw);
-        const parsed = yaml.load(interpolated) as Record<string, unknown>;
-        this.cache = parsed;
+        return this.withLock(async () => {
+            const raw = await readFile(this.configPath, 'utf-8');
+            const interpolated = this.interpolateEnvVars(raw);
+            const parsed = yaml.load(interpolated) as Record<string, unknown>;
+            this.cache = parsed;
 
-        const rawWorkflows = Array.isArray(parsed.workflows) ? parsed.workflows : [];
-        const workflows = await Promise.all(
-            rawWorkflows.map((wf: unknown) =>
-                normalizeWorkflow(wf as Record<string, unknown>),
-            ),
-        );
+            const rawWorkflows = Array.isArray(parsed.workflows) ? parsed.workflows : [];
+            const workflows = await Promise.all(
+                rawWorkflows.map((wf: unknown) =>
+                    normalizeWorkflow(wf as Record<string, unknown>),
+                ),
+            );
 
-        const ai = loadAIProviders(parsed.ai as Record<string, unknown> | undefined);
-        const queue = validateQueueConfig(parsed.queue);
-        const integrations = (parsed.integrations ?? {}) as Record<string, import('./types.js').IntegrationConfig>;
+            const ai = loadAIProviders(parsed.ai as Record<string, unknown> | undefined);
+            const queue = validateQueueConfig(parsed.queue);
+            const integrations = (parsed.integrations ?? {}) as Record<string, import('./types.js').IntegrationConfig>;
 
-        return { workflows, ai, queue, integrations };
+            return { workflows, ai, queue, integrations };
+        });
     }
 
     private async atomicWrite(content: string): Promise<void> {

@@ -138,6 +138,7 @@ export class WorkflowQueue {
             this.addToHistory(running);
             this.notify(running);
             this.logger.info({ jobId }, 'Running job cancelled');
+            this.scheduleTick();
             return true;
         }
 
@@ -265,19 +266,28 @@ export class WorkflowQueue {
     private tick(): void {
         if (this.shuttingDown || !this.executor || !this.executorContext) return;
 
-        while (this.queue.length > 0) {
+        let i = 0;
+        while (i < this.queue.length) {
             if (this.concurrencyCount >= this.maxConcurrency) break;
 
-            const job = this.queue[0];
+            const job = this.queue[i];
             const sameWorkflowRunning = this.countRunningByWorkflow(job.workflow.name);
-            if (sameWorkflowRunning >= job.resolvedConfig.concurrency) break;
+            if (sameWorkflowRunning >= job.resolvedConfig.concurrency) {
+                i++;
+                continue;
+            }
 
-            this.queue.shift();
+            this.queue.splice(i, 1);
             this.startJob(job);
 
             const { integrationConfigs, ai, recordWebhookDelivery } = this.executorContext;
             this.executor(job, integrationConfigs, ai, recordWebhookDelivery)
-                .catch(() => {})
+                .catch((err) => {
+                    if (job.status === 'running') {
+                        job.status = 'failed';
+                        job.error = err?.message ?? String(err);
+                    }
+                })
                 .finally(() => this.onJobCompleted(job));
         }
     }
@@ -309,6 +319,8 @@ export class WorkflowQueue {
     }
 
     private onJobCompleted(job: QueueJob): void {
+        if (!this.running.has(job.id)) return;
+
         if (job.status === 'running') {
             job.status = 'completed';
         }
@@ -335,6 +347,7 @@ export class WorkflowQueue {
     }
 
     private scheduleRetry(job: QueueJob): void {
+        if (this.shuttingDown) return;
         const delay = job.resolvedConfig.retryDelay * 1000;
         this.logger.info(
             { jobId: job.id, attempt: job.attempts, maxRetries: job.resolvedConfig.retry, delayMs: delay },
