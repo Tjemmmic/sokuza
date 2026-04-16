@@ -4,6 +4,7 @@ import yaml from 'js-yaml';
 import type { SokuzaConfig } from './types.js';
 import { normalizeWorkflow } from './templates.js';
 import { loadAIProviders } from './ai-providers.js';
+import { validateQueueConfig } from './queue-config.js';
 
 const DEFAULT_CONFIG_NAME = 'sokuza.config.yaml';
 
@@ -61,6 +62,9 @@ async function validateConfig(raw: Record<string, unknown>): Promise<SokuzaConfi
     // When omitted, loadAIProviders registers built-in defaults.
     const ai = loadAIProviders(raw.ai as Record<string, unknown> | undefined);
 
+    // Validate and parse the optional `queue:` block.
+    const queue = validateQueueConfig(raw.queue);
+
     return {
         server: {
             port: server.port as number,
@@ -69,6 +73,7 @@ async function validateConfig(raw: Record<string, unknown>): Promise<SokuzaConfi
         integrations: integrations as SokuzaConfig['integrations'],
         workflows,
         ai,
+        queue,
     };
 }
 

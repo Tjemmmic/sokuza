@@ -138,6 +138,8 @@ export async function normalizeWorkflow(
         trigger: resolvedTrigger,
         steps,
         inputs: raw.inputs as WorkflowDefinition['inputs'],
+        queue: raw.queue as WorkflowDefinition['queue'],
+        ai: raw.ai as WorkflowDefinition['ai'],
     };
 }
 
