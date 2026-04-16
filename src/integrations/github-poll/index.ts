@@ -423,7 +423,7 @@ export class GitHubPollIntegration implements Integration {
         return this.apiGetAllPages(url);
     }
 
-    private async apiGetAllPages(url: string): Promise<unknown[]> {
+    private async apiGetAllPages(url: string): Promise<unknown> {
         const all: unknown[] = [];
         let nextUrl: string | null = url;
 
@@ -436,12 +436,12 @@ export class GitHubPollIntegration implements Integration {
                 },
             });
 
-            if (res.status === 304) break;
+            if (res.status === 304) return all;
             if (!res.ok) {
                 throw new Error(`GitHub API ${res.status}: ${res.statusText}`);
             }
 
-            const data = await res.json() as unknown[];
+            const data: unknown = await res.json();
             if (!Array.isArray(data)) return data;
             all.push(...data);
 
