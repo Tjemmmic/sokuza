@@ -5,6 +5,34 @@ server:
   port: 3500
   host: "0.0.0.0"
 
+# ─── AI Providers ────────────────────────────────────────────────────────────
+# Register AI providers that workflows can reference by name.
+# If omitted, sokuza auto-registers "claude-code" (CLI) and "anthropic" (API).
+
+ai:
+  default_provider: claude-code
+
+  providers:
+    # Direct Anthropic API
+    anthropic:
+      kind: anthropic-api
+      api_key: ${ANTHROPIC_API_KEY}
+      default_model: claude-sonnet-4-20250514
+
+    # Claude Code CLI (uses your ~/.claude subscription)
+    claude-code:
+      kind: cli
+      command: claude
+      args_style: claude-code
+      default_model: sonnet
+
+    # Opencode CLI — native multi-provider support
+    opencode:
+      kind: cli
+      command: opencode
+      args_style: opencode
+      default_model: glm-4.6
+
 # ─── Integrations ────────────────────────────────────────────────────────────
 # Enable the integrations you need. Each one auto-registers its actions.
 
@@ -30,6 +58,49 @@ integrations:
   # Cron — time-based triggers (no webhook needed)
   # cron: {}
 
+# ─── Queue ───────────────────────────────────────────────────────────────────
+# Configure the job queue that handles workflow execution.
+# All settings are optional — sensible defaults are used when omitted.
+
+queue:
+  # Global defaults applied to all workflows
+  defaults:
+    concurrency: 3
+    dedup: latest-wins
+    dedup_key: "{{workflow.name}}:{{event.metadata.repo}}:{{event.metadata.prNumber}}"
+    priority: normal
+    timeout: 300
+    retry: 0
+    retry_delay: 30
+
+  # Per-provider overrides (limit concurrency for rate-limited APIs)
+  per_provider:
+    anthropic:
+      concurrency: 4
+    claude-code:
+      concurrency: 2
+    opencode:
+      concurrency: 2
+
+  # Per-workflow overrides
+  # per_workflow:
+  #   auto-pr-review:
+  #     concurrency: 2
+  #     dedup_key: "{{workflow.name}}:{{event.metadata.repo}}:{{event.metadata.prNumber}}"
+  #     priority: high
+  #     timeout: 120
+  #   fix-github-issue:
+  #     concurrency: 1
+  #     priority: low
+  #     timeout: 600
+  #     retry: 1
+
+  # Per-repo overrides
+  # per_repo:
+  #   "my-org/critical-repo":
+  #     concurrency: 5
+  #     priority: critical
+
 # ─── Workflows ───────────────────────────────────────────────────────────────
 # Each workflow has a trigger (which integration + event) and steps (actions).
 # Use a template for common patterns, or define custom steps.
@@ -41,6 +112,82 @@ workflows:
     trigger:
       event: pull_request.opened
       repo: "my-org/my-repo"
+
+  # Workflow with inline AI config and queue settings
+  # - name: premium-review
+  #   template: ai-pr-review
+  #   ai:
+  #     provider: claude-code
+  #     model: opus
+  #   queue:
+  #     concurrency: 1
+  #     timeout: 180
+  #   trigger:
+  #     event: pull_request.opened
+  #     repo: "my-org/my-repo"
+
+  # Dual-model parallel review: run two AI reviews simultaneously
+  # with different providers, then merge into a single review
+  # - name: dual-review
+  #   description: "Run two independent reviews in parallel, then merge"
+  #   ai:
+  #     provider: claude-code
+  #     model: sonnet
+  #   trigger:
+  #     source: gh-cli
+  #     event: pull_request.opened
+  #   steps:
+  #     - id: clone
+  #       action: github-clone-repo
+  #       params: {}
+  #     - id: fetch_diff
+  #       action: github-fetch-diff
+  #       params: {}
+  #
+  #     # Two reviews run in parallel
+  #     - id: claude_review
+  #       action: ai-review
+  #       run: parallel
+  #       ai:
+  #         provider: claude-code
+  #         model: opus
+  #       params:
+  #         diff: "{{steps.fetch_diff.diff}}"
+  #         workdir: "{{steps.clone.path}}"
+  #     - id: opencode_review
+  #       action: ai-review
+  #       run: parallel
+  #       ai:
+  #         provider: opencode
+  #         model: glm-4.6
+  #       params:
+  #         diff: "{{steps.fetch_diff.diff}}"
+  #         workdir: "{{steps.clone.path}}"
+  #
+  #     # Merge the two reviews into one
+  #     - id: merged
+  #       action: ai-review
+  #       ai:
+  #         provider: anthropic
+  #         model: claude-sonnet-4-20250514
+  #       params:
+  #         diff: "{{steps.fetch_diff.diff}}"
+  #         workdir: "{{steps.clone.path}}"
+  #         prompt: >
+  #           Synthesize two independent code reviews into one unified review.
+  #           Deduplicate findings and resolve conflicts.
+  #
+  #           Review A (Claude Opus):
+  #           {{steps.claude_review.review}}
+  #
+  #           Review B (GLM via Opencode):
+  #           {{steps.opencode_review.review}}
+  #
+  #     - action: github-comment
+  #       params:
+  #         body: |
+  #           ## 🤖 AI Code Review (Dual-Model)
+  #           {{steps.merged.review}}
 
   # Cross-source: review PR + notify Slack
   # - name: review-and-notify
