@@ -168,11 +168,10 @@ function resolveShorthands(
         }
     }
 
-    // Resolve labels array → individual array-contains filter
     const labels = raw.labels as string[] | undefined;
-    if (labels && Array.isArray(labels)) {
-        for (const label of labels) {
-            filters[`payload.pull_request.labels[].name`] = label;
+    if (labels && Array.isArray(labels) && labels.length > 0) {
+        if (labels.length === 1) {
+            filters[`payload.pull_request.labels[].name`] = labels[0];
         }
     }
 

@@ -1,7 +1,9 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { normalizeWorkflow, resetTemplateCache } from './templates.js';
+import { normalizeWorkflow, loadTemplates, resetTemplateCache } from './templates.js';
+import { join } from 'node:path';
 
-// Reset template cache before each test to avoid cross-test interference
+const TEMPLATES_DIR = join(import.meta.dirname, '..', '..', 'templates');
+
 beforeEach(() => {
     resetTemplateCache();
 });
@@ -96,7 +98,18 @@ describe('normalizeWorkflow — shorthand resolution', () => {
         expect(wf.trigger.filters?.['payload.pull_request.user.login']).toBeUndefined();
     });
 
-    it('resolves labels to array-contains filter', async () => {
+    it('resolves single label to array-contains filter', async () => {
+        const wf = await normalizeWorkflow(
+            minWorkflow({
+                source: 'github',
+                event: 'push',
+                labels: ['bug'],
+            }),
+        );
+        expect(wf.trigger.filters?.['payload.pull_request.labels[].name']).toBe('bug');
+    });
+
+    it('keeps multi-value labels on trigger for multi-match resolution', async () => {
         const wf = await normalizeWorkflow(
             minWorkflow({
                 source: 'github',
@@ -104,8 +117,8 @@ describe('normalizeWorkflow — shorthand resolution', () => {
                 labels: ['bug', 'urgent'],
             }),
         );
-        // Last label wins in the current implementation (overwrites)
-        expect(wf.trigger.filters?.['payload.pull_request.labels[].name']).toBe('urgent');
+        expect(wf.trigger.labels).toEqual(['bug', 'urgent']);
+        expect(wf.trigger.filters?.['payload.pull_request.labels[].name']).toBeUndefined();
     });
 
     it('preserves explicit filters alongside shorthands', async () => {
@@ -203,5 +216,51 @@ describe('normalizeWorkflow — validation', () => {
                 trigger: { source: 'github', event: 'push' },
             }),
         ).rejects.toThrow('Unknown workflow template');
+    });
+});
+
+// ─── loadTemplates ───────────────────────────────────────────────────────────
+
+describe('loadTemplates', () => {
+    it('loads YAML templates from disk', async () => {
+        const templates = await loadTemplates(TEMPLATES_DIR);
+
+        expect(templates['ai-pr-review']).toBeDefined();
+        expect(templates['log-events']).toBeDefined();
+        expect(templates['enforce-rules']).toBeDefined();
+    });
+
+    it('returns empty if directory does not exist', async () => {
+        const templates = await loadTemplates('/tmp/nonexistent-dir-999');
+        expect(Object.keys(templates).length).toBe(0);
+    });
+});
+
+// ─── normalizeWorkflow — template expansion ──────────────────────────────────
+
+describe('normalizeWorkflow — template expansion', () => {
+    it('expands a template into steps', async () => {
+        const wf = await normalizeWorkflow({
+            name: 'test-review',
+            template: 'ai-pr-review',
+            trigger: { event: 'pull_request.opened' },
+        });
+
+        expect(wf.steps.length).toBeGreaterThan(0);
+        expect(wf.steps[0].action).toBe('github-clone-repo');
+        expect(wf.trigger.source).toBe('github');
+    });
+
+    it('allows user steps to override template steps', async () => {
+        const customSteps = [{ action: 'log', params: { message: 'hi' } }];
+        const wf = await normalizeWorkflow({
+            name: 'custom',
+            template: 'ai-pr-review',
+            trigger: { event: 'push' },
+            steps: customSteps,
+        });
+
+        expect(wf.steps.length).toBe(1);
+        expect(wf.steps[0].action).toBe('log');
     });
 });
