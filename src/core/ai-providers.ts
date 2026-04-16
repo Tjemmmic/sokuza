@@ -38,25 +38,15 @@ export type ProviderKind = 'anthropic-api' | 'openai-compatible-api' | 'cli';
 export type ArgsStyle = 'claude-code' | 'opencode';
 
 export interface AIProvider {
-    /** Registry key, e.g. "zai-glm", "anthropic", "opencode". */
     name: string;
     kind: ProviderKind;
-    /** Default model used when an action does not specify one. */
     defaultModel?: string;
-
-    // ─── API provider fields ────────────────────────────────────────────
-    /** Resolved API key (after env var interpolation). */
     apiKey?: string;
-    /** Override the SDK's default base URL. */
     baseUrl?: string;
-
-    // ─── CLI provider fields ────────────────────────────────────────────
-    /** Binary to spawn, e.g. "claude", "opencode". */
     command?: string;
-    /** Extra env vars merged into the spawned process (e.g. ANTHROPIC_BASE_URL). */
     env?: Record<string, string>;
-    /** Which arg-building strategy to use. */
     argsStyle?: ArgsStyle;
+    _client?: Anthropic;
 }
 
 export interface AIProviderRegistry {
@@ -323,12 +313,14 @@ async function runAnthropicCompletion(
         );
     }
 
-    const client = new Anthropic({
-        apiKey: provider.apiKey,
-        ...(provider.baseUrl ? { baseURL: provider.baseUrl } : {}),
-    });
+    if (!provider._client) {
+        provider._client = new Anthropic({
+            apiKey: provider.apiKey,
+            ...(provider.baseUrl ? { baseURL: provider.baseUrl } : {}),
+        });
+    }
 
-    const response = await client.messages.create({
+    const response = await provider._client.messages.create({
         model: request.model,
         max_tokens: request.maxTokens ?? 4096,
         system: request.systemPrompt,
