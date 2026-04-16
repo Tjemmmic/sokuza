@@ -548,6 +548,49 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
         return { actions: deps.getRegisteredActions() };
     });
 
+    // ─── Queue ──────────────────────────────────────────────────────────
+
+    server.get('/api/queue', async () => {
+        const queue = deps.getQueue?.();
+        if (!queue) {
+            return { stats: null, jobs: [] };
+        }
+        const stats = queue.getStats();
+        const jobs = queue.getJobs();
+        return {
+            stats,
+            jobs: jobs.map(serializeJob),
+        };
+    });
+
+    server.get('/api/queue/jobs', async (request) => {
+        const queue = deps.getQueue?.();
+        if (!queue) return { jobs: [] };
+        const { status } = (request.query ?? {}) as { status?: string };
+        const jobs = queue.getJobs(status as any);
+        return { jobs: jobs.map(serializeJob) };
+    });
+
+    server.post('/api/queue/jobs/:id/cancel', async (request, reply) => {
+        const queue = deps.getQueue?.();
+        if (!queue) return reply.status(503).send({ error: 'Queue not available' });
+        const { id } = request.params as { id: string };
+        const ok = queue.cancel(id);
+        if (!ok) return reply.status(404).send({ error: `Job "${id}" not found in queue or running` });
+        logger.info({ jobId: id }, 'Job cancelled via dashboard');
+        return { ok: true };
+    });
+
+    server.post('/api/queue/jobs/:id/retry', async (request, reply) => {
+        const queue = deps.getQueue?.();
+        if (!queue) return reply.status(503).send({ error: 'Queue not available' });
+        const { id } = request.params as { id: string };
+        const ok = queue.retry(id);
+        if (!ok) return reply.status(404).send({ error: `Job "${id}" not found or not retryable` });
+        logger.info({ jobId: id }, 'Job retried via dashboard');
+        return { ok: true };
+    });
+
     // ─── Events (REST — persisted history) ──────────────────────────────
 
     server.get('/api/events', async () => {
@@ -809,3 +852,22 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
     });
 }
 
+function serializeJob(job: import('../core/types.js').QueueJob) {
+    return {
+        id: job.id,
+        workflowName: job.workflow.name,
+        status: job.status,
+        priority: job.priority,
+        dedupKey: job.dedupKey,
+        enqueuedAt: job.enqueuedAt,
+        startedAt: job.startedAt,
+        completedAt: job.completedAt,
+        error: job.error,
+        attempts: job.attempts,
+        event: {
+            source: job.event.source,
+            event: job.event.event,
+            action: job.event.action,
+        },
+    };
+}
