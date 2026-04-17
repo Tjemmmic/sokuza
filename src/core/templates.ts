@@ -1,5 +1,7 @@
 import { readdir, readFile } from 'node:fs/promises';
-import { join, basename, extname } from 'node:path';
+import { existsSync } from 'node:fs';
+import { dirname, join, basename, extname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import yaml from 'js-yaml';
 import type { WorkflowDefinition, TriggerDefinition, WorkflowStepDefinition, OneOrMany } from './types.js';
 import { toArray } from './types.js';
@@ -65,11 +67,22 @@ export function resetTemplateCache(): void {
 
 /** Default templates directory: <project_root>/templates */
 function getDefaultTemplateDir(): string {
-    // Walk up from dist/ or src/ to find the project root
-    const thisFile = new URL(import.meta.url).pathname;
-    // src/core/templates.ts → go up 2 levels to project root
-    const projectRoot = join(thisFile, '..', '..', '..');
-    return join(projectRoot, 'templates');
+    // Resolve whichever layout we're running in:
+    //   source (tsx):   src/core/templates.ts → ../../templates
+    //   built (tsup):   dist/index.js          → ../templates
+    // Try each candidate; first existing dir wins. This avoids counting
+    // directory levels, which desynced between layouts in the past.
+    const here = fileURLToPath(import.meta.url);
+    const candidates = [
+        join(dirname(here), '..', '..', 'templates'),
+        join(dirname(here), '..', 'templates'),
+    ];
+    for (const c of candidates) {
+        if (existsSync(c)) return c;
+    }
+    // Fall back to the first candidate — loadTemplates will return {} and
+    // surface a clear error when a workflow tries to reference a template.
+    return candidates[0];
 }
 
 // ─── Shorthand Filter Resolution ────────────────────────────────────────────

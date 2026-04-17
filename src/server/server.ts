@@ -2,12 +2,21 @@ import Fastify from 'fastify';
 import type { FastifyInstance } from 'fastify';
 import type { Logger } from 'pino';
 import { readFile } from 'node:fs/promises';
-import { join, resolve, extname } from 'node:path';
+import { existsSync } from 'node:fs';
+import { dirname, join, resolve, extname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-/** Dashboard directory — at project root */
+/** Dashboard directory — at project root (works from both src/ and dist/). */
 function getDashboardDir(): string {
-    const thisFile = new URL(import.meta.url).pathname;
-    return join(thisFile, '..', '..', '..', 'dashboard');
+    const here = fileURLToPath(import.meta.url);
+    const candidates = [
+        join(dirname(here), '..', '..', 'dashboard'),
+        join(dirname(here), '..', 'dashboard'),
+    ];
+    for (const c of candidates) {
+        if (existsSync(c)) return c;
+    }
+    return candidates[0];
 }
 
 const MIME_TYPES: Record<string, string> = {
