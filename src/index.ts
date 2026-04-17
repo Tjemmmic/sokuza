@@ -1,77 +1,141 @@
-import 'dotenv/config';
+import { resolve } from 'node:path';
 
-import { loadConfig } from './core/config.js';
-import { SokuzaEngine } from './core/engine.js';
-import { GitHubIntegration } from './integrations/github/index.js';
-import { GitHubPollIntegration } from './integrations/github-poll/index.js';
-import { GhCliIntegration } from './integrations/gh-cli/index.js';
-import { isGhInstalled } from './integrations/gh-cli/exec.js';
-import { SlackIntegration } from './integrations/slack/index.js';
-import { WebhookIntegration } from './integrations/webhook/index.js';
-import { CronIntegration } from './integrations/cron/index.js';
+import { VERSION } from './version.js';
+import { runStart } from './cli/start.js';
+import { runInit } from './cli/init.js';
+import { installService, uninstallService } from './cli/service.js';
 
-// ─── Generic actions (source-agnostic) ──────────────────────────────────────
-import { logAction } from './actions/log.js';
-import { webhookAction } from './actions/webhook.js';
-import { aiReviewAction } from './actions/ai-review.js';
-import { aiAgentAction } from './actions/ai-agent.js';
+interface ParsedArgs {
+    command: string;
+    configPath?: string;
+    force: boolean;
+    positional: string[];
+}
+
+/**
+ * Minimal argv parser — no external dep. Supports:
+ *   sokuza                          → start
+ *   sokuza start [--config PATH]    → start
+ *   sokuza init [--force]           → write sokuza.config.yaml from example
+ *   sokuza install-service [--config PATH]
+ *   sokuza uninstall-service
+ *   sokuza version | --version | -v
+ *   sokuza help    | --help    | -h
+ *
+ * Backwards-compat: a single positional path is still accepted as a config
+ * path for the default start command, matching the pre-CLI behaviour.
+ */
+function parseArgs(argv: string[]): ParsedArgs {
+    const rest = argv.slice(2);
+    const KNOWN_COMMANDS = new Set([
+        'start', 'init', 'install-service', 'uninstall-service',
+        'version', '--version', '-v', 'help', '--help', '-h',
+    ]);
+
+    let command = 'start';
+    let configPath: string | undefined;
+    let force = false;
+    const positional: string[] = [];
+
+    // If the first non-flag arg is a known command, consume it.
+    if (rest.length > 0 && KNOWN_COMMANDS.has(rest[0])) {
+        command = rest.shift()!;
+    }
+
+    for (let i = 0; i < rest.length; i++) {
+        const arg = rest[i];
+        if (arg === '--config' || arg === '-c') {
+            configPath = rest[++i];
+        } else if (arg.startsWith('--config=')) {
+            configPath = arg.slice('--config='.length);
+        } else if (arg === '--force' || arg === '-f') {
+            force = true;
+        } else {
+            positional.push(arg);
+        }
+    }
+
+    // Legacy: `sokuza path/to/config.yaml` was valid before subcommands existed.
+    if (command === 'start' && !configPath && positional.length === 1) {
+        configPath = positional[0];
+    }
+
+    return { command, configPath, force, positional };
+}
+
+function printHelp(): void {
+    process.stdout.write(`sokuza ${VERSION} — AI workflow automation engine
+
+Usage:
+  sokuza [start] [--config PATH]   Start the engine (default)
+  sokuza init [--force]            Create sokuza.config.yaml from the bundled example
+  sokuza install-service [--config PATH]
+                                   Install autostart service for this OS
+  sokuza uninstall-service         Remove the autostart service
+  sokuza version                   Print version and exit
+  sokuza help                      Show this message
+
+Docs: https://sokuza.ai
+`);
+}
 
 async function main(): Promise<void> {
-    // Allow config path override via CLI arg or env
-    const configPath = process.argv[2] ?? process.env.SOKUZA_CONFIG;
+    const args = parseArgs(process.argv);
 
-    const config = await loadConfig(configPath);
-    const engine = new SokuzaEngine(config, configPath);
+    switch (args.command) {
+        case 'version':
+        case '--version':
+        case '-v':
+            process.stdout.write(`sokuza ${VERSION}\n`);
+            return;
 
-    // ─── Register integrations (actions are auto-registered) ────────────
-    if (config.integrations.github) {
-        engine.registerIntegration(new GitHubIntegration());
-    }
-    if (config.integrations['github-poll']) {
-        engine.registerIntegration(new GitHubPollIntegration());
-    }
+        case 'help':
+        case '--help':
+        case '-h':
+            printHelp();
+            return;
 
-    // Auto-register gh-cli integration if gh CLI is available
-    // This provides zero-config GitHub support via the gh CLI
-    const ghAvailable = await isGhInstalled();
-    if (ghAvailable) {
-        // Register with empty config if not explicitly configured
-        if (!config.integrations['gh-cli']) {
-            config.integrations['gh-cli'] = {};
+        case 'start':
+            await runStart({ configPath: args.configPath });
+            return;
+
+        case 'init':
+            await runInit({ force: args.force });
+            return;
+
+        case 'install-service': {
+            const configPath = resolve(
+                args.configPath
+                ?? process.env.SOKUZA_CONFIG
+                ?? 'sokuza.config.yaml',
+            );
+            const result = await installService({ configPath });
+            process.stdout.write(
+                `Installed sokuza autostart (${result.platform}).\n` +
+                `  Unit: ${result.unitPath}\n` +
+                result.followUp.map((l) => `  - ${l}\n`).join(''),
+            );
+            return;
         }
-        engine.registerIntegration(new GhCliIntegration());
+
+        case 'uninstall-service': {
+            const result = await uninstallService();
+            process.stdout.write(
+                `Uninstalled sokuza autostart (${result.platform}).\n` +
+                result.followUp.map((l) => `  - ${l}\n`).join(''),
+            );
+            return;
+        }
+
+        default:
+            process.stderr.write(`sokuza: unknown command "${args.command}"\n\n`);
+            printHelp();
+            process.exit(2);
     }
-
-    if (config.integrations.slack) {
-        engine.registerIntegration(new SlackIntegration());
-    }
-    if (config.integrations.webhook) {
-        engine.registerIntegration(new WebhookIntegration());
-    }
-    if (config.integrations.cron) {
-        engine.registerIntegration(new CronIntegration());
-    }
-
-    // ─── Register generic actions ───────────────────────────────────────
-    engine.registerAction('log', logAction);
-    engine.registerAction('webhook', webhookAction);
-    engine.registerAction('ai-review', aiReviewAction);
-    engine.registerAction('ai-agent', aiAgentAction);
-
-    // ─── Start ──────────────────────────────────────────────────────────
-    await engine.start();
-
-    // ─── Graceful shutdown ──────────────────────────────────────────────
-    const shutdown = async () => {
-        await engine.stop();
-        process.exit(0);
-    };
-
-    process.on('SIGINT', shutdown);
-    process.on('SIGTERM', shutdown);
 }
 
 main().catch((err) => {
-    console.error('Fatal error starting Sokuza:', err);
+    console.error('Fatal error:', err?.message ?? err);
+    if (process.env.SOKUZA_DEBUG === '1') console.error(err?.stack);
     process.exit(1);
 });
