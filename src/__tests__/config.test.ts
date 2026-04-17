@@ -64,12 +64,21 @@ workflows: []
         );
     });
 
-    it('should throw when server section is missing', async () => {
+    it('should default to the canonical discovery port when server section is missing', async () => {
         const configPath = join(TMP_DIR, 'no-server.yaml');
         await writeFile(configPath, 'workflows: []');
 
+        const config = await loadConfig(configPath);
+        expect(config.server.port).toBe(24847);
+        expect(config.server.host).toBe('0.0.0.0');
+    });
+
+    it('should reject non-numeric server.port', async () => {
+        const configPath = join(TMP_DIR, 'bad-port.yaml');
+        await writeFile(configPath, 'server:\n  port: "oops"\nworkflows: []\n');
+
         await expect(loadConfig(configPath)).rejects.toThrow(
-            'Config must include a "server" section',
+            'server.port must be a number',
         );
     });
 

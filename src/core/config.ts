@@ -5,6 +5,7 @@ import type { SokuzaConfig } from './types.js';
 import { normalizeWorkflow } from './templates.js';
 import { loadAIProviders } from './ai-providers.js';
 import { validateQueueConfig, validateQueueSettings } from './queue-config.js';
+import { DEFAULT_PREFERRED_PORT } from '../server/discovery.js';
 
 const DEFAULT_CONFIG_NAME = 'sokuza.config.yaml';
 
@@ -40,13 +41,15 @@ export async function loadConfig(
 }
 
 async function validateConfig(raw: Record<string, unknown>): Promise<SokuzaConfig> {
-    if (!raw.server || typeof raw.server !== 'object') {
-        throw new Error('Config must include a "server" section');
+    // The `server` block is optional — when absent we fall back to the
+    // canonical Sokuza discovery port so the public site can find us.
+    const server = (raw.server && typeof raw.server === 'object'
+        ? (raw.server as Record<string, unknown>)
+        : {});
+    if (server.port !== undefined && typeof server.port !== 'number') {
+        throw new Error('server.port must be a number when set');
     }
-    const server = raw.server as Record<string, unknown>;
-    if (typeof server.port !== 'number') {
-        throw new Error('server.port must be a number');
-    }
+    const port = (server.port as number | undefined) ?? DEFAULT_PREFERRED_PORT;
 
     const integrations = (raw.integrations ?? {}) as Record<string, unknown>;
     const rawWorkflows = Array.isArray(raw.workflows) ? raw.workflows : [];
@@ -74,7 +77,7 @@ async function validateConfig(raw: Record<string, unknown>): Promise<SokuzaConfi
 
     return {
         server: {
-            port: server.port as number,
+            port,
             host: (server.host as string) ?? '0.0.0.0',
         },
         integrations: integrations as SokuzaConfig['integrations'],

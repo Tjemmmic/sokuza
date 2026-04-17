@@ -324,7 +324,7 @@ npm test             # Run tests
 For development, use [localtunnel](https://github.com/localtunnel/localtunnel) to expose your local server:
 
 ```bash
-npx -y localtunnel --port 3500
+npx -y localtunnel --port 24847
 ```
 
 Then configure the provided URL as your webhook endpoint in GitHub/Slack settings.

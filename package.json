@@ -7,6 +7,13 @@
   "bin": {
     "sokuza": "dist/index.js"
   },
+  "files": [
+    "dist",
+    "dashboard",
+    "templates",
+    "sokuza.config.example.yaml",
+    "README.md"
+  ],
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsup",
