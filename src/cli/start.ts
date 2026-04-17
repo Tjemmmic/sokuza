@@ -27,6 +27,8 @@ const ENV_EXAMPLE = 'sokuza.env.example';
 
 export interface StartOptions {
     configPath?: string;
+    /** CLI-level override for the preferred port. Wins over config.server.port. */
+    port?: number;
 }
 
 /**
@@ -45,6 +47,14 @@ export async function runStart(opts: StartOptions): Promise<void> {
         ?? await ensureDefaultConfig();
 
     const config = await loadConfig(configPath);
+
+    // `--port` overrides the YAML-configured port. This is the preferred
+    // port; the fallback chain still kicks in if it's busy. Useful for
+    // one-off testing and for running multiple sokuzas on the same box.
+    if (opts.port !== undefined) {
+        config.server.port = opts.port;
+    }
+
     const engine = new SokuzaEngine(config, configPath);
 
     if (config.integrations.github) {

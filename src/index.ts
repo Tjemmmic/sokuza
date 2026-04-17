@@ -1,5 +1,13 @@
 import { resolve } from 'node:path';
 
+// Downstream pipes (head, less, grep with -q) close stdout early. Node
+// treats that as an EPIPE write error and crashes the process with a
+// stack trace — noisy behaviour for what is really "the reader is done."
+// Convert to a clean exit, matching how Unix tools behave.
+process.stdout.on('error', (err) => {
+    if ((err as NodeJS.ErrnoException).code === 'EPIPE') process.exit(0);
+});
+
 import { VERSION } from './version.js';
 import { runStart } from './cli/start.js';
 import { runInit } from './cli/init.js';
@@ -10,6 +18,7 @@ import { installService, uninstallService } from './cli/service.js';
 interface ParsedArgs {
     command: string;
     configPath?: string;
+    port?: number;
     force: boolean;
     follow: boolean;
     lines?: number;
@@ -41,6 +50,7 @@ function parseArgs(argv: string[]): ParsedArgs {
 
     let command = 'start';
     let configPath: string | undefined;
+    let port: number | undefined;
     let force = false;
     let follow = false;
     let lines: number | undefined;
@@ -56,6 +66,18 @@ function parseArgs(argv: string[]): ParsedArgs {
             configPath = rest[++i];
         } else if (arg.startsWith('--config=')) {
             configPath = arg.slice('--config='.length);
+        } else if (arg === '--port' || arg === '-p') {
+            const v = Number.parseInt(rest[++i], 10);
+            if (!Number.isFinite(v) || v <= 0 || v > 65535) {
+                throw new Error(`--port expects an integer in 1..65535, got ${rest[i]}`);
+            }
+            port = v;
+        } else if (arg.startsWith('--port=')) {
+            const v = Number.parseInt(arg.slice('--port='.length), 10);
+            if (!Number.isFinite(v) || v <= 0 || v > 65535) {
+                throw new Error(`--port expects an integer in 1..65535, got ${arg}`);
+            }
+            port = v;
         } else if (arg === '--force' || (arg === '-f' && command !== 'logs')) {
             // `-f` means --force for init, but --follow for logs. Only treat
             // it as --force when the command wouldn't otherwise consume it.
@@ -77,14 +99,15 @@ function parseArgs(argv: string[]): ParsedArgs {
         configPath = positional[0];
     }
 
-    return { command, configPath, force, follow, lines, positional };
+    return { command, configPath, port, force, follow, lines, positional };
 }
 
 function printHelp(): void {
     process.stdout.write(`sokuza ${VERSION} — AI workflow automation engine
 
 Usage:
-  sokuza [start] [--config PATH]   Start the engine (default)
+  sokuza [start] [--config PATH] [--port N]
+                                   Start the engine (default)
   sokuza init [--force]            Scaffold sokuza.config.yaml and .env
   sokuza status                    Report locally-running instances
   sokuza logs [-f] [-n N]          Show platform-appropriate logs (-f to follow)
@@ -115,7 +138,7 @@ async function main(): Promise<void> {
             return;
 
         case 'start':
-            await runStart({ configPath: args.configPath });
+            await runStart({ configPath: args.configPath, port: args.port });
             return;
 
         case 'init':
