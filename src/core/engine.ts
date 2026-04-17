@@ -16,7 +16,12 @@ import { toArray } from './types.js';
 import { createHash } from 'node:crypto';
 import { createServer } from '../server/server.js';
 import { registerApiRoutes } from '../server/api.js';
-import { listenWithFallback, persistRuntimeState } from '../server/discovery.js';
+import {
+    clearRuntimeState,
+    listenWithFallback,
+    persistRuntimeState,
+    pruneStaleRuntimeStates,
+} from '../server/discovery.js';
 import type { FastifyInstance } from 'fastify';
 import { resolve, join } from 'node:path';
 import { WorkflowQueue } from './queue.js';
@@ -43,6 +48,9 @@ export class SokuzaEngine {
 
     // ─── Config store ────────────────────────────────────────────────────
     private configStore: ConfigStore;
+
+    /** Path of this process's runtime state file, cleared on graceful stop. */
+    private stateFile: string | null = null;
 
     // ─── Dashboard state ────────────────────────────────────────────────
     private recentEvents: Array<{ event: EventPayload; timestamp: string; matchedWorkflows: string[] }> = [];
@@ -472,21 +480,24 @@ export class SokuzaEngine {
         );
         this.config.server.port = actualPort;
 
+        // Clean up state files left by previous processes that crashed.
+        // Never load-bearing — it's housekeeping, failures are non-fatal.
+        await pruneStaleRuntimeStates(this.logger).catch(() => 0);
+
         // State persistence is best-effort: a read-only home dir should not
         // prevent the server from running, only from being auto-discoverable.
-        let stateFile: string | null = null;
         try {
-            stateFile = await persistRuntimeState(actualPort, host);
+            this.stateFile = await persistRuntimeState(actualPort, host);
         } catch (err) {
             this.logger.warn(
                 { err: (err as Error).message },
-                'Could not write runtime state file — `sokuza open` discovery may fall back to port scanning',
+                'Could not write runtime state file — `sokuza status` and diagnostics won\'t see this process',
             );
         }
 
         const localUrl = `http://localhost:${actualPort}`;
         this.logger.info(
-            { port: actualPort, host, url: localUrl, state: stateFile },
+            { port: actualPort, host, url: localUrl, state: this.stateFile },
             `🚀 Sokuza is listening at ${localUrl}`,
         );
     }
@@ -501,6 +512,13 @@ export class SokuzaEngine {
         await this.queue.shutdown();
         if (this.server) {
             await this.server.close();
+        }
+
+        // Best-effort cleanup of our own state file so `listRuntimeStates`
+        // doesn't report this pid after it exits.
+        if (this.stateFile) {
+            try { await clearRuntimeState(this.stateFile); } catch { /* ignored */ }
+            this.stateFile = null;
         }
     }
 

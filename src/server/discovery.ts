@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
@@ -125,16 +125,32 @@ export interface RuntimeState {
 }
 
 /**
- * Persist the active port to ~/.sokuza/state.json so operators and future
- * tooling (e.g. `sokuza open`) can locate the running instance without
- * parsing logs.
+ * Directory where each running sokuza process writes its per-PID state file.
+ * Per-instance files (rather than a single `state.json`) mean two concurrent
+ * sokuzas don't race to overwrite the same file, and a crashed process leaves
+ * behind evidence of what port it was on until the next startup prunes it.
+ */
+export function runtimeStateDir(): string {
+    return join(homedir(), '.sokuza', 'instances');
+}
+
+function runtimeStateFileFor(pid: number): string {
+    return join(runtimeStateDir(), `${pid}.json`);
+}
+
+/**
+ * Write `~/.sokuza/instances/<pid>.json` with this process's runtime state.
+ * Returns the written path so the caller (engine.stop) can delete it on
+ * graceful shutdown. State files are diagnostic — the `/open` detector
+ * probes ports directly rather than trusting this file — so best-effort
+ * write failure is non-fatal.
  */
 export async function persistRuntimeState(
     port: number,
     host: string,
 ): Promise<string> {
-    const dir = join(homedir(), '.sokuza');
-    const file = join(dir, 'state.json');
+    const dir = runtimeStateDir();
+    const file = runtimeStateFileFor(process.pid);
     await mkdir(dir, { recursive: true });
     const state: RuntimeState = {
         app: SOKUZA_APP_ID,
@@ -144,6 +160,94 @@ export async function persistRuntimeState(
         pid: process.pid,
         startedAt: new Date().toISOString(),
     };
-    await writeFile(file, JSON.stringify(state, null, 2) + '\n', 'utf-8');
+    await writeFile(file, JSON.stringify(state, null, 2) + '\n', {
+        encoding: 'utf-8',
+        mode: 0o600,
+    });
     return file;
+}
+
+/** Delete a previously-persisted state file. Safe to call multiple times. */
+export async function clearRuntimeState(stateFile: string): Promise<void> {
+    await rm(stateFile, { force: true });
+}
+
+/**
+ * Check whether a pid belongs to a currently-running process.
+ * `process.kill(pid, 0)` sends no signal but throws ESRCH if the process
+ * doesn't exist. EPERM means the process exists but belongs to a different
+ * user — for our purposes that still counts as "alive."
+ */
+function isProcessAlive(pid: number): boolean {
+    try {
+        process.kill(pid, 0);
+        return true;
+    } catch (err) {
+        return (err as NodeJS.ErrnoException).code === 'EPERM';
+    }
+}
+
+/**
+ * Sweep the state directory for files belonging to processes that no longer
+ * exist. Called at startup so a crashed previous run leaves a clean slate.
+ * Silent on errors: this is housekeeping, never load-bearing.
+ */
+export async function pruneStaleRuntimeStates(logger?: Logger): Promise<number> {
+    const dir = runtimeStateDir();
+    let entries: string[];
+    try {
+        entries = await readdir(dir);
+    } catch {
+        return 0;
+    }
+
+    let pruned = 0;
+    for (const name of entries) {
+        if (!name.endsWith('.json')) continue;
+        const pidPart = name.slice(0, -'.json'.length);
+        const pid = Number.parseInt(pidPart, 10);
+        if (!Number.isFinite(pid) || pid <= 0) continue;
+        if (pid === process.pid) continue;
+
+        const file = join(dir, name);
+        if (!isProcessAlive(pid)) {
+            try {
+                await rm(file, { force: true });
+                pruned++;
+            } catch (err) {
+                logger?.debug({ err, file }, 'Could not prune stale runtime state');
+            }
+        }
+    }
+    return pruned;
+}
+
+/**
+ * Load every live runtime state. Returns only states whose pid is still
+ * running — callers get a trustworthy snapshot without having to re-probe.
+ * Used by future tooling like `sokuza status`.
+ */
+export async function listRuntimeStates(): Promise<RuntimeState[]> {
+    const dir = runtimeStateDir();
+    let entries: string[];
+    try {
+        entries = await readdir(dir);
+    } catch {
+        return [];
+    }
+
+    const results: RuntimeState[] = [];
+    for (const name of entries) {
+        if (!name.endsWith('.json')) continue;
+        try {
+            const raw = await readFile(join(dir, name), 'utf-8');
+            const parsed = JSON.parse(raw) as RuntimeState;
+            if (parsed.app === SOKUZA_APP_ID && isProcessAlive(parsed.pid)) {
+                results.push(parsed);
+            }
+        } catch {
+            // Malformed or unreadable — skip.
+        }
+    }
+    return results;
 }
