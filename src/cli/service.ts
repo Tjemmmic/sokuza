@@ -18,13 +18,45 @@ import { spawnSync } from 'node:child_process';
  *   - the node binary currently running sokuza (process.execPath)
  *   - the absolute path of the installed CLI entry (process.argv[1])
  *   - the config file + its directory (captured from CLI args / cwd)
+ *   - the user's current PATH (with required system dirs appended)
  *
- * Capturing absolute paths at install time makes the service immune to
- * PATH changes later.
+ * Capturing absolute paths and the full PATH at install time makes the
+ * service immune to the minimised environment systemd and launchd hand to
+ * user services — a workflow that shells out to `gh` or `claude` finds them
+ * on exactly the PATH the user had when they ran `install-service`.
  */
 
 const SERVICE_LABEL = 'ai.sokuza';
 const LINUX_UNIT_NAME = 'sokuza.service';
+
+/** System dirs we always want present regardless of user shell quirks. */
+const UNIX_REQUIRED_PATH_DIRS = [
+    '/usr/local/bin',
+    '/opt/homebrew/bin',
+    '/usr/bin',
+    '/bin',
+    '/usr/sbin',
+    '/sbin',
+];
+
+/**
+ * Snapshot the PATH that will be injected into the generated service unit.
+ * Unix: the user's current PATH with required system dirs appended if
+ * missing. Windows: returns the current PATH untouched — Startup-folder
+ * shims inherit the user's logon environment directly.
+ */
+export function captureServicePath(env: NodeJS.ProcessEnv = process.env): string {
+    const sep = process.platform === 'win32' ? ';' : ':';
+    const current = env.PATH ?? '';
+    if (process.platform === 'win32') return current;
+
+    const parts = current.split(sep).filter(Boolean);
+    const seen = new Set(parts);
+    for (const dir of UNIX_REQUIRED_PATH_DIRS) {
+        if (!seen.has(dir)) { parts.push(dir); seen.add(dir); }
+    }
+    return parts.join(sep);
+}
 
 export interface ServiceOptions {
     /** Absolute path to the config file that autostart should use. */
@@ -49,11 +81,13 @@ export async function installService(opts: ServiceOptions): Promise<ServiceResul
     const nodeBin = process.execPath;
     const entry = resolve(process.argv[1]);
     const workdir = dirname(configPath);
+    const servicePath = captureServicePath();
 
+    const ctx: InstallCtx = { configPath, nodeBin, entry, workdir, servicePath };
     const plat = platform();
-    if (plat === 'linux') return installLinux({ configPath, nodeBin, entry, workdir });
-    if (plat === 'darwin') return installMacOS({ configPath, nodeBin, entry, workdir });
-    if (plat === 'win32') return installWindows({ configPath, nodeBin, entry, workdir });
+    if (plat === 'linux') return installLinux(ctx);
+    if (plat === 'darwin') return installMacOS(ctx);
+    if (plat === 'win32') return installWindows(ctx);
     throw new Error(`Unsupported platform for service install: ${plat}`);
 }
 
@@ -67,18 +101,27 @@ export async function uninstallService(): Promise<ServiceResult> {
 
 // ─── Linux (systemd --user) ─────────────────────────────────────────────────
 
-interface InstallCtx {
+export interface InstallCtx {
     configPath: string;
     nodeBin: string;
     entry: string;
     workdir: string;
+    /** PATH to bake into the service unit. Captured from the install shell. */
+    servicePath: string;
 }
 
-async function installLinux(ctx: InstallCtx): Promise<ServiceResult> {
-    const dir = join(homedir(), '.config', 'systemd', 'user');
-    const unitPath = join(dir, LINUX_UNIT_NAME);
-
-    const unit = `[Unit]
+/**
+ * Generate the systemd user-unit body for the given install context.
+ * Separated from the filesystem side-effects so it can be tested directly
+ * and so callers can preview the unit before we write it.
+ *
+ * PATH is baked into the unit with `Environment=` because systemd's user
+ * manager hands a minimal PATH to services by default — `PassEnvironment`
+ * alone only forwards vars that are *already set* in the manager's env,
+ * which typically doesn't include NVM/mise/asdf shim directories.
+ */
+export function renderLinuxUnit(ctx: InstallCtx): string {
+    return `[Unit]
 Description=Sokuza — AI workflow automation engine
 Documentation=https://sokuza.ai
 After=network-online.target
@@ -90,13 +133,21 @@ ExecStart=${shellQuote(ctx.nodeBin)} ${shellQuote(ctx.entry)} start --config ${s
 WorkingDirectory=${ctx.workdir}
 Restart=on-failure
 RestartSec=5
-# Use the user's own environment (PATH, XDG_*); avoids systemd's sanitised PATH
-# losing things like \`gh\` or \`claude\` the workflows depend on.
-PassEnvironment=PATH HOME XDG_CONFIG_HOME XDG_DATA_HOME
+Environment="PATH=${ctx.servicePath}"
+# Forward XDG vars the user's shell has already configured (paths like
+# ~/.config, ~/.local/share); systemd's manager inherits HOME itself.
+PassEnvironment=XDG_CONFIG_HOME XDG_DATA_HOME XDG_RUNTIME_DIR
 
 [Install]
 WantedBy=default.target
 `;
+}
+
+async function installLinux(ctx: InstallCtx): Promise<ServiceResult> {
+    const dir = join(homedir(), '.config', 'systemd', 'user');
+    const unitPath = join(dir, LINUX_UNIT_NAME);
+
+    const unit = renderLinuxUnit(ctx);
 
     await mkdir(dir, { recursive: true });
     await writeFile(unitPath, unit, 'utf-8');
@@ -122,6 +173,11 @@ WantedBy=default.target
             `Install systemd tooling or run another init (runit/OpenRC) equivalent manually.`,
         );
     }
+    followUp.push(
+        `PATH was baked into the unit. If you later install tools in a new ` +
+        `directory (e.g. NVM, mise) and workflows can't find them, re-run ` +
+        `\`sokuza install-service\` to refresh it.`,
+    );
 
     return { platform: 'linux', unitPath, followUp };
 }
@@ -148,12 +204,16 @@ async function uninstallLinux(): Promise<ServiceResult> {
 
 // ─── macOS (launchd user agent) ─────────────────────────────────────────────
 
-async function installMacOS(ctx: InstallCtx): Promise<ServiceResult> {
-    const plistDir = join(homedir(), 'Library', 'LaunchAgents');
-    const plistPath = join(plistDir, `${SERVICE_LABEL}.plist`);
-    const logDir = join(homedir(), '.sokuza', 'logs');
-
-    const plist = `<?xml version="1.0" encoding="UTF-8"?>
+/**
+ * Generate the launchd plist body for the given install context and log
+ * paths. Separated from filesystem side-effects for testability.
+ *
+ * PATH uses `ctx.servicePath` — the user's shell PATH snapshot — because
+ * launchd hands agents a minimal PATH by default, which doesn't include
+ * NVM/mise/asdf shim dirs or custom user bin directories.
+ */
+export function renderMacOSPlist(ctx: InstallCtx, logDir: string): string {
+    return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
@@ -173,11 +233,19 @@ async function installMacOS(ctx: InstallCtx): Promise<ServiceResult> {
     <key>StandardErrorPath</key><string>${xmlEscape(join(logDir, 'stderr.log'))}</string>
     <key>EnvironmentVariables</key>
     <dict>
-        <key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>PATH</key><string>${xmlEscape(ctx.servicePath)}</string>
     </dict>
 </dict>
 </plist>
 `;
+}
+
+async function installMacOS(ctx: InstallCtx): Promise<ServiceResult> {
+    const plistDir = join(homedir(), 'Library', 'LaunchAgents');
+    const plistPath = join(plistDir, `${SERVICE_LABEL}.plist`);
+    const logDir = join(homedir(), '.sokuza', 'logs');
+
+    const plist = renderMacOSPlist(ctx, logDir);
 
     await mkdir(plistDir, { recursive: true });
     await mkdir(logDir, { recursive: true });
@@ -201,6 +269,11 @@ async function installMacOS(ctx: InstallCtx): Promise<ServiceResult> {
     } else {
         followUp.push(`Loaded via \`launchctl bootstrap ${domain}\`. Auto-starts on login.`);
     }
+    followUp.push(
+        `PATH was baked into the plist. If you later install tools in a new ` +
+        `directory (e.g. NVM, mise) and workflows can't find them, re-run ` +
+        `\`sokuza install-service\` to refresh it.`,
+    );
 
     return { platform: 'darwin', unitPath: plistPath, followUp };
 }
