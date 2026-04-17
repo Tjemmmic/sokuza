@@ -5,6 +5,7 @@ import { readFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { dirname, join, resolve, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { applyDiscoveryCors, buildHealthResponse } from './discovery.js';
 
 /** Dashboard directory — at project root (works from both src/ and dist/). */
 function getDashboardDir(): string {
@@ -37,9 +38,21 @@ export function createServer(logger: Logger): FastifyInstance {
         logger: false, // We use our own pino instance
     });
 
-    // ─── Health check ───────────────────────────────────────────────────────
-    server.get('/health', async () => {
-        return { status: 'ok', timestamp: new Date().toISOString() };
+    // ─── Discovery: /health ────────────────────────────────────────────────
+    // Public surface probed by https://sokuza.ai to detect a locally running
+    // instance. Response shape is stable — it is the contract the public site
+    // validates against. Strict CORS: only sokuza.ai (and dev origins when
+    // explicitly enabled) may read this cross-origin.
+    server.get('/health', async (request, reply) => {
+        applyDiscoveryCors(request, reply);
+        return buildHealthResponse();
+    });
+
+    // CORS preflight for /health. Browsers send this before any cross-origin
+    // GET that sets non-simple headers or is inspected as JSON from JS.
+    server.options('/health', async (request, reply) => {
+        applyDiscoveryCors(request, reply);
+        reply.status(204).send();
     });
 
     // ─── Dashboard static file serving ──────────────────────────────────────

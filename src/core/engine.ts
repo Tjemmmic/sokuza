@@ -16,6 +16,7 @@ import { toArray } from './types.js';
 import { createHash } from 'node:crypto';
 import { createServer } from '../server/server.js';
 import { registerApiRoutes } from '../server/api.js';
+import { listenWithFallback, persistRuntimeState } from '../server/discovery.js';
 import type { FastifyInstance } from 'fastify';
 import { resolve, join } from 'node:path';
 import { WorkflowQueue } from './queue.js';
@@ -464,9 +465,30 @@ export class SokuzaEngine {
 
         this.startCronSchedules();
 
-        const { port, host } = this.config.server;
-        await this.server.listen({ port, host: host ?? '0.0.0.0' });
-        this.logger.info({ port, host }, '🚀 Sokuza is listening');
+        const { port: preferredPort } = this.config.server;
+        const host = this.config.server.host ?? '0.0.0.0';
+        const actualPort = await listenWithFallback(
+            this.server, host, preferredPort, this.logger,
+        );
+        this.config.server.port = actualPort;
+
+        // State persistence is best-effort: a read-only home dir should not
+        // prevent the server from running, only from being auto-discoverable.
+        let stateFile: string | null = null;
+        try {
+            stateFile = await persistRuntimeState(actualPort, host);
+        } catch (err) {
+            this.logger.warn(
+                { err: (err as Error).message },
+                'Could not write runtime state file — `sokuza open` discovery may fall back to port scanning',
+            );
+        }
+
+        const localUrl = `http://localhost:${actualPort}`;
+        this.logger.info(
+            { port: actualPort, host, url: localUrl, state: stateFile },
+            `🚀 Sokuza is listening at ${localUrl}`,
+        );
     }
 
     /** Graceful shutdown */
