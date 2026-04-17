@@ -319,6 +319,24 @@ npm run lint         # Type-check without emitting
 npm test             # Run tests
 ```
 
+### Testing the public site against a local sokuza
+
+When running the sokuza-web Astro dev server against a local sokuza (the
+"Open app" detector at `/open`), the browser's origin is
+`http://localhost:4321` (or 4322/4323 if 4321 is busy). The `/health`
+endpoint's CORS allow-list only admits `https://sokuza.ai` in production,
+so cross-origin probes from the dev site are rejected by default.
+
+Set `SOKUZA_ALLOW_DEV_ORIGINS=1` when starting sokuza to additionally
+accept the Astro dev origins:
+
+```bash
+SOKUZA_ALLOW_DEV_ORIGINS=1 sokuza
+```
+
+This is a development-only escape hatch — leave it unset in production so
+no random dev origin on the user's machine can read `/health`.
+
 ## Exposing to the Internet
 
 For development, use [localtunnel](https://github.com/localtunnel/localtunnel) to expose your local server:
