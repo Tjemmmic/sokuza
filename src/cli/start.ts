@@ -1,8 +1,7 @@
 import 'dotenv/config';
-import { access, copyFile } from 'node:fs/promises';
-import { constants, existsSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { copyFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { resolve } from 'node:path';
 
 import { loadConfig } from '../core/config.js';
 import { SokuzaEngine } from '../core/engine.js';
@@ -19,7 +18,12 @@ import { webhookAction } from '../actions/webhook.js';
 import { aiReviewAction } from '../actions/ai-review.js';
 import { aiAgentAction } from '../actions/ai-agent.js';
 
+import { locateBundledFile } from './bundled-files.js';
+
 const DEFAULT_CONFIG_NAME = 'sokuza.config.yaml';
+const DEFAULT_ENV_NAME = '.env';
+const CONFIG_EXAMPLE = 'sokuza.config.example.yaml';
+const ENV_EXAMPLE = 'sokuza.env.example';
 
 export interface StartOptions {
     configPath?: string;
@@ -86,53 +90,38 @@ export async function runStart(opts: StartOptions): Promise<void> {
 
 /**
  * Resolve a config path, creating one from the bundled example if none
- * exists yet. Returns an absolute path on success. Prints a one-line
- * notice on stderr when bootstrapping so autostart users notice.
+ * exists yet. Also drops an `.env` skeleton next to it when missing, so
+ * users get one obvious place to paste API keys. Prints a one-line
+ * stderr notice for each file scaffolded.
  */
 async function ensureDefaultConfig(): Promise<string> {
-    const cwdConfig = resolve(process.cwd(), DEFAULT_CONFIG_NAME);
-    if (await fileExists(cwdConfig)) return cwdConfig;
+    const cwd = process.cwd();
+    const cwdConfig = resolve(cwd, DEFAULT_CONFIG_NAME);
+    const cwdEnv = resolve(cwd, DEFAULT_ENV_NAME);
 
-    const example = locateBundledExample();
-    if (!example) {
-        // No example available (unusual) — let loadConfig surface the error.
-        return cwdConfig;
+    if (!existsSync(cwdConfig)) {
+        const example = locateBundledFile(CONFIG_EXAMPLE);
+        if (example) {
+            await copyFile(example, cwdConfig);
+            process.stderr.write(
+                `sokuza: created ${DEFAULT_CONFIG_NAME} from the bundled example — ` +
+                `edit it to enable integrations (github/slack/webhooks/cron).\n`,
+            );
+        }
+        // If the example isn't bundled, fall through and let loadConfig
+        // produce the actionable error.
     }
 
-    await copyFile(example, cwdConfig);
-    process.stderr.write(
-        `sokuza: created ${DEFAULT_CONFIG_NAME} from the bundled example — ` +
-        `edit it to enable integrations (github/slack/webhooks/cron).\n`,
-    );
+    if (!existsSync(cwdEnv)) {
+        const envExample = locateBundledFile(ENV_EXAMPLE);
+        if (envExample) {
+            await copyFile(envExample, cwdEnv);
+            process.stderr.write(
+                `sokuza: created ${DEFAULT_ENV_NAME} — ` +
+                `add tokens for any integration you enabled in the config.\n`,
+            );
+        }
+    }
+
     return cwdConfig;
-}
-
-async function fileExists(path: string): Promise<boolean> {
-    try {
-        await access(path, constants.F_OK);
-        return true;
-    } catch {
-        return false;
-    }
-}
-
-/**
- * Locate the bundled sokuza.config.example.yaml. When running from source
- * (tsx), it lives at repo root. When running from the built binary under
- * node_modules, it sits next to package.json (two dirs above dist/).
- */
-function locateBundledExample(): string | null {
-    const here = fileURLToPath(import.meta.url);
-    // Both source and build layouts keep the example at ../../sokuza.config.example.yaml
-    // relative to this file (src/cli/start.ts → repo root; dist/cli/ is not used — we
-    // bundle to a single dist/index.js, so resolve from the bundle location).
-    const candidates = [
-        resolve(dirname(here), '..', '..', 'sokuza.config.example.yaml'),
-        resolve(dirname(here), '..', 'sokuza.config.example.yaml'),
-        resolve(dirname(here), 'sokuza.config.example.yaml'),
-    ];
-    for (const c of candidates) {
-        if (existsSync(c)) return c;
-    }
-    return null;
 }

@@ -12,6 +12,7 @@
     "dashboard",
     "templates",
     "sokuza.config.example.yaml",
+    "sokuza.env.example",
     "README.md"
   ],
   "scripts": {

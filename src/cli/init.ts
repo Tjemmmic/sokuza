@@ -1,56 +1,74 @@
 import { copyFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { resolve } from 'node:path';
+import { locateBundledFile } from './bundled-files.js';
 
-const DEFAULT_CONFIG_NAME = 'sokuza.config.yaml';
+const CONFIG_NAME = 'sokuza.config.yaml';
+const ENV_NAME = '.env';
+const CONFIG_EXAMPLE = 'sokuza.config.example.yaml';
+const ENV_EXAMPLE = 'sokuza.env.example';
 
 export interface InitOptions {
     /** Target directory (defaults to process.cwd()) */
     cwd?: string;
-    /** Overwrite an existing config without asking */
+    /** Overwrite existing files without asking */
     force?: boolean;
 }
 
+type Outcome =
+    | { kind: 'created'; path: string }
+    | { kind: 'skipped'; path: string; reason: string };
+
 /**
- * Write a fresh `sokuza.config.yaml` into the target directory, sourced
- * from the bundled example. Refuses to clobber an existing config unless
- * --force was passed — users shouldn't lose local edits by accident.
+ * Scaffold a fresh sokuza config + .env skeleton in the target directory.
+ *
+ * Writes two files by default:
+ *   - sokuza.config.yaml   (from the bundled example)
+ *   - .env                 (from the bundled `sokuza.env.example`, commented out)
+ *
+ * Existing files are preserved unless `--force` was passed — users should
+ * never lose local edits to a tracked tokens file by accident. The .env
+ * case is especially load-bearing: it commonly holds real API keys.
  */
 export async function runInit(opts: InitOptions): Promise<void> {
-    const target = resolve(opts.cwd ?? process.cwd(), DEFAULT_CONFIG_NAME);
+    const dir = resolve(opts.cwd ?? process.cwd());
+    const force = opts.force ?? false;
 
-    if (existsSync(target) && !opts.force) {
-        process.stderr.write(
-            `sokuza: ${target} already exists. Pass --force to overwrite.\n`,
-        );
-        process.exit(1);
+    const results: Outcome[] = [
+        await scaffold(dir, CONFIG_NAME, CONFIG_EXAMPLE, force),
+        await scaffold(dir, ENV_NAME, ENV_EXAMPLE, force),
+    ];
+
+    for (const r of results) {
+        if (r.kind === 'created') {
+            process.stdout.write(`Created ${r.path}\n`);
+        } else {
+            process.stdout.write(`Skipped ${r.path} — ${r.reason}\n`);
+        }
     }
 
-    const example = locateBundledExample();
-    if (!example) {
-        process.stderr.write(
-            `sokuza: could not locate the bundled sokuza.config.example.yaml.\n`,
-        );
-        process.exit(1);
-    }
-
-    await copyFile(example, target);
     process.stdout.write(
-        `Created ${target}\n` +
-        `Next: edit it to enable integrations, then run \`sokuza\` to start.\n`,
+        `\nNext:\n` +
+        `  1. Edit ${resolve(dir, CONFIG_NAME)} to enable integrations.\n` +
+        `  2. Fill tokens in ${resolve(dir, ENV_NAME)} for the integrations you enabled.\n` +
+        `  3. Run \`sokuza\` from this directory to start the engine.\n`,
     );
 }
 
-function locateBundledExample(): string | null {
-    const here = fileURLToPath(import.meta.url);
-    const candidates = [
-        resolve(dirname(here), '..', '..', 'sokuza.config.example.yaml'),
-        resolve(dirname(here), '..', 'sokuza.config.example.yaml'),
-        resolve(dirname(here), 'sokuza.config.example.yaml'),
-    ];
-    for (const c of candidates) {
-        if (existsSync(c)) return c;
+async function scaffold(
+    dir: string,
+    destName: string,
+    sourceName: string,
+    force: boolean,
+): Promise<Outcome> {
+    const destPath = resolve(dir, destName);
+    if (existsSync(destPath) && !force) {
+        return { kind: 'skipped', path: destPath, reason: 'already exists (pass --force to overwrite)' };
     }
-    return null;
+    const source = locateBundledFile(sourceName);
+    if (!source) {
+        return { kind: 'skipped', path: destPath, reason: `bundled ${sourceName} not found` };
+    }
+    await copyFile(source, destPath);
+    return { kind: 'created', path: destPath };
 }
