@@ -3,20 +3,26 @@ import { resolve } from 'node:path';
 import { VERSION } from './version.js';
 import { runStart } from './cli/start.js';
 import { runInit } from './cli/init.js';
+import { runStatus } from './cli/status.js';
+import { runLogs } from './cli/logs.js';
 import { installService, uninstallService } from './cli/service.js';
 
 interface ParsedArgs {
     command: string;
     configPath?: string;
     force: boolean;
+    follow: boolean;
+    lines?: number;
     positional: string[];
 }
 
 /**
  * Minimal argv parser — no external dep. Supports:
- *   sokuza                          → start
- *   sokuza start [--config PATH]    → start
- *   sokuza init [--force]           → write sokuza.config.yaml from example
+ *   sokuza                            → start
+ *   sokuza start [--config PATH]      → start
+ *   sokuza init [--force]             → write sokuza.config.yaml + .env
+ *   sokuza status                     → report running instances
+ *   sokuza logs [-f] [-n N]           → show platform-appropriate logs
  *   sokuza install-service [--config PATH]
  *   sokuza uninstall-service
  *   sokuza version | --version | -v
@@ -28,16 +34,18 @@ interface ParsedArgs {
 function parseArgs(argv: string[]): ParsedArgs {
     const rest = argv.slice(2);
     const KNOWN_COMMANDS = new Set([
-        'start', 'init', 'install-service', 'uninstall-service',
+        'start', 'init', 'status', 'logs',
+        'install-service', 'uninstall-service',
         'version', '--version', '-v', 'help', '--help', '-h',
     ]);
 
     let command = 'start';
     let configPath: string | undefined;
     let force = false;
+    let follow = false;
+    let lines: number | undefined;
     const positional: string[] = [];
 
-    // If the first non-flag arg is a known command, consume it.
     if (rest.length > 0 && KNOWN_COMMANDS.has(rest[0])) {
         command = rest.shift()!;
     }
@@ -48,19 +56,28 @@ function parseArgs(argv: string[]): ParsedArgs {
             configPath = rest[++i];
         } else if (arg.startsWith('--config=')) {
             configPath = arg.slice('--config='.length);
-        } else if (arg === '--force' || arg === '-f') {
+        } else if (arg === '--force' || (arg === '-f' && command !== 'logs')) {
+            // `-f` means --force for init, but --follow for logs. Only treat
+            // it as --force when the command wouldn't otherwise consume it.
             force = true;
+        } else if (arg === '--follow' || (arg === '-f' && command === 'logs')) {
+            follow = true;
+        } else if (arg === '--lines' || arg === '-n') {
+            const v = Number.parseInt(rest[++i], 10);
+            if (Number.isFinite(v) && v > 0) lines = v;
+        } else if (arg.startsWith('--lines=')) {
+            const v = Number.parseInt(arg.slice('--lines='.length), 10);
+            if (Number.isFinite(v) && v > 0) lines = v;
         } else {
             positional.push(arg);
         }
     }
 
-    // Legacy: `sokuza path/to/config.yaml` was valid before subcommands existed.
     if (command === 'start' && !configPath && positional.length === 1) {
         configPath = positional[0];
     }
 
-    return { command, configPath, force, positional };
+    return { command, configPath, force, follow, lines, positional };
 }
 
 function printHelp(): void {
@@ -68,7 +85,9 @@ function printHelp(): void {
 
 Usage:
   sokuza [start] [--config PATH]   Start the engine (default)
-  sokuza init [--force]            Create sokuza.config.yaml from the bundled example
+  sokuza init [--force]            Scaffold sokuza.config.yaml and .env
+  sokuza status                    Report locally-running instances
+  sokuza logs [-f] [-n N]          Show platform-appropriate logs (-f to follow)
   sokuza install-service [--config PATH]
                                    Install autostart service for this OS
   sokuza uninstall-service         Remove the autostart service
@@ -101,6 +120,14 @@ async function main(): Promise<void> {
 
         case 'init':
             await runInit({ force: args.force });
+            return;
+
+        case 'status':
+            await runStatus();
+            return;
+
+        case 'logs':
+            await runLogs({ follow: args.follow, lines: args.lines });
             return;
 
         case 'install-service': {
