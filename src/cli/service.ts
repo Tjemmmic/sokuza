@@ -299,54 +299,161 @@ async function uninstallMacOS(): Promise<ServiceResult> {
     return { platform: 'darwin', unitPath: plistPath, followUp };
 }
 
-// ─── Windows (Startup folder shim) ──────────────────────────────────────────
+// ─── Windows (Task Scheduler logon task) ────────────────────────────────────
+
+const WINDOWS_TASK_NAME = 'Sokuza';
+
+/**
+ * Generate a Task Scheduler XML definition for a user-scoped logon task.
+ * Pure function: takes an install context + username, returns the XML body.
+ * The XML is imported via `schtasks /Create /XML`.
+ *
+ * Settings worth noting:
+ *   - `LogonTrigger`  fires on user login.
+ *   - `RestartOnFailure` + `Count=9999` matches the Linux/macOS "restart on
+ *     crash" contract. Without this, a crashed sokuza stays down until reboot.
+ *   - `ExecutionTimeLimit=PT0S` disables the default 72h timeout.
+ *   - `LogonType=InteractiveToken` + `RunLevel=LeastPrivilege` runs as the
+ *     current user, no UAC elevation required.
+ */
+export function renderWindowsTaskXml(ctx: InstallCtx, userId: string): string {
+    const esc = xmlEscape;
+    const args = `"${ctx.entry}" start --config "${ctx.configPath}"`;
+    return `<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>Sokuza — AI workflow automation engine</Description>
+    <Author>${esc(userId)}</Author>
+    <URI>\\${WINDOWS_TASK_NAME}</URI>
+  </RegistrationInfo>
+  <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+      <UserId>${esc(userId)}</UserId>
+    </LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>${esc(userId)}</UserId>
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <IdleSettings>
+      <StopOnIdleEnd>false</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <WakeToRun>false</WakeToRun>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Priority>7</Priority>
+    <RestartOnFailure>
+      <Interval>PT1M</Interval>
+      <Count>9999</Count>
+    </RestartOnFailure>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>${esc(ctx.nodeBin)}</Command>
+      <Arguments>${esc(args)}</Arguments>
+      <WorkingDirectory>${esc(ctx.workdir)}</WorkingDirectory>
+    </Exec>
+  </Actions>
+</Task>`;
+}
+
+/**
+ * Encode a string as UTF-16 LE with BOM. Older `schtasks /Create /XML`
+ * releases only accept this encoding.
+ */
+function encodeUtf16LeWithBom(content: string): Buffer {
+    return Buffer.concat([
+        Buffer.from([0xff, 0xfe]),
+        Buffer.from(content, 'utf16le'),
+    ]);
+}
 
 async function installWindows(ctx: InstallCtx): Promise<ServiceResult> {
-    const startup = process.env.APPDATA
-        ? join(process.env.APPDATA, 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup')
-        : null;
-    if (!startup) {
-        throw new Error('APPDATA is not set — cannot locate Windows Startup folder.');
+    const localAppData = process.env.LOCALAPPDATA ?? join(homedir(), 'AppData', 'Local');
+    const stateDir = join(localAppData, 'Sokuza');
+    const taskXmlPath = join(stateDir, 'task.xml');
+
+    const userDomain = process.env.USERDOMAIN;
+    const baseUser = userInfo().username;
+    const userId = userDomain ? `${userDomain}\\${baseUser}` : baseUser;
+
+    const xml = renderWindowsTaskXml(ctx, userId);
+    await mkdir(stateDir, { recursive: true });
+    await writeFile(taskXmlPath, encodeUtf16LeWithBom(xml));
+
+    const followUp: string[] = [];
+    const register = run('schtasks', ['/Create', '/TN', WINDOWS_TASK_NAME, '/XML', taskXmlPath, '/F']);
+    if (register.status !== 0) {
+        followUp.push(
+            `Task XML written to ${taskXmlPath}, but \`schtasks /Create\` failed: ` +
+            `${register.stderr.trim() || register.stdout.trim() || 'unknown error'}`,
+        );
+    } else {
+        followUp.push(
+            `Registered scheduled task "${WINDOWS_TASK_NAME}" — fires at user logon with ` +
+            `automatic restart on crash.`,
+        );
+        const start = run('schtasks', ['/Run', '/TN', WINDOWS_TASK_NAME]);
+        if (start.status === 0) {
+            followUp.push(`Started immediately; no need to log out.`);
+        }
     }
+    followUp.push(
+        `PATH is inherited from your user environment when the task fires. ` +
+        `If a workflow can't find a tool, add its directory to the user PATH ` +
+        `(System Properties → Environment Variables) and restart the task.`,
+    );
 
-    const shimPath = join(startup, 'sokuza.cmd');
-    const logDir = join(homedir(), '.sokuza', 'logs');
-    await mkdir(logDir, { recursive: true });
-
-    const shim = `@echo off
-REM Auto-generated by \`sokuza install-service\`. Launches Sokuza at login.
-cd /d ${winQuote(ctx.workdir)}
-start "" /b ${winQuote(ctx.nodeBin)} ${winQuote(ctx.entry)} start --config ${winQuote(ctx.configPath)} 1>>${winQuote(join(logDir, 'stdout.log'))} 2>>${winQuote(join(logDir, 'stderr.log'))}
-`;
-
-    await mkdir(startup, { recursive: true });
-    await writeFile(shimPath, shim, 'utf-8');
-
-    return {
-        platform: 'win32',
-        unitPath: shimPath,
-        followUp: [
-            `Shim installed at ${shimPath}. Sokuza will launch at next login.`,
-            `To start now without logging out, run: \`sokuza\` in another terminal.`,
-        ],
-    };
+    return { platform: 'win32', unitPath: taskXmlPath, followUp };
 }
 
 async function uninstallWindows(): Promise<ServiceResult> {
-    const startup = process.env.APPDATA
-        ? join(process.env.APPDATA, 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup')
-        : null;
-    const shimPath = startup ? join(startup, 'sokuza.cmd') : '';
+    const localAppData = process.env.LOCALAPPDATA ?? join(homedir(), 'AppData', 'Local');
+    const taskXmlPath = join(localAppData, 'Sokuza', 'task.xml');
     const followUp: string[] = [];
 
-    if (shimPath && existsSync(shimPath)) {
-        await rm(shimPath);
-        followUp.push(`Removed ${shimPath}`);
+    const stop = run('schtasks', ['/End', '/TN', WINDOWS_TASK_NAME]);
+    // /End returns non-zero when the task isn't running — benign.
+    void stop;
+
+    const del = run('schtasks', ['/Delete', '/TN', WINDOWS_TASK_NAME, '/F']);
+    if (del.status === 0) {
+        followUp.push(`Unregistered scheduled task "${WINDOWS_TASK_NAME}".`);
     } else {
-        followUp.push(`No startup shim found — already uninstalled.`);
+        followUp.push(`Task "${WINDOWS_TASK_NAME}" was not registered.`);
     }
 
-    return { platform: 'win32', unitPath: shimPath, followUp };
+    if (existsSync(taskXmlPath)) {
+        await rm(taskXmlPath);
+        followUp.push(`Removed ${taskXmlPath}`);
+    }
+
+    // Also clean up the legacy Startup-folder shim from previous install-service
+    // implementations. Users upgrading shouldn't have a stray .cmd around.
+    const legacyShim = process.env.APPDATA
+        ? join(process.env.APPDATA, 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup', 'sokuza.cmd')
+        : null;
+    if (legacyShim && existsSync(legacyShim)) {
+        await rm(legacyShim);
+        followUp.push(`Removed legacy Startup-folder shim at ${legacyShim}`);
+    }
+
+    return { platform: 'win32', unitPath: taskXmlPath, followUp };
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -356,11 +463,6 @@ function shellQuote(s: string): string {
     // Wrap anything with spaces or shell metacharacters.
     if (/^[A-Za-z0-9_\-./@%+=:]+$/.test(s)) return s;
     return `"${s.replace(/"/g, '\\"')}"`;
-}
-
-function winQuote(s: string): string {
-    // Always wrap Windows paths — they can contain spaces (`Program Files`) and `&`.
-    return `"${s.replace(/"/g, '""')}"`;
 }
 
 function xmlEscape(s: string): string {

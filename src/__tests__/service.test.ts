@@ -3,6 +3,7 @@ import {
     captureServicePath,
     renderLinuxUnit,
     renderMacOSPlist,
+    renderWindowsTaskXml,
     type InstallCtx,
 } from '../cli/service.js';
 
@@ -131,5 +132,50 @@ describe('renderMacOSPlist', () => {
         expect(out).toContain('/tmp/evil &amp; &lt;path&gt;.yaml');
         expect(out).toContain('/weird &amp; &lt;path&gt;');
         expect(out).not.toContain('/tmp/evil & <path>.yaml');
+    });
+});
+
+describe('renderWindowsTaskXml', () => {
+    const winCtx: InstallCtx = {
+        configPath: 'C:\\Users\\alice\\sokuza\\sokuza.config.yaml',
+        nodeBin: 'C:\\Program Files\\nodejs\\node.exe',
+        entry: 'C:\\Users\\alice\\AppData\\Roaming\\npm\\node_modules\\sokuza\\dist\\index.js',
+        workdir: 'C:\\Users\\alice\\sokuza',
+        servicePath: '',
+    };
+    const xml = renderWindowsTaskXml(winCtx, 'MYPC\\alice');
+
+    it('declares UTF-16 encoding so schtasks /Create /XML accepts it', () => {
+        expect(xml.startsWith('<?xml version="1.0" encoding="UTF-16"?>')).toBe(true);
+    });
+
+    it('uses a LogonTrigger so the task fires at user login', () => {
+        expect(xml).toContain('<LogonTrigger>');
+    });
+
+    it('configures RestartOnFailure so crashes auto-recover (matches Linux/macOS contract)', () => {
+        expect(xml).toMatch(/<RestartOnFailure>[\s\S]*<Interval>PT1M<\/Interval>[\s\S]*<Count>9999<\/Count>[\s\S]*<\/RestartOnFailure>/);
+    });
+
+    it('disables the default 72h execution time limit so sokuza runs indefinitely', () => {
+        expect(xml).toContain('<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>');
+    });
+
+    it('runs as the current user with least privilege (no UAC prompt)', () => {
+        expect(xml).toContain('<LogonType>InteractiveToken</LogonType>');
+        expect(xml).toContain('<RunLevel>LeastPrivilege</RunLevel>');
+        expect(xml).toContain('<UserId>MYPC\\alice</UserId>');
+    });
+
+    it('passes --config and the entry script as Arguments to node.exe', () => {
+        expect(xml).toContain(`<Command>${winCtx.nodeBin}</Command>`);
+        expect(xml).toContain(`<WorkingDirectory>${winCtx.workdir}</WorkingDirectory>`);
+        expect(xml).toContain(`<Arguments>&quot;${winCtx.entry}&quot; start --config &quot;${winCtx.configPath}&quot;</Arguments>`);
+    });
+
+    it('XML-escapes usernames that contain ampersands (DOMAIN\\user with & is rare but possible)', () => {
+        const esc = renderWindowsTaskXml(winCtx, 'A&B\\user');
+        expect(esc).toContain('<UserId>A&amp;B\\user</UserId>');
+        expect(esc).not.toContain('<UserId>A&B\\user</UserId>');
     });
 });
