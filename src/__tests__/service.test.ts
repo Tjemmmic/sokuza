@@ -4,6 +4,7 @@ import {
     renderLinuxUnit,
     renderMacOSPlist,
     renderWindowsTaskXml,
+    assertEntryIsExecutableByService,
     type InstallCtx,
 } from '../cli/service.js';
 
@@ -177,5 +178,37 @@ describe('renderWindowsTaskXml', () => {
         const esc = renderWindowsTaskXml(winCtx, 'A&B\\user');
         expect(esc).toContain('<UserId>A&amp;B\\user</UserId>');
         expect(esc).not.toContain('<UserId>A&B\\user</UserId>');
+    });
+});
+
+describe('assertEntryIsExecutableByService', () => {
+    it('accepts built dist entries', () => {
+        expect(() =>
+            assertEntryIsExecutableByService('/usr/local/lib/node_modules/sokuza/dist/index.js'),
+        ).not.toThrow();
+    });
+
+    it('rejects raw TypeScript sources — the system node cannot execute them', () => {
+        expect(() =>
+            assertEntryIsExecutableByService('/home/alice/sokuza/src/index.ts'),
+        ).toThrow(/TypeScript entry/);
+    });
+
+    it('rejects .mts / .cts / .tsx variants too', () => {
+        expect(() => assertEntryIsExecutableByService('/a/b.mts')).toThrow();
+        expect(() => assertEntryIsExecutableByService('/a/b.cts')).toThrow();
+        expect(() => assertEntryIsExecutableByService('/a/b.tsx')).toThrow();
+    });
+
+    it('rejects tsx / ts-node / vite-node shim paths', () => {
+        expect(() =>
+            assertEntryIsExecutableByService('/home/alice/project/node_modules/tsx/dist/cli.mjs'),
+        ).toThrow(/dev-runtime entry/);
+        expect(() =>
+            assertEntryIsExecutableByService('/home/alice/project/node_modules/ts-node/dist/bin.js'),
+        ).toThrow(/dev-runtime entry/);
+        expect(() =>
+            assertEntryIsExecutableByService('/home/alice/project/node_modules/vite-node/dist/cli.js'),
+        ).toThrow(/dev-runtime entry/);
     });
 });

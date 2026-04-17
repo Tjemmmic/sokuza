@@ -63,6 +63,39 @@ export interface ServiceOptions {
     configPath: string;
 }
 
+/**
+ * Reject install attempts when the CLI is running from a TypeScript source
+ * file or a dev-runtime loader (tsx, ts-node, vite-node). The resulting
+ * service unit would otherwise bake a path the system `node` can't
+ * actually execute — the service would fail silently at login with a
+ * SyntaxError in the logs.
+ *
+ * Exported for tests.
+ */
+export function assertEntryIsExecutableByService(entry: string): void {
+    const lower = entry.toLowerCase();
+    if (lower.endsWith('.ts') || lower.endsWith('.tsx') || lower.endsWith('.mts') || lower.endsWith('.cts')) {
+        throw new Error(
+            `install-service refuses to register a TypeScript entry (${entry}). ` +
+            `Run \`sokuza install-service\` from the built binary — typically the ` +
+            `globally-installed \`sokuza\` on your PATH — not from \`tsx\` or \`npm run dev\`. ` +
+            `If you need an autostart for a development checkout, build first with ` +
+            `\`npm run build\` and run the resulting \`dist/index.js\` directly.`,
+        );
+    }
+    // tsx/ts-node register a CLI wrapper as argv[1] in some configurations.
+    // Those wrappers are inside node_modules and shouldn't be baked into a
+    // long-lived service unit.
+    const segs = entry.split(/[/\\]/);
+    if (segs.includes('tsx') || segs.includes('ts-node') || segs.includes('vite-node')) {
+        throw new Error(
+            `install-service refuses to register a dev-runtime entry (${entry}). ` +
+            `Install sokuza globally with \`npm install -g sokuza\` and run ` +
+            `\`sokuza install-service\` from there instead.`,
+        );
+    }
+}
+
 export interface ServiceResult {
     platform: NodeJS.Platform;
     unitPath: string;
@@ -80,6 +113,7 @@ export async function installService(opts: ServiceOptions): Promise<ServiceResul
 
     const nodeBin = process.execPath;
     const entry = resolve(process.argv[1]);
+    assertEntryIsExecutableByService(entry);
     const workdir = dirname(configPath);
     const servicePath = captureServicePath();
 
