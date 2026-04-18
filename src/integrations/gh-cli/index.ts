@@ -14,6 +14,7 @@ import type {
     Integration,
     IntegrationConfig,
 } from '../../core/types.js';
+import type { Logger } from 'pino';
 import { getGhAuthStatus, ghJson } from './exec.js';
 
 // ─── GH CLI powered actions ────────────────────────────────────────────────
@@ -92,7 +93,7 @@ export class GhCliIntegration implements Integration {
     private lastCommentIds = new Map<string, Set<string>>(); // "owner/repo#num" → comment IDs
     private seeded = false;
 
-    async initialize(config: IntegrationConfig): Promise<void> {
+    async initialize(config: IntegrationConfig, _logger: Logger): Promise<void> {
         const status = await getGhAuthStatus();
         if (!status.available) {
             throw new Error(

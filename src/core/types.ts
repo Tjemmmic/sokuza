@@ -51,7 +51,7 @@ export interface Integration {
     /** Actions provided by this integration (auto-registered by the engine) */
     readonly actions?: Record<string, ActionHandler>;
     /** One-time setup with user-provided config */
-    initialize(config: IntegrationConfig): Promise<void>;
+    initialize(config: IntegrationConfig, logger: import('pino').Logger): Promise<void>;
     /** Mount webhook / listener routes on the server */
     registerRoutes(server: FastifyInstance, onEvent: EventHandler): void;
     /** Parse an inbound request into a canonical EventPayload */

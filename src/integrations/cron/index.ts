@@ -8,6 +8,7 @@ import type {
     Integration,
     IntegrationConfig,
 } from '../../core/types.js';
+import type { Logger } from 'pino';
 
 interface CronJob {
     name: string;
@@ -53,7 +54,7 @@ export class CronIntegration implements Integration {
     private jobs: CronJob[] = [];
     private onEvent: EventHandler | null = null;
 
-    async initialize(_config: IntegrationConfig): Promise<void> {
+    async initialize(_config: IntegrationConfig, _logger: Logger): Promise<void> {
         // No config needed — schedules come from workflow triggers
     }
 

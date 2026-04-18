@@ -24,6 +24,8 @@ import { resolveQueueConfig } from './queue-config.js';
 import { ConfigStore } from './config-store.js';
 import { executeWorkflow } from './workflow.js';
 import { resetTemplateCache } from './templates.js';
+import { LogStore } from './log-store.js';
+import pretty from 'pino-pretty';
 
 const MAX_RECENT_EVENTS = 100;
 const MAX_RUN_HISTORY = 200;
@@ -53,17 +55,20 @@ export class SokuzaEngine {
     private seenDeliveryIds = new Set<string>();
     private lastConfigHash: string = '';
     private runIdCounter = 0;
+    private logStore: LogStore;
 
     constructor(config: SokuzaConfig, configPath?: string) {
         this.config = config;
         this.configPath = resolve(configPath ?? 'sokuza.config.yaml');
-        this.logger = pino({
-            level: 'info',
-            transport: {
-                target: 'pino-pretty',
-                options: { colorize: true },
-            },
-        });
+
+        this.logStore = new LogStore();
+        this.logger = pino(
+            { level: 'info' },
+            pino.multistream([
+                { stream: pretty({ colorize: true }) },
+                { stream: this.logStore },
+            ]),
+        );
 
         this.queue = new WorkflowQueue(this.logger);
         this.queue.setOnJobUpdate((job) => this.broadcastJobUpdate(job));
@@ -429,7 +434,8 @@ export class SokuzaEngine {
         for (const [name, integration] of this.integrations) {
             const config = this.config.integrations[name];
             if (config) {
-                await integration.initialize(config);
+                const childLogger = this.logger.child({ integration: name });
+                await integration.initialize(config, childLogger);
                 this.logger.info({ integration: name }, 'Integration initialized');
             }
         }
@@ -439,6 +445,7 @@ export class SokuzaEngine {
         const templateDir = join(resolve(this.configPath, '..'), 'templates');
         registerApiRoutes(this.server, {
             logger: this.logger,
+            logStore: this.logStore,
             configStore: this.configStore,
             getTemplateDir: () => templateDir,
             getIntegrationStatus: () => this.getIntegrationStatus(),

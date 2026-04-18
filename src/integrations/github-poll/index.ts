@@ -27,6 +27,7 @@ import type {
     Integration,
     IntegrationConfig,
 } from '../../core/types.js';
+import type { Logger } from 'pino';
 
 interface PollConfig {
     token: string;
@@ -90,7 +91,7 @@ export class GitHubPollIntegration implements Integration {
     private onEvent: EventHandler | null = null;
     private enabledEvents: Set<string> = new Set();
 
-    async initialize(config: IntegrationConfig): Promise<void> {
+    async initialize(config: IntegrationConfig, _logger: Logger): Promise<void> {
         this.config = config as unknown as PollConfig;
         if (!this.config.token) {
             throw new Error('github-poll: token is required');
