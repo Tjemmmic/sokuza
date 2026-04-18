@@ -6,9 +6,11 @@ import yaml from 'js-yaml';
 import type { SokuzaConfig, EventPayload, WebhookDelivery, WorkflowRunRecord } from '../core/types.js';
 import type { WorkflowQueue } from '../core/queue.js';
 import type { ConfigStore } from '../core/config-store.js';
+import type { LogStore } from '../core/log-store.js';
 
 interface ApiDeps {
     logger: Logger;
+    logStore: LogStore;
     configStore: ConfigStore;
     getTemplateDir: () => string;
     getIntegrationStatus: () => Record<string, { enabled: boolean; events: string[] }>;
@@ -755,6 +757,65 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
             if (!alive) return;
             try {
                 reply.raw.write(`data: ${JSON.stringify(event)}\n\n`);
+            } catch {
+                cleanup();
+            }
+        });
+
+        const heartbeat = setInterval(() => {
+            if (!alive) { clearInterval(heartbeat); return; }
+            try { reply.raw.write(': heartbeat\n\n'); } catch {
+                cleanup();
+            }
+        }, 30_000);
+
+        request.raw.on('close', cleanup);
+
+        setTimeout(() => {
+            if (alive) {
+                cleanup();
+                try { reply.raw.end(); } catch { /* */ }
+            }
+        }, 86_400_000);
+    });
+
+    // ─── Logs ──────────────────────────────────────────────────────────
+
+    server.get('/api/logs', async (request) => {
+        const query = (request.query ?? {}) as { since?: string; level?: string; limit?: string };
+        const since = query.since ? Number(query.since) : undefined;
+        const limit = query.limit ? Math.min(Number(query.limit), 1000) : 200;
+        const entries = deps.logStore.getEntries(since, query.level, limit);
+        return { logs: entries, count: entries.length };
+    });
+
+    server.get('/api/logs/stream', async (request, reply) => {
+        reply.hijack();
+
+        reply.raw.writeHead(200, {
+            'Content-Type': 'text/event-stream',
+            'Cache-Control': 'no-cache',
+            Connection: 'keep-alive',
+            'Access-Control-Allow-Origin': '*',
+        });
+
+        let alive = true;
+
+        const cleanup = () => {
+            if (!alive) return;
+            alive = false;
+            unsubscribe();
+            clearInterval(heartbeat);
+        };
+
+        reply.raw.on('error', cleanup);
+
+        reply.raw.write('data: {"type":"connected"}\n\n');
+
+        const unsubscribe = deps.logStore.subscribe((entry) => {
+            if (!alive) return;
+            try {
+                reply.raw.write(`data: ${JSON.stringify(entry)}\n\n`);
             } catch {
                 cleanup();
             }

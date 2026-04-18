@@ -15,8 +15,23 @@ const silentLogger = {
     level: 'silent',
 };
 
-vi.mock('pino', () => ({
-    default: () => silentLogger,
+vi.mock('pino', () => {
+    const noopStream = { write: vi.fn() };
+    return {
+        default: Object.assign(() => silentLogger, { multistream: () => noopStream }),
+    };
+});
+
+vi.mock('pino-pretty', () => ({
+    default: () => ({ write: vi.fn() }),
+}));
+
+vi.mock('./log-store.js', () => ({
+    LogStore: class {
+        write = vi.fn();
+        getEntries = vi.fn(() => []);
+        subscribe = vi.fn(() => vi.fn());
+    },
 }));
 
 vi.mock('../server/server.js', () => ({

@@ -10,6 +10,7 @@ import type {
     Integration,
     IntegrationConfig,
 } from '../../core/types.js';
+import type { Logger } from 'pino';
 import { verifyWebhookSignature } from './signature.js';
 import {
     canonicalEventName,
@@ -44,13 +45,22 @@ export class GitHubIntegration implements Integration {
     };
 
     private config: GitHubConfig = { webhookSecret: '' };
+    private logger!: Logger;
 
-    async initialize(config: IntegrationConfig): Promise<void> {
+    async initialize(config: IntegrationConfig, logger: Logger): Promise<void> {
+        this.logger = logger;
         this.config = {
             webhookSecret: (config.webhookSecret as string) ?? '',
             token: config.token as string | undefined,
             repos: config.repos as GitHubConfig['repos'],
         };
+
+        if (!this.config.webhookSecret) {
+            this.logger.warn('No webhookSecret configured — incoming webhook requests will be rejected');
+        }
+        if (!this.config.token) {
+            this.logger.warn('No token configured — GitHub API actions will fail');
+        }
     }
 
     parseEvent(request: FastifyRequest): EventPayload {

@@ -10,6 +10,7 @@ import type {
     Integration,
     IntegrationConfig,
 } from '../../core/types.js';
+import type { Logger } from 'pino';
 
 interface WebhookEndpointConfig {
     secret?: string;
@@ -48,7 +49,7 @@ export class WebhookIntegration implements Integration {
 
     private config: WebhookConfig = { endpoints: {} };
 
-    async initialize(config: IntegrationConfig): Promise<void> {
+    async initialize(config: IntegrationConfig, _logger: Logger): Promise<void> {
         this.config = {
             endpoints: (config.endpoints as Record<string, WebhookEndpointConfig>) ?? {},
         };

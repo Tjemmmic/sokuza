@@ -10,6 +10,7 @@ import type {
     Integration,
     IntegrationConfig,
 } from '../../core/types.js';
+import type { Logger } from 'pino';
 import { verifySlackSignature } from './signature.js';
 import { canonicalSlackEventName, extractChannelInfo, SUPPORTED_SLACK_EVENTS } from './events.js';
 
@@ -32,7 +33,7 @@ export class SlackIntegration implements Integration {
 
     private config: SlackConfig = { botToken: '', signingSecret: '' };
 
-    async initialize(config: IntegrationConfig): Promise<void> {
+    async initialize(config: IntegrationConfig, _logger: Logger): Promise<void> {
         const botToken = config.botToken as string | undefined;
         const signingSecret = config.signingSecret as string | undefined;
 

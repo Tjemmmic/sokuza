@@ -13,6 +13,7 @@ let availableActions = [];
 let events = [];
 let eventStats = {};
 let eventSource = null;
+let dashRefreshTimer = null;
 let deck = [];
 let libraryTemplates = [];
 let librarySearchQuery = '';
@@ -403,8 +404,10 @@ function confirm(msg) {
 
 // ─── Router ─────────────────────────────────────────────────────────────────
 function navigate(page) {
-    // Redirect legacy templates page to library
     if (page === 'templates') page = 'library';
+    if (queueRefreshTimer) { clearInterval(queueRefreshTimer); queueRefreshTimer = null; }
+    if (logSource) { logSource.close(); logSource = null; }
+    expandedEvents.clear();
     currentPage = page;
     window.location.hash = page;
     $$('.nav-link').forEach((el) => el.classList.toggle('active', el.dataset.page === page));
@@ -443,6 +446,8 @@ async function renderPage() {
             case 'library': await renderLibrary(el); break;
             case 'integrations': await renderIntegrations(el); break;
             case 'events': await renderEvents(el); break;
+            case 'queue': await renderQueue(el); break;
+            case 'logs': await renderLogs(el); break;
             case 'settings': await renderSettings(el); break;
         }
         el.classList.remove('page-enter');
@@ -657,8 +662,7 @@ window.runWorkflowForPr = async function (workflowName, owner, repo, prNumber) {
     const btn = event?.target;
     if (btn) { btn.disabled = true; const orig = btn.textContent; btn.textContent = '⏳'; }
     try {
-        const result = await api.post('/api/workflows/run', {
-            name: workflowName,
+        const result = await api.post(`/api/workflows/${encodeURIComponent(workflowName)}/run`, {
             inputs: {
                 pull_request: { number: prNumber },
                 owner,
@@ -897,8 +901,7 @@ window.runIssueWorkflow = async function (workflowName, owner, repo, issueNumber
     const btn = event?.target;
     if (btn) { btn.disabled = true; btn.textContent = '⏳'; }
     try {
-        const result = await api.post('/api/workflows/run', {
-            name: workflowName,
+        const result = await api.post(`/api/workflows/${encodeURIComponent(workflowName)}/run`, {
             inputs: {
                 issue: { number: issueNumber },
                 owner,
@@ -978,8 +981,7 @@ window.runSelectedIssueWorkflow = async function (owner, repo, issueNumber) {
     if (btn) { btn.disabled = true; btn.textContent = '⏳'; }
 
     try {
-        const result = await api.post('/api/workflows/run', {
-            name: workflowName,
+        const result = await api.post(`/api/workflows/${encodeURIComponent(workflowName)}/run`, {
             inputs: {
                 issue: { number: issueNumber },
                 owner,
@@ -1114,7 +1116,29 @@ async function renderWorkflows(el) {
     workflows = wfData.workflows || [];
     templates = tmplData.templates || [];
     availableActions = actData.actions || [];
-    const runs = runsData.runs || [];
+    const allRuns = runsData.runs || [];
+
+    const runsByWorkflow = new Map();
+    for (const r of allRuns) {
+        const name = r.workflowName || r.workflow?.name;
+        if (!name) continue;
+        if (!runsByWorkflow.has(name)) runsByWorkflow.set(name, []);
+        runsByWorkflow.get(name).push(r);
+    }
+
+    function runBadge(run) {
+        const map = { completed: '#22c55e', failed: '#ef4444', running: '#3b82f6', queued: '#f59e0b' };
+        const c = map[run.status] || '#6b7280';
+        const dur = run.completedAt && run.startedAt ? ` — ${Math.round((new Date(run.completedAt) - new Date(run.startedAt)) / 1000)}s` : '';
+        return `<span style="font-size:11px;color:${c}">${run.status}${dur}</span>`;
+    }
+
+    function renderHistory(wfName) {
+        const runs = runsByWorkflow.get(wfName);
+        if (!runs?.length) return '<span style="font-size:11px;color:var(--text-muted)">No runs</span>';
+        const recent = runs.slice(-3).reverse();
+        return recent.map(r => `<div style="font-size:11px;line-height:1.6">${runBadge(r)} <span style="color:var(--text-muted)">${timeAgo(r.enqueuedAt || r.startedAt)}</span>${r.error ? ` <span title="${esc(r.error)}" style="color:#ef4444;cursor:help">!</span>` : ''}</div>`).join('');
+    }
 
     el.innerHTML = `
         <div class="page-header">
@@ -1128,26 +1152,27 @@ async function renderWorkflows(el) {
             </div>
         </div>
         ${workflows.length > 0 ? `<div class="table-wrap"><table>
-            <thead><tr><th>Name</th><th>Source</th><th>Trigger</th><th>Type</th><th>Steps</th><th style="text-align:right">Actions</th></tr></thead>
+            <thead><tr><th>Name</th><th>Source</th><th>Trigger</th><th>Type</th><th>Steps</th><th>Last Runs</th><th style="text-align:right">Actions</th></tr></thead>
             <tbody>${workflows.map((wf) => {
                 const hasInputs = wf.inputs?.length > 0;
                 const sources = Array.isArray(wf.trigger?.source) ? wf.trigger.source : [wf.trigger?.source || 'github'];
                 return `<tr>
-                <td><strong style="cursor:pointer;color:var(--accent-hover)" onclick="openWorkflowEditor('${esc(wf.name)}')">${esc(wf.name)}</strong>${hasInputs ? '<br><span style="font-size:10px;color:var(--text-muted)">\u{1F3AE} has inputs \u2014 run from dashboard</span>' : ''}</td>
+                <td><strong style="cursor:pointer;color:var(--accent-hover)" onclick="openWorkflowEditor('${esc(wf.name)}')">${esc(wf.name)}</strong>${hasInputs ? '<br><span style="font-size:10px;color:var(--text-muted)">🎮 has inputs — run from dashboard</span>' : ''}</td>
                 <td>${sourceBadge(sources[0])}${sources.length > 1 ? `<span style="font-size:10px;color:var(--text-muted)"> +${sources.length - 1}</span>` : ''}</td>
                 <td><code style="font-size:12px;color:var(--text-secondary)">${esc((() => { const evts = Array.isArray(wf.trigger?.event) ? wf.trigger.event : [wf.trigger?.event].filter(Boolean); return evts.map(e => eventLabelMap[e] || e).join(', '); })())}</code>${wf.trigger?.repo ? `<br><span style="font-size:11px;color:var(--text-muted)">${esc(Array.isArray(wf.trigger.repo) ? wf.trigger.repo.join(', ') : wf.trigger.repo)}</span>` : ''}</td>
                 <td>${wf.template ? `<span class="badge badge-action">${esc(wf.template)}</span>` : '<span style="font-size:12px;color:var(--text-muted)">custom</span>'}${wf.enabled === false ? ' <span class="badge" style="background:rgba(239,68,68,0.15);color:#ef4444;border:1px solid rgba(239,68,68,0.3);font-size:10px">disabled</span>' : ''}</td>
-                <td>${wf.steps?.length ?? '\u2014'}</td>
+                <td>${wf.steps?.length ?? '—'}</td>
+                <td>${renderHistory(wf.name)}</td>
                 <td style="text-align:right">
                     <div class="btn-group" style="justify-content:flex-end">
-                        <button class="btn ${hasInputs ? 'btn-primary' : 'btn-ghost'} btn-sm" onclick="openRunModal('${esc(wf.name)}')" title="Run workflow manually">${hasInputs ? '\u25b6 Run' : '\u25b6'}</button>
+                        <button class="btn ${hasInputs ? 'btn-primary' : 'btn-ghost'} btn-sm" onclick="openRunModal('${esc(wf.name)}')" title="Run workflow manually">${hasInputs ? '▶ Run' : '▶'}</button>
                         <button class="btn btn-ghost btn-sm" onclick="openWorkflowEditor('${esc(wf.name)}')">Edit</button>
                         <button class="btn btn-ghost btn-sm" onclick="duplicateWorkflow('${esc(wf.name)}')">Duplicate</button>
                         <button class="btn btn-danger-outline btn-sm" onclick="deleteWorkflow('${esc(wf.name)}')">Delete</button>
                     </div>
                 </td>
             </tr>`}).join('')}</tbody>
-        </table></div>` : `<div class="empty-state"><div class="empty-icon">\u26a1</div><p class="empty-text">No workflows yet</p><button class="btn btn-primary" onclick="openWorkflowEditor()">Create Your First Workflow</button></div>`}
+        </table></div>` : `<div class="empty-state"><div class="empty-icon">⚡</div><p class="empty-text">No workflows yet</p><button class="btn btn-primary" onclick="openWorkflowEditor()">Create Your First Workflow</button></div>`}
     `;
 }
 
@@ -3515,8 +3540,12 @@ window.previewLibraryItem = async function (itemId) {
 // INTEGRATIONS
 // ═════════════════════════════════════════════════════════════════════════════
 async function renderIntegrations(el) {
-    const data = await api.get('/api/integrations');
-    integrations = data.integrations || {};
+    const [intData, cfgData] = await Promise.all([api.get('/api/integrations'), api.get('/api/config')]);
+    integrations = intData.integrations || {};
+    const config = cfgData.config || {};
+    const aiConfig = config.ai || {};
+    const providers = aiConfig.providers || {};
+    const defaultProvider = aiConfig.default_provider || '';
 
     const defs = [
         {
@@ -3599,6 +3628,38 @@ async function renderIntegrations(el) {
                     `}
                 </div>`;
     }).join('')}
+        </div>
+
+        <div style="margin-top:32px">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+                <div>
+                    <h2 style="font-size:18px;font-weight:600">AI Providers</h2>
+                    <p style="font-size:13px;color:var(--text-secondary);margin-top:4px">Configured LLM providers for workflow actions${defaultProvider ? ` — default: <strong>${esc(defaultProvider)}</strong>` : ''}</p>
+                </div>
+                <button class="btn btn-primary btn-sm" onclick="openAiTestModal()">🧪 Test Provider</button>
+            </div>
+            <div class="card-grid card-grid-3">
+                ${Object.entries(providers).length > 0 ? Object.entries(providers).map(([name, p]) => {
+                    const cfg = p || {};
+                    const isDefault = name === defaultProvider;
+                    const kindLabels = { 'anthropic-api': 'Anthropic API', 'cli': 'CLI' };
+                    const hasKey = cfg.api_key && cfg.api_key !== '${' + (cfg.api_key || '').replace(/\$\{([^}]+)\}/, '$1') + '}';
+                    const maskedKey = cfg.api_key ? (cfg.api_key.startsWith('${') ? cfg.api_key : cfg.api_key.slice(0, 8) + '...') : '';
+                    return `<div class="card" style="flex-direction:column;gap:8px">
+                        <div style="display:flex;align-items:center;gap:8px">
+                            <strong style="font-size:14px">${esc(name)}</strong>
+                            ${isDefault ? '<span class="badge badge-success" style="font-size:10px">Default</span>' : ''}
+                        </div>
+                        <div style="font-size:12px;color:var(--text-secondary)">
+                            <div>Kind: <code>${esc(kindLabels[cfg.kind] || cfg.kind || '—')}</code></div>
+                            ${cfg.default_model ? `<div>Model: <code>${esc(cfg.default_model)}</code></div>` : ''}
+                            ${cfg.command ? `<div>Command: <code>${esc(cfg.command)}</code></div>` : ''}
+                            ${cfg.base_url ? `<div>Base URL: <code style="font-size:11px">${esc(cfg.base_url)}</code></div>` : ''}
+                            ${maskedKey ? `<div>API Key: <code style="font-size:11px">${esc(maskedKey)}</code></div>` : ''}
+                        </div>
+                    </div>`;
+                }).join('') : '<div class="empty-state" style="grid-column:1/-1"><div class="empty-icon">🤖</div><p class="empty-text">No AI providers configured</p><p style="font-size:12px;color:var(--text-muted)">Add providers in your sokuza.config.yaml under <code>ai.providers</code></p></div>'}
+            </div>
         </div>
     `;
 }
@@ -3758,15 +3819,92 @@ window.applyIntegrationConfig = async function (key) {
     }
 };
 
+window.openAiTestModal = async function () {
+    const cfgData = await api.get('/api/config');
+    const providers = Object.keys(cfgData.config?.ai?.providers || {});
+    if (providers.length === 0) {
+        toast('No AI providers configured', 'error');
+        return;
+    }
+
+    const options = providers.map(p => `<option value="${esc(p)}">${esc(p)}</option>`).join('');
+
+    openModal('Test AI Provider', `
+        <div class="form-group">
+            <label class="form-label">Provider</label>
+            <select class="form-input" id="ai-test-provider">
+                <option value="">Default (${esc(cfgData.config?.ai?.default_provider || 'none')})</option>
+                ${options}
+            </select>
+        </div>
+        <div class="form-group">
+            <label class="form-label">Test Prompt</label>
+            <input type="text" class="form-input" id="ai-test-prompt" value="Reply with exactly: OK" placeholder="Enter a test prompt">
+        </div>
+        <div id="ai-test-result" style="margin-top:12px"></div>
+    `, `
+        <button class="btn btn-ghost" onclick="closeModal()">Close</button>
+        <button class="btn btn-primary" id="ai-test-run-btn" onclick="runAiTest()">Run Test</button>
+    `);
+};
+
+window.runAiTest = async function () {
+    const provider = $('#ai-test-provider')?.value || undefined;
+    const prompt = $('#ai-test-prompt')?.value;
+    const resultEl = $('#ai-test-result');
+    const btn = $('#ai-test-run-btn');
+    if (!prompt || !resultEl || !btn) return;
+
+    btn.disabled = true;
+    btn.textContent = '⏳ Testing...';
+    resultEl.innerHTML = '<div class="spinner" style="width:14px;height:14px;display:inline-block;vertical-align:middle;margin-right:6px"></div> Sending request...';
+
+    try {
+        const start = Date.now();
+        const result = await api.post('/api/ai/test', { provider, prompt });
+        const elapsed = Date.now() - start;
+
+        if (result.ok) {
+            resultEl.innerHTML = `
+                <div style="padding:12px;border-radius:8px;background:rgba(34,197,94,0.1);border:1px solid rgba(34,197,94,0.3);margin-bottom:12px">
+                    <div style="font-weight:600;color:#22c55e;margin-bottom:8px">✓ Success</div>
+                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:12px">
+                        <div>Provider: <strong>${esc(result.provider)}</strong></div>
+                        <div>Model: <strong>${esc(result.model || '—')}</strong></div>
+                        <div>Duration: <strong>${result.durationMs}ms</strong> (round-trip: ${elapsed}ms)</div>
+                        <div>Tokens: <strong>${result.usage ? `${result.usage.input_tokens || '?'}/${result.usage.output_tokens || '?'}` : 'N/A'}</strong></div>
+                    </div>
+                </div>
+                <div style="padding:10px;border-radius:6px;background:var(--bg-primary);font-size:12px;font-family:var(--mono);white-space:pre-wrap;max-height:200px;overflow-y:auto">${esc(result.response || '(empty response)')}</div>
+            `;
+        } else {
+            resultEl.innerHTML = `
+                <div style="padding:12px;border-radius:8px;background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.3)">
+                    <div style="font-weight:600;color:#ef4444;margin-bottom:4px">✗ Failed</div>
+                    <div style="font-size:12px">Provider: <strong>${esc(result.provider || 'unknown')}</strong></div>
+                    <div style="font-size:12px;color:var(--text-secondary);margin-top:4px">${esc(result.error || 'Unknown error')}</div>
+                </div>
+            `;
+        }
+    } catch (err) {
+        resultEl.innerHTML = `<div style="padding:12px;border-radius:8px;background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.3);color:#ef4444;font-size:13px">${esc(err.message || 'Request failed')}</div>`;
+    } finally {
+        btn.disabled = false;
+        btn.textContent = 'Run Test';
+    }
+};
+
 // ═════════════════════════════════════════════════════════════════════════════
 // EVENT LOG
 // ═════════════════════════════════════════════════════════════════════════════
 let eventFilter = { source: '', search: '' };
+let eventsTab = 'events'; // 'events' | 'deliveries' | 'preview'
 
 async function renderEvents(el) {
-    const [evtData, statsData] = await Promise.all([api.get('/api/events'), api.get('/api/events/stats')]);
+    const [evtData, statsData, delivData] = await Promise.all([api.get('/api/events'), api.get('/api/events/stats'), api.get('/api/webhooks/deliveries').catch(() => ({ deliveries: [] }))]);
     events = evtData.events || [];
     eventStats = statsData;
+    const deliveries = delivData.deliveries || [];
 
     const filtered = filterEvents(events);
     const sourceEntries = Object.entries(eventStats.bySource || {}).sort((a, b) => b[1] - a[1]);
@@ -3805,6 +3943,15 @@ async function renderEvents(el) {
             </div>
         </div>
 
+        <div class="filter-bar" style="margin-bottom:14px">
+            <button class="btn ${eventsTab === 'events' ? 'btn-primary' : 'btn-ghost'} btn-sm" onclick="eventsTab='events';renderPage()">Events</button>
+            <button class="btn ${eventsTab === 'deliveries' ? 'btn-primary' : 'btn-ghost'} btn-sm" onclick="eventsTab='deliveries';renderPage()">Webhook Deliveries (${deliveries.length})</button>
+            <button class="btn ${eventsTab === 'preview' ? 'btn-primary' : 'btn-ghost'} btn-sm" onclick="eventsTab='preview';renderPage()">Preview Event</button>
+        </div>
+
+        ${eventsTab === 'deliveries' ? renderDeliveriesTab(deliveries) : ''}
+        ${eventsTab === 'preview' ? renderPreviewTab() : ''}
+        ${eventsTab === 'events' ? `
         <div class="editor-layout" style="grid-template-columns:1fr 300px">
             <div>
                 ${eventStats.hourlyBuckets ? `<div class="card" style="margin-bottom:16px;padding:16px 18px">
@@ -3847,8 +3994,88 @@ async function renderEvents(el) {
                 </div>
             </div>
         </div>
+        ` : ''}
     `;
 }
+
+function renderDeliveriesTab(deliveries) {
+    if (deliveries.length === 0) {
+        return '<div class="empty-state"><div class="empty-icon">📭</div><p class="empty-text">No outbound webhook deliveries yet</p></div>';
+    }
+    return `<div class="table-wrap"><table>
+        <thead><tr><th>Workflow</th><th>URL</th><th>Status</th><th>Duration</th><th>Sent</th></tr></thead>
+        <tbody>${deliveries.map(d => {
+            const ok = d.statusCode >= 200 && d.statusCode < 300;
+            return `<tr>
+                <td>${esc(d.workflowName || '—')}</td>
+                <td style="font-size:12px;max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><code>${esc(d.url || '—')}</code></td>
+                <td><span class="badge" style="background:${ok ? 'rgba(34,197,94,0.15)' : 'rgba(239,68,68,0.15)'};color:${ok ? '#22c55e' : '#ef4444'};border:1px solid ${ok ? 'rgba(34,197,94,0.3)' : 'rgba(239,68,68,0.3)'};font-size:11px">${d.statusCode || '—'}</span></td>
+                <td style="font-size:12px">${d.durationMs != null ? d.durationMs + 'ms' : '—'}</td>
+                <td style="font-size:12px;color:var(--text-muted)">${d.sentAt ? timeAgo(d.sentAt) : '—'}</td>
+            </tr>`;
+        }).join('')}</tbody>
+    </table></div>`;
+}
+
+function renderPreviewTab() {
+    return `
+        <div class="panel" style="margin-bottom:16px">
+            <div class="panel-header"><span class="panel-title">Dry-Run Event Preview</span></div>
+            <div class="panel-body">
+                <p style="font-size:12px;color:var(--text-secondary);margin-bottom:12px">Compose a sample event to see which workflows would match and why others wouldn't.</p>
+                <div class="form-group">
+                    <label class="form-label">Source</label>
+                    <input type="text" class="form-input" id="preview-source" value="github" placeholder="e.g. github, slack, gh-cli">
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Event</label>
+                    <input type="text" class="form-input" id="preview-event" value="pull_request.opened" placeholder="e.g. pull_request.opened">
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Payload (JSON)</label>
+                    <textarea class="form-input" id="preview-payload" rows="6" style="font-family:var(--mono);font-size:12px" placeholder='{"action": "opened", "pull_request": {...}}'>{}</textarea>
+                </div>
+                <button class="btn btn-primary" onclick="runEventPreview()">Preview Matches</button>
+            </div>
+        </div>
+        <div id="preview-results"></div>
+    `;
+}
+
+window.runEventPreview = async function () {
+    const source = $('#preview-source')?.value;
+    const event = $('#preview-event')?.value;
+    const payloadStr = $('#preview-payload')?.value;
+    const resultsEl = $('#preview-results');
+    if (!source || !event || !resultsEl) return;
+
+    let payload;
+    try { payload = JSON.parse(payloadStr || '{}'); } catch (e) { toast('Invalid JSON payload: ' + e.message, 'error'); return; }
+
+    resultsEl.innerHTML = '<div class="spinner" style="width:14px;height:14px;display:inline-block;vertical-align:middle;margin-right:6px"></div> Running preview...';
+
+    try {
+        const result = await api.post('/api/events/preview', { event: { source, event, payload, metadata: {} } });
+        const matched = result.matched || [];
+        const unmatched = result.unmatched || [];
+
+        resultsEl.innerHTML = `
+            ${matched.length > 0 ? `
+            <div class="panel" style="margin-bottom:12px;border-color:rgba(34,197,94,0.3)">
+                <div class="panel-header"><span class="panel-title" style="color:#22c55e">✓ Matched (${matched.length})</span></div>
+                <div class="panel-body">${matched.map(n => `<div style="padding:4px 0;font-size:13px"><strong style="color:#22c55e">${esc(n)}</strong></div>`).join('')}</div>
+            </div>` : ''}
+            ${unmatched.length > 0 ? `
+            <div class="panel" style="border-color:rgba(239,68,68,0.3)">
+                <div class="panel-header"><span class="panel-title" style="color:#ef4444">✗ Not Matched (${unmatched.length})</span></div>
+                <div class="panel-body">${unmatched.map(u => `<div style="padding:4px 0;font-size:13px"><strong>${esc(u.name)}</strong> <span style="color:var(--text-muted);font-size:11px">— ${esc(u.reason || 'No match')}</span></div>`).join('')}</div>
+            </div>` : ''}
+            ${matched.length === 0 && unmatched.length === 0 ? '<div style="font-size:13px;color:var(--text-muted)">No workflows configured.</div>' : ''}
+        `;
+    } catch (err) {
+        resultsEl.innerHTML = `<div style="color:#ef4444;font-size:13px">Preview failed: ${esc(err.message)}</div>`;
+    }
+};
 
 function filterEvents(evts) {
     return evts.filter((e) => {
@@ -3913,13 +4140,12 @@ window.replayEvent = async function (idx) {
     const wfName = e.matchedWorkflows[0];
     if (!(await confirm(`Replay event to workflow <strong>"${esc(wfName)}"</strong>?`))) return;
     try {
-        // Forward original event data for faithful replay
-        const inputs = e.event?.payload?.inputs || {};
-        const result = await api.post(`/api/workflows/${encodeURIComponent(wfName)}/run`, {
-            inputs,
-            _replayEvent: e.event,
-        });
-        toast(`Replayed event → "${wfName}" workflow started`);
+        const result = await api.post(`/api/events/${encodeURIComponent(idx)}/replay`);
+        if (result.error) {
+            toast(result.error, 'error');
+        } else {
+            toast(`Replayed event → "${wfName}" workflow started`);
+        }
     } catch (err) {
         toast('Replay failed: ' + (err.message || 'Unknown'), 'error');
     }
@@ -3990,7 +4216,10 @@ function connectSSE() {
                 }
             }
             // Refresh dashboard stats on new event
-            if (currentPage === 'dashboard') renderPage();
+            if (currentPage === 'dashboard') {
+                if (dashRefreshTimer) clearTimeout(dashRefreshTimer);
+                dashRefreshTimer = setTimeout(() => renderPage(), 3000);
+            }
         } catch { /* client parse error */ }
     };
     eventSource.onerror = () => {
@@ -4066,6 +4295,219 @@ window.rerunWorkflow = async function (runId) {
     } finally {
         if (btn) { btn.disabled = false; btn.textContent = '↻ Rerun'; }
     }
+};
+
+// ═════════════════════════════════════════════════════════════════════════════
+// QUEUE
+// ═════════════════════════════════════════════════════════════════════════════
+let queueRefreshTimer = null;
+let queueStatusFilter = '';
+
+async function renderQueue(el) {
+    if (queueRefreshTimer) { clearInterval(queueRefreshTimer); queueRefreshTimer = null; }
+    await loadQueueData(el);
+    queueRefreshTimer = setInterval(() => { if (currentPage === 'queue') loadQueueData(el); }, 5000);
+}
+
+async function loadQueueData(el) {
+    const data = await api.get('/api/queue');
+    const stats = data.stats || {};
+    const jobs = data.jobs || [];
+
+    const filtered = queueStatusFilter ? jobs.filter(j => j.status === queueStatusFilter) : jobs;
+
+    const statusCounts = { queued: 0, running: 0, completed: 0, failed: 0 };
+    for (const j of jobs) { if (statusCounts[j.status] !== undefined) statusCounts[j.status]++; }
+
+    function statusBadge(s) {
+        const colors = { queued: '#f59e0b', running: '#3b82f6', completed: '#22c55e', failed: '#ef4444' };
+        return `<span class="badge" style="background:${colors[s] || '#6b7280'}22;color:${colors[s] || '#6b7280'};border:1px solid ${colors[s] || '#6b7280'}44;font-size:11px">${s}</span>`;
+    }
+
+    function fmtDuration(start, end) {
+        if (!start) return '—';
+        const e = end ? new Date(end) : new Date();
+        const ms = e - new Date(start);
+        if (ms < 1000) return `${ms}ms`;
+        if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
+        return `${Math.floor(ms / 60000)}m ${Math.floor((ms % 60000) / 1000)}s`;
+    }
+
+    el.innerHTML = `
+        <div class="page-header">
+            <div class="page-header-left">
+                <h1 class="page-title">Queue</h1>
+                <p class="page-subtitle">Workflow execution queue</p>
+            </div>
+        </div>
+
+        <div class="card-grid" style="grid-template-columns:repeat(4,1fr)">
+            <div class="card card-stat">
+                <div class="stat-value">${statusCounts.queued}</div>
+                <div class="stat-label">Queued</div>
+            </div>
+            <div class="card card-stat">
+                <div class="stat-value">${statusCounts.running}</div>
+                <div class="stat-label">Running</div>
+            </div>
+            <div class="card card-stat">
+                <div class="stat-value">${statusCounts.completed}</div>
+                <div class="stat-label">Completed</div>
+            </div>
+            <div class="card card-stat">
+                <div class="stat-value">${statusCounts.failed}</div>
+                <div class="stat-label">Failed</div>
+            </div>
+        </div>
+
+        <div class="filter-bar" style="margin-bottom:14px">
+            <button class="btn ${!queueStatusFilter ? 'btn-primary' : 'btn-ghost'} btn-sm" onclick="queueStatusFilter='';renderPage()">All (${jobs.length})</button>
+            <button class="btn ${queueStatusFilter === 'queued' ? 'btn-primary' : 'btn-ghost'} btn-sm" onclick="queueStatusFilter='queued';renderPage()">Queued (${statusCounts.queued})</button>
+            <button class="btn ${queueStatusFilter === 'running' ? 'btn-primary' : 'btn-ghost'} btn-sm" onclick="queueStatusFilter='running';renderPage()">Running (${statusCounts.running})</button>
+            <button class="btn ${queueStatusFilter === 'completed' ? 'btn-primary' : 'btn-ghost'} btn-sm" onclick="queueStatusFilter='completed';renderPage()">Completed (${statusCounts.completed})</button>
+            <button class="btn ${queueStatusFilter === 'failed' ? 'btn-primary' : 'btn-ghost'} btn-sm" onclick="queueStatusFilter='failed';renderPage()">Failed (${statusCounts.failed})</button>
+        </div>
+
+        ${filtered.length > 0 ? `<div class="table-wrap"><table>
+            <thead><tr><th>Workflow</th><th>Status</th><th>Duration</th><th>Enqueued</th><th>Error</th><th style="text-align:right">Actions</th></tr></thead>
+            <tbody>${filtered.map(j => `<tr>
+                <td><strong>${esc(j.workflowName || j.workflowSnapshot?.name || '—')}</strong></td>
+                <td>${statusBadge(j.status)}</td>
+                <td style="font-size:12px">${fmtDuration(j.startedAt, j.completedAt)}</td>
+                <td style="font-size:12px;color:var(--text-muted)">${timeAgo(j.enqueuedAt)}</td>
+                <td style="font-size:11px;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:${j.error ? '#ef4444' : 'var(--text-muted)'}">${j.error ? esc(j.error) : '—'}</td>
+                <td style="text-align:right">
+                    <div class="btn-group" style="justify-content:flex-end">
+                        ${j.status === 'queued' || j.status === 'running' ? `<button class="btn btn-danger-outline btn-sm" onclick="cancelQueueJob('${esc(j.id)}')">Cancel</button>` : ''}
+                        ${j.status === 'failed' ? `<button class="btn btn-ghost btn-sm" onclick="retryQueueJob('${esc(j.id)}')">Retry</button>` : ''}
+                        ${j.status === 'completed' ? `<button class="btn btn-ghost btn-sm" onclick="rerunWorkflow('${esc(j.id)}')">Rerun</button>` : ''}
+                    </div>
+                </td>
+            </tr>`).join('')}</tbody>
+        </table></div>` : `<div class="empty-state"><div class="empty-icon">📋</div><p class="empty-text">${queueStatusFilter ? 'No ' + queueStatusFilter + ' jobs' : 'Queue is empty'}</p></div>`}
+    `;
+}
+
+window.cancelQueueJob = async function (jobId) {
+    if (!(await confirm('Cancel this job?'))) return;
+    try {
+        const result = await api.post(`/api/queue/jobs/${encodeURIComponent(jobId)}/cancel`);
+        if (result.error) { toast(result.error, 'error'); return; }
+        toast('Job cancelled');
+        renderPage();
+    } catch (err) { toast('Cancel failed: ' + err.message, 'error'); }
+};
+
+window.retryQueueJob = async function (jobId) {
+    try {
+        const result = await api.post(`/api/queue/jobs/${encodeURIComponent(jobId)}/retry`);
+        if (result.error) { toast(result.error, 'error'); return; }
+        toast('Job retried');
+        renderPage();
+    } catch (err) { toast('Retry failed: ' + err.message, 'error'); }
+};
+
+// ═════════════════════════════════════════════════════════════════════════════
+// LOGS
+// ═════════════════════════════════════════════════════════════════════════════
+let logSource = null;
+let logLevelFilter = '';
+let logPaused = false;
+let logBuffer = [];
+
+async function renderLogs(el) {
+    if (logSource) { logSource.close(); logSource = null; }
+    logBuffer = [];
+
+    const data = await api.get('/api/logs');
+    const initial = data.logs || [];
+    logBuffer = initial;
+
+    el.innerHTML = `
+        <div class="page-header">
+            <div class="page-header-left">
+                <h1 class="page-title">Logs</h1>
+                <p class="page-subtitle">Real-time application log stream</p>
+            </div>
+            <div class="btn-group">
+                <button class="btn btn-ghost btn-sm" id="log-pause-btn" onclick="toggleLogPause()">${logPaused ? '▶ Resume' : '⏸ Pause'}</button>
+                <button class="btn btn-ghost btn-sm" onclick="clearLogBuffer()">🗑 Clear</button>
+            </div>
+        </div>
+
+        <div class="filter-bar" style="margin-bottom:10px">
+            <button class="btn ${!logLevelFilter ? 'btn-primary' : 'btn-ghost'} btn-sm" onclick="logLevelFilter='';renderLogsBuffer()">All</button>
+            <button class="btn ${logLevelFilter === 'debug' ? 'btn-primary' : 'btn-ghost'} btn-sm" onclick="logLevelFilter='debug';renderLogsBuffer()">Debug</button>
+            <button class="btn ${logLevelFilter === 'info' ? 'btn-primary' : 'btn-ghost'} btn-sm" onclick="logLevelFilter='info';renderLogsBuffer()">Info</button>
+            <button class="btn ${logLevelFilter === 'warn' ? 'btn-primary' : 'btn-ghost'} btn-sm" onclick="logLevelFilter='warn';renderLogsBuffer()">Warn</button>
+            <button class="btn ${logLevelFilter === 'error' ? 'btn-primary' : 'btn-ghost'} btn-sm" onclick="logLevelFilter='error';renderLogsBuffer()">Error</button>
+            <div class="status-dot online" style="margin-left:8px"></div>
+            <span style="font-size:12px;color:var(--text-muted)" id="log-status-text">Live</span>
+        </div>
+
+        <div id="log-viewer" style="background:var(--bg-primary);border:1px solid var(--border);border-radius:8px;padding:12px;font-family:'SF Mono',Menlo,monospace;font-size:12px;line-height:1.6;max-height:70vh;overflow-y:auto;scroll-behavior:smooth">
+        </div>
+    `;
+
+    renderLogsBuffer();
+
+    logSource = new EventSource('/api/logs/stream');
+    logSource.onmessage = (msg) => {
+        try {
+            const entry = JSON.parse(msg.data);
+            if (entry.type === 'connected') return;
+            if (!logPaused) {
+                logBuffer.push(entry);
+                if (logBuffer.length > 1000) logBuffer.shift();
+                appendLogLine(entry);
+            }
+        } catch {}
+    };
+}
+
+function logLevelNum(name) {
+    return { debug: 20, info: 30, warn: 40, error: 50 }[name] || 0;
+}
+
+function renderLogsBuffer() {
+    const viewer = $('#log-viewer');
+    if (!viewer) return;
+    const minLevel = logLevelNum(logLevelFilter);
+    const filtered = logLevelFilter ? logBuffer.filter(e => (e.level ?? 30) >= minLevel) : logBuffer;
+    viewer.innerHTML = filtered.map(renderLogLine).join('');
+    viewer.scrollTop = viewer.scrollHeight;
+}
+
+function appendLogLine(entry) {
+    const viewer = $('#log-viewer');
+    if (!viewer) return;
+    const minLevel = logLevelNum(logLevelFilter);
+    if (logLevelFilter && (entry.level ?? 30) < minLevel) return;
+    viewer.insertAdjacentHTML('beforeend', renderLogLine(entry));
+    if (!logPaused) viewer.scrollTop = viewer.scrollHeight;
+}
+
+function renderLogLine(e) {
+    const levelColors = { 10: '#6b7280', 20: '#6b7280', 30: '#22c55e', 40: '#f59e0b', 50: '#ef4444', 60: '#dc2626' };
+    const levelNames = { 10: 'TRACE', 20: 'DEBUG', 30: 'INFO', 40: 'WARN', 50: 'ERROR', 60: 'FATAL' };
+    const c = levelColors[e.level] || '#6b7280';
+    const name = levelNames[e.level] || 'INFO';
+    const ts = e.time ? new Date(e.time).toLocaleTimeString() : '';
+    const extras = Object.entries(e).filter(([k]) => !['level','time','msg','levelName'].includes(k)).map(([k,v]) => `${k}=${typeof v === 'string' ? v : JSON.stringify(v)}`).join(' ');
+    return `<div style="border-bottom:1px solid var(--border);padding:3px 0"><span style="color:var(--text-muted)">${esc(ts)}</span> <span style="color:${c};font-weight:600">${name}</span> <span style="color:var(--text-primary)">${esc(e.msg || '')}</span>${extras ? `<span style="color:var(--text-muted);margin-left:8px">${esc(extras)}</span>` : ''}</div>`;
+}
+
+window.toggleLogPause = function () {
+    logPaused = !logPaused;
+    const btn = $('#log-pause-btn');
+    if (btn) btn.textContent = logPaused ? '▶ Resume' : '⏸ Pause';
+    const statusText = $('#log-status-text');
+    if (statusText) statusText.textContent = logPaused ? 'Paused' : 'Live';
+};
+
+window.clearLogBuffer = function () {
+    logBuffer = [];
+    renderLogsBuffer();
 };
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -4222,7 +4664,7 @@ document.addEventListener('keydown', (e) => {
     }
     // Navigation shortcuts: Alt+1-6
     if (e.altKey && !e.ctrlKey && !e.metaKey) {
-        const pages = ['dashboard', 'my-prs', 'issues', 'workflows', 'templates', 'integrations', 'events', 'settings'];
+        const pages = ['dashboard', 'my-prs', 'issues', 'workflows', 'library', 'integrations', 'events', 'queue', 'logs', 'settings'];
         const num = parseInt(e.key);
         if (num >= 1 && num <= pages.length) { e.preventDefault(); navigate(pages[num - 1]); }
     }
@@ -4236,7 +4678,7 @@ $$('.nav-link').forEach((link) => link.addEventListener('click', (e) => { e.prev
 window.navigate = navigate;
 
 // Hash routing: restore page from URL hash
-const validPages = ['dashboard', 'my-prs', 'issues', 'workflows', 'templates', 'library', 'integrations', 'events', 'settings'];
+const validPages = ['dashboard', 'my-prs', 'issues', 'workflows', 'library', 'integrations', 'events', 'queue', 'logs', 'settings'];
 const hashPage = window.location.hash.replace('#', '');
 if (validPages.includes(hashPage)) currentPage = hashPage;
 window.addEventListener('hashchange', () => {
