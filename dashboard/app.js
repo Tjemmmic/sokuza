@@ -448,6 +448,7 @@ async function renderPage() {
             case 'events': await renderEvents(el); break;
             case 'queue': await renderQueue(el); break;
             case 'logs': await renderLogs(el); break;
+            case 'system': await renderSystem(el); break;
             case 'settings': await renderSettings(el); break;
         }
         el.classList.remove('page-enter');
@@ -4511,6 +4512,159 @@ window.clearLogBuffer = function () {
 };
 
 // ═════════════════════════════════════════════════════════════════════════════
+// SYSTEM (autostart + updates — mirrors `sokuza service` / `sokuza update`)
+// ═════════════════════════════════════════════════════════════════════════════
+async function renderSystem(el) {
+    const [info, svc, upd] = await Promise.all([
+        api.get('/api/system/info').catch((e) => ({ error: e.message })),
+        api.get('/api/system/service').catch((e) => ({ error: e.message })),
+        api.get('/api/system/update').catch((e) => ({ error: e.message })),
+    ]);
+
+    const svcStatus = svc?.status;
+    const infoBlock = info?.error
+        ? `<p style="color:var(--text-muted)">${esc(info.error)}</p>`
+        : `
+            <p><span style="color:var(--text-muted)">Version:</span> <code>${esc(info.version ?? '')}</code></p>
+            <p><span style="color:var(--text-muted)">Platform:</span> <code>${esc(info.platform ?? '')}</code> (Node ${esc(info.nodeVersion ?? '')})</p>
+            <p><span style="color:var(--text-muted)">Config:</span> <code>${esc(info.configPath ?? '')}</code></p>
+            <p><span style="color:var(--text-muted)">PID:</span> <code>${esc(String(info.pid ?? ''))}</code></p>
+        `;
+
+    const svcBlock = svc?.error
+        ? `<p style="color:var(--text-muted)">${esc(svc.error)}</p>`
+        : `
+            <p><span style="color:var(--text-muted)">Mechanism:</span> ${esc(svcStatus?.mechanism ?? '—')}</p>
+            <p><span style="color:var(--text-muted)">Installed:</span> ${svcStatus?.installed ? '<span class="badge badge-success">yes</span>' : '<span class="badge">no</span>'}</p>
+            <p><span style="color:var(--text-muted)">Enabled:</span> ${svcStatus?.enabled ? '<span class="badge badge-success">yes — starts at login</span>' : '<span class="badge">no</span>'}</p>
+            <p><span style="color:var(--text-muted)">Active:</span> ${svcStatus?.active ? '<span class="badge badge-success">yes — running now</span>' : '<span class="badge">no</span>'}</p>
+            <p><span style="color:var(--text-muted)">Unit file:</span> <code style="font-size:11px">${esc(svcStatus?.unitPath ?? '—')}</code></p>
+            ${(svcStatus?.notes ?? []).map((n) => `<p style="color:var(--text-muted);font-size:12px">• ${esc(n)}</p>`).join('')}
+            <div class="btn-group" style="margin-top:12px">
+                ${svcStatus?.installed
+                    ? `<button class="btn btn-danger-outline" onclick="systemServiceDisable()">Disable autostart</button>`
+                    : `<button class="btn btn-primary" onclick="systemServiceEnable()">Enable autostart</button>`
+                }
+            </div>
+        `;
+
+    const updBlock = upd?.error
+        ? `<p style="color:var(--text-muted)">${esc(upd.error)}</p>`
+        : `
+            <p><span style="color:var(--text-muted)">Current:</span> <code>sokuza ${esc(upd.current ?? '')}</code></p>
+            ${upd.latest
+                ? `<p><span style="color:var(--text-muted)">Latest:</span> <code>${esc(upd.latest)}</code> ${upd.updateAvailable ? '<span class="badge badge-success">update available</span>' : '<span class="badge">up to date</span>'}</p>`
+                : `<p><span style="color:var(--text-muted)">Latest:</span> <span style="color:var(--text-muted)">no check yet</span></p>`
+            }
+            ${upd.checkedAt
+                ? `<p><span style="color:var(--text-muted)">Checked:</span> ${esc(new Date(upd.checkedAt).toLocaleString())}</p>`
+                : ''
+            }
+            <div class="btn-group" style="margin-top:12px">
+                <button class="btn btn-ghost" onclick="systemCheckUpdate()">Check for updates</button>
+                ${upd.updateAvailable ? `<button class="btn btn-primary" onclick="systemRunUpdate()">Update now</button>` : ''}
+            </div>
+        `;
+
+    el.innerHTML = `
+        <div class="page-header">
+            <div class="page-header-left">
+                <h1 class="page-title">System</h1>
+                <p class="page-subtitle">Autostart and updates for this sokuza install</p>
+            </div>
+            <div class="btn-group">
+                <button class="btn btn-ghost" onclick="renderPage()">↻ Refresh</button>
+            </div>
+        </div>
+
+        <div class="card-grid" style="grid-template-columns:repeat(auto-fit,minmax(320px,1fr))">
+            <div class="panel">
+                <div class="panel-header"><span class="panel-title">Install</span></div>
+                <div class="panel-body" style="font-size:13px;line-height:1.8">${infoBlock}</div>
+            </div>
+
+            <div class="panel">
+                <div class="panel-header"><span class="panel-title">Autostart</span></div>
+                <div class="panel-body" style="font-size:13px;line-height:1.8">${svcBlock}</div>
+            </div>
+
+            <div class="panel">
+                <div class="panel-header"><span class="panel-title">Updates</span></div>
+                <div class="panel-body" style="font-size:13px;line-height:1.8">${updBlock}</div>
+            </div>
+        </div>
+
+        <div id="system-update-output" style="margin-top:20px;display:none">
+            <div class="panel">
+                <div class="panel-header"><span class="panel-title">Update output</span></div>
+                <div class="panel-body"><pre id="system-update-output-pre" style="white-space:pre-wrap;font-size:12px;max-height:320px;overflow:auto"></pre></div>
+            </div>
+        </div>
+    `;
+}
+
+window.systemServiceEnable = async function () {
+    if (!await confirm('Install and start the sokuza autostart service for the current user?')) return;
+    try {
+        await api.post('/api/system/service/enable', {});
+        toast('Autostart enabled');
+    } catch (err) {
+        toast(`Enable failed: ${err.message}`, 'error');
+    }
+    renderPage();
+};
+
+window.systemServiceDisable = async function () {
+    if (!await confirm('Stop and remove the autostart service? Sokuza will no longer start at login.')) return;
+    try {
+        await api.post('/api/system/service/disable', {});
+        toast('Autostart disabled');
+    } catch (err) {
+        toast(`Disable failed: ${err.message}`, 'error');
+    }
+    renderPage();
+};
+
+window.systemCheckUpdate = async function () {
+    try {
+        await api.post('/api/system/update/check', {});
+        toast('Update check complete');
+    } catch (err) {
+        toast(`Check failed: ${err.message}`, 'error');
+    }
+    renderPage();
+};
+
+window.systemRunUpdate = async function () {
+    if (!await confirm('Run the update now? The running sokuza process must be restarted afterwards for the new version to take effect.')) return;
+    toast('Updating — this can take up to a minute…');
+
+    try {
+        const result = await api.post('/api/system/update', {});
+        const outEl = document.getElementById('system-update-output');
+        const preEl = document.getElementById('system-update-output-pre');
+        if (outEl && preEl) {
+            outEl.style.display = '';
+            preEl.textContent =
+                (result.stdout ? `— stdout —\n${result.stdout}\n` : '') +
+                (result.stderr ? `— stderr —\n${result.stderr}\n` : '') +
+                (result.error ? `— error —\n${result.error}\n` : '');
+        }
+        if (result.ok) {
+            toast('Update complete. Restart sokuza to apply the new version.');
+        } else if (result.reason === 'source') {
+            toast('Update refused: this sokuza is running from a source checkout — use git pull && npm run build.', 'error');
+        } else if (result.reason === 'missing-command') {
+            toast(`Update failed: \`${result.installer?.command}\` not found on PATH.`, 'error');
+        } else {
+            toast(`Update failed (exit ${result.exitCode ?? '?'}). See output below.`, 'error');
+        }
+    } catch (err) {
+        toast(`Update failed: ${err.message}`, 'error');
+    }
+};
+
+// ═════════════════════════════════════════════════════════════════════════════
 // SETTINGS
 // ═════════════════════════════════════════════════════════════════════════════
 async function renderSettings(el) {
@@ -4664,7 +4818,7 @@ document.addEventListener('keydown', (e) => {
     }
     // Navigation shortcuts: Alt+1-6
     if (e.altKey && !e.ctrlKey && !e.metaKey) {
-        const pages = ['dashboard', 'my-prs', 'issues', 'workflows', 'library', 'integrations', 'events', 'queue', 'logs', 'settings'];
+        const pages = ['dashboard', 'my-prs', 'issues', 'workflows', 'library', 'integrations', 'events', 'queue', 'logs', 'system', 'settings'];
         const num = parseInt(e.key);
         if (num >= 1 && num <= pages.length) { e.preventDefault(); navigate(pages[num - 1]); }
     }
@@ -4678,7 +4832,7 @@ $$('.nav-link').forEach((link) => link.addEventListener('click', (e) => { e.prev
 window.navigate = navigate;
 
 // Hash routing: restore page from URL hash
-const validPages = ['dashboard', 'my-prs', 'issues', 'workflows', 'library', 'integrations', 'events', 'queue', 'logs', 'settings'];
+const validPages = ['dashboard', 'my-prs', 'issues', 'workflows', 'library', 'integrations', 'events', 'queue', 'logs', 'system', 'settings'];
 const hashPage = window.location.hash.replace('#', '');
 if (validPages.includes(hashPage)) currentPage = hashPage;
 window.addEventListener('hashchange', () => {

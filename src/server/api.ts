@@ -1,12 +1,16 @@
 import type { FastifyInstance } from 'fastify';
 import type { Logger } from 'pino';
 import { readFile, writeFile, readdir } from 'node:fs/promises';
-import { join, basename, extname } from 'node:path';
+import { join, basename, extname, resolve } from 'node:path';
 import yaml from 'js-yaml';
 import type { SokuzaConfig, EventPayload, WebhookDelivery, WorkflowRunRecord } from '../core/types.js';
 import type { WorkflowQueue } from '../core/queue.js';
 import type { ConfigStore } from '../core/config-store.js';
 import type { LogStore } from '../core/log-store.js';
+import { VERSION } from '../version.js';
+import { serviceStatus, installService, uninstallService } from '../cli/service.js';
+import { runUpdateCommand } from '../cli/update.js';
+import { readUpdateCache, refreshUpdateCache, isNewer } from '../cli/update-check.js';
 
 interface ApiDeps {
     logger: Logger;
@@ -544,6 +548,100 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
 
     server.get('/api/actions', async () => {
         return { actions: deps.getRegisteredActions() };
+    });
+
+    // ─── System: autostart service + updates ────────────────────────────
+    //
+    // These routes mirror the `sokuza service` / `sokuza update` CLI
+    // subcommands so the dashboard has parity with the terminal. They sit
+    // under /api/system/* to group meta-management of the sokuza install
+    // itself (distinct from the engine's runtime config). All routes are
+    // already gated by the bearer-token auth layer registered in engine.ts.
+
+    server.get('/api/system/info', async () => {
+        return {
+            version: VERSION,
+            platform: process.platform,
+            nodeVersion: process.version,
+            pid: process.pid,
+            configPath: deps.configStore.getPath(),
+        };
+    });
+
+    server.get('/api/system/service', async () => {
+        return { status: await serviceStatus() };
+    });
+
+    server.post('/api/system/service/enable', async (_request, reply) => {
+        try {
+            const result = await installService({ configPath: deps.configStore.getPath() });
+            logger.info({ platform: result.platform, unitPath: result.unitPath }, 'Autostart enabled via dashboard');
+            return { ok: true, result };
+        } catch (err: any) {
+            logger.error({ err }, 'Autostart enable via dashboard failed');
+            return reply.status(500).send({ error: err.message ?? 'Failed to enable autostart' });
+        }
+    });
+
+    server.post('/api/system/service/disable', async (_request, reply) => {
+        try {
+            const result = await uninstallService();
+            logger.info({ platform: result.platform }, 'Autostart disabled via dashboard');
+            return { ok: true, result };
+        } catch (err: any) {
+            logger.error({ err }, 'Autostart disable via dashboard failed');
+            return reply.status(500).send({ error: err.message ?? 'Failed to disable autostart' });
+        }
+    });
+
+    /** Shape both `/update` GETs return so the UI can render one code path. */
+    function buildUpdateSnapshot(cache: { checkedAt: number; latest: string } | null) {
+        const latest = cache?.latest ?? null;
+        return {
+            current: VERSION,
+            latest,
+            checkedAt: cache?.checkedAt ?? null,
+            updateAvailable: latest ? isNewer(latest, VERSION) : false,
+        };
+    }
+
+    server.get('/api/system/update', async () => {
+        return buildUpdateSnapshot(await readUpdateCache());
+    });
+
+    server.post('/api/system/update/check', async () => {
+        await refreshUpdateCache({ force: true });
+        return buildUpdateSnapshot(await readUpdateCache());
+    });
+
+    server.post('/api/system/update', async (_request, reply) => {
+        try {
+            const result = await runUpdateCommand({
+                entryPath: resolve(process.argv[1]),
+                captureOutput: true,
+            });
+            logger.info(
+                { installer: result.installer.name, ok: result.ok, exitCode: result.exitCode },
+                'Update run via dashboard',
+            );
+            return {
+                ok: result.ok,
+                reason: result.reason,
+                installer: {
+                    name: result.installer.name,
+                    label: result.installer.label,
+                    command: result.installer.command,
+                    args: result.installer.args,
+                },
+                exitCode: result.exitCode,
+                stdout: result.stdout ?? '',
+                stderr: result.stderr ?? '',
+                error: result.error,
+            };
+        } catch (err: any) {
+            logger.error({ err }, 'Update run via dashboard failed');
+            return reply.status(500).send({ error: err.message ?? 'Update failed' });
+        }
     });
 
     // ─── Webhook Deliveries ──────────────────────────────────────────────

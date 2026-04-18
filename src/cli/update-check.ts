@@ -9,7 +9,7 @@ const CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const REGISTRY_URL = 'https://registry.npmjs.org/sokuza/latest';
 const FETCH_TIMEOUT_MS = 3000;
 
-interface Cache {
+export interface Cache {
     checkedAt: number;
     latest: string;
 }
@@ -31,16 +31,24 @@ export async function maybeNotifyUpdate(): Promise<void> {
     if (cache && isNewer(cache.latest, VERSION)) writeNotice(cache.latest);
 }
 
+export interface RefreshOptions {
+    /** Skip the "cache is still fresh" short-circuit and always hit the registry. */
+    force?: boolean;
+}
+
 /**
  * Fetch the latest published version from the npm registry and write it to
  * the cache file used by `maybeNotifyUpdate`. No-op when the cache is still
- * fresh. Safe to fire-and-forget: the caller doesn't need the result, only
- * the side effect for future invocations.
+ * fresh unless `force: true` is passed (used by the dashboard's explicit
+ * "Check for updates" button). Safe to fire-and-forget: the caller doesn't
+ * need the result, only the side effect for future invocations.
  */
-export async function refreshUpdateCache(): Promise<void> {
+export async function refreshUpdateCache(opts: RefreshOptions = {}): Promise<void> {
     try {
-        const cache = await readCache();
-        if (cache && Date.now() - cache.checkedAt < CHECK_INTERVAL_MS) return;
+        if (!opts.force) {
+            const cache = await readCache();
+            if (cache && Date.now() - cache.checkedAt < CHECK_INTERVAL_MS) return;
+        }
 
         const res = await fetch(REGISTRY_URL, {
             headers: { accept: 'application/vnd.npm.install-v1+json' },
@@ -59,6 +67,12 @@ export async function refreshUpdateCache(): Promise<void> {
     } catch {
         // best-effort — next invocation will try again
     }
+}
+
+/** Read the on-disk update-check cache. Exported so the dashboard API can
+ * surface the same values the CLI notifier uses. */
+export async function readUpdateCache(): Promise<Cache | null> {
+    return readCache();
 }
 
 function shouldNotify(): boolean {

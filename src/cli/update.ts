@@ -1,4 +1,4 @@
-import { spawnSync } from 'node:child_process';
+import { spawnSync, type SpawnSyncOptions } from 'node:child_process';
 import { resolve } from 'node:path';
 
 /**
@@ -81,11 +81,111 @@ export function detectInstaller(entryPath: string): InstallerInfo {
     };
 }
 
-export async function runUpdate(): Promise<void> {
-    const entry = resolve(process.argv[1]);
-    const info = detectInstaller(entry);
+/** Why an update attempt didn't produce a successful exit. `null` = success. */
+export type UpdateFailureReason =
+    | 'source'
+    | 'missing-command'
+    | 'spawn-error'
+    | 'nonzero-exit'
+    | null;
+
+export interface UpdateResult {
+    ok: boolean;
+    reason: UpdateFailureReason;
+    installer: InstallerInfo;
+    exitCode: number | null;
+    /** Present when `captureOutput: true` was requested (API path). */
+    stdout?: string;
+    stderr?: string;
+    /** Populated for `spawn-error` / `missing-command`. */
+    error?: string;
+}
+
+export interface RunUpdateOptions {
+    /** Absolute path to the sokuza CLI entry file — typically `process.argv[1]`. */
+    entryPath: string;
+    /**
+     * `true` → capture stdout/stderr on the result (for API JSON responses).
+     * `false` → inherit stdio so the user sees live output in their terminal.
+     */
+    captureOutput: boolean;
+    /** Called after detection so the CLI can print a "Updating via X..." banner. */
+    onDetect?: (info: InstallerInfo) => void;
+}
+
+/**
+ * Shared update implementation used by both the CLI wrapper (`runUpdate`)
+ * and the dashboard API route. Returns a structured result instead of
+ * calling `process.exit` so it can be driven from any context.
+ */
+export async function runUpdateCommand(opts: RunUpdateOptions): Promise<UpdateResult> {
+    const info = detectInstaller(opts.entryPath);
+    opts.onDetect?.(info);
 
     if (info.name === 'source') {
+        return { ok: false, reason: 'source', installer: info, exitCode: null };
+    }
+
+    const spawnOpts: SpawnSyncOptions = {
+        shell: process.platform === 'win32',
+    };
+    if (opts.captureOutput) {
+        spawnOpts.encoding = 'utf-8';
+    } else {
+        spawnOpts.stdio = 'inherit';
+    }
+
+    const res = spawnSync(info.command, info.args, spawnOpts);
+
+    const captured = opts.captureOutput
+        ? {
+            stdout: typeof res.stdout === 'string' ? res.stdout : (res.stdout?.toString?.() ?? ''),
+            stderr: typeof res.stderr === 'string' ? res.stderr : (res.stderr?.toString?.() ?? ''),
+        }
+        : {};
+
+    if (res.error) {
+        const code = (res.error as NodeJS.ErrnoException).code;
+        return {
+            ok: false,
+            reason: code === 'ENOENT' ? 'missing-command' : 'spawn-error',
+            installer: info,
+            exitCode: null,
+            error: res.error.message,
+            ...captured,
+        };
+    }
+
+    return {
+        ok: res.status === 0,
+        reason: res.status === 0 ? null : 'nonzero-exit',
+        installer: info,
+        exitCode: res.status ?? null,
+        ...captured,
+    };
+}
+
+/**
+ * CLI entrypoint for `sokuza update`. Thin wrapper around `runUpdateCommand`
+ * that prints human-friendly text and translates failure reasons into exit
+ * codes.
+ */
+export async function runUpdate(): Promise<void> {
+    const entry = resolve(process.argv[1]);
+
+    const result = await runUpdateCommand({
+        entryPath: entry,
+        captureOutput: false,
+        onDetect: (info) => {
+            if (info.name === 'source') return;
+            process.stdout.write(
+                `Updating sokuza via ${info.label}…\n` +
+                `> ${info.command} ${info.args.join(' ')}\n\n`,
+            );
+        },
+    });
+
+    if (result.reason === 'source') {
         process.stderr.write(
             `sokuza appears to be running from a source checkout:\n` +
             `  ${entry}\n\n` +
@@ -96,34 +196,24 @@ export async function runUpdate(): Promise<void> {
         process.exit(1);
     }
 
-    process.stdout.write(
-        `Updating sokuza via ${info.label}…\n` +
-        `> ${info.command} ${info.args.join(' ')}\n\n`,
-    );
-
-    const result = spawnSync(info.command, info.args, {
-        stdio: 'inherit',
-        shell: process.platform === 'win32',
-    });
-
-    if (result.error) {
-        const code = (result.error as NodeJS.ErrnoException).code;
-        if (code === 'ENOENT') {
-            process.stderr.write(
-                `\n\`${info.command}\` not found on PATH. ` +
-                `Install it first, or upgrade sokuza manually with another package manager.\n`,
-            );
-            process.exit(1);
-        }
-        throw result.error;
+    if (result.reason === 'missing-command') {
+        process.stderr.write(
+            `\n\`${result.installer.command}\` not found on PATH. ` +
+            `Install it first, or upgrade sokuza manually with another package manager.\n`,
+        );
+        process.exit(1);
     }
 
-    if (result.status !== 0) {
+    if (result.reason === 'spawn-error') {
+        throw new Error(result.error ?? 'spawn failed');
+    }
+
+    if (!result.ok) {
         process.stderr.write(
-            `\nUpdate failed (\`${info.command}\` exited with ${result.status ?? '?'}). ` +
+            `\nUpdate failed (\`${result.installer.command}\` exited with ${result.exitCode ?? '?'}). ` +
             `See output above for details.\n`,
         );
-        process.exit(result.status ?? 1);
+        process.exit(result.exitCode ?? 1);
     }
 
     process.stdout.write(

@@ -18,6 +18,12 @@ export class ConfigStore {
         this.logger = logger;
     }
 
+    /** Absolute path to the backing YAML file. Used by API routes that need
+     * to pass a configPath into process-level CLI helpers (e.g. autostart). */
+    getPath(): string {
+        return this.configPath;
+    }
+
     private withLock<T>(fn: () => Promise<T>): Promise<T> {
         const prev = this.writeLock;
         let resolve!: () => void;
