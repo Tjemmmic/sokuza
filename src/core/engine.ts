@@ -474,7 +474,7 @@ export class SokuzaEngine {
         this.startCronSchedules();
 
         const { port: preferredPort } = this.config.server;
-        const host = this.config.server.host ?? '0.0.0.0';
+        const host = this.config.server.host ?? '127.0.0.1';
         const actualPort = await listenWithFallback(
             this.server, host, preferredPort, this.logger,
         );

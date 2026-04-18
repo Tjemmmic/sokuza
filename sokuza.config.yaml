@@ -1,6 +1,6 @@
 server:
   port: 24847
-  host: 0.0.0.0
+  host: 127.0.0.1
 
 # ─── AI providers ────────────────────────────────────────────────────────────
 # Registered providers can be referenced by name from any workflow that uses

@@ -70,6 +70,14 @@ workflows: []
 
         const config = await loadConfig(configPath);
         expect(config.server.port).toBe(24847);
+        expect(config.server.host).toBe('127.0.0.1');
+    });
+
+    it('honors an explicit server.host override (e.g. for webhook tunnels)', async () => {
+        const configPath = join(TMP_DIR, 'bind-all.yaml');
+        await writeFile(configPath, 'server:\n  host: "0.0.0.0"\nworkflows: []\n');
+
+        const config = await loadConfig(configPath);
         expect(config.server.host).toBe('0.0.0.0');
     });
 

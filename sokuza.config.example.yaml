@@ -2,11 +2,17 @@
 # Copy this file to sokuza.config.yaml and fill in your values.
 
 # The `server:` block is optional. When omitted, Sokuza binds 24847 (its
-# canonical discovery port) and falls back through 24848–24852 if busy — so
-# https://sokuza.ai can find a locally running instance without manual setup.
+# canonical discovery port) on 127.0.0.1 and falls back through 24848–24852
+# if busy — so https://sokuza.ai can find a locally running instance without
+# exposing anything beyond your machine's loopback interface.
+#
+# Change `host` to "0.0.0.0" ONLY when you need inbound webhook delivery
+# from a tunnel (localtunnel, cloudflared, ngrok) or a reverse proxy. That
+# exposes the dashboard and /api/* to whoever can reach your box — there's
+# no auth in front of them today.
 server:
   port: 24847
-  host: "0.0.0.0"
+  host: "127.0.0.1"
 
 # ─── AI Providers ────────────────────────────────────────────────────────────
 # Register AI providers that workflows can reference by name.

@@ -78,7 +78,12 @@ async function validateConfig(raw: Record<string, unknown>): Promise<SokuzaConfi
     return {
         server: {
             port,
-            host: (server.host as string) ?? '0.0.0.0',
+            // Default to loopback only. Users who want their webhook routes
+            // reachable from a tunnel/VPN/LAN must explicitly opt in by
+            // setting `server.host: 0.0.0.0` (or a specific IP). The
+            // dashboard has no auth today — leaving it loopback-only by
+            // default means a laptop on public Wi-Fi isn't exposing it.
+            host: (server.host as string) ?? '127.0.0.1',
         },
         integrations: integrations as SokuzaConfig['integrations'],
         workflows,
