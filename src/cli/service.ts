@@ -286,22 +286,40 @@ async function installMacOS(ctx: InstallCtx): Promise<ServiceResult> {
     await writeFile(plistPath, plist, 'utf-8');
 
     const followUp: string[] = [];
-    // Prefer `bootstrap` on modern macOS; fall back to legacy `load`.
+    // macOS has two user-scoped launchd domains:
+    //   gui/<uid>   — requires an active GUI login session (most laptops)
+    //   user/<uid>  — works for headless ssh-only sessions too
+    // Try gui first (nicer for typical laptop users), then user for headless
+    // macOS servers, then legacy `load` as a final fallback.
     const uid = userInfo().uid;
-    const domain = `gui/${uid}`;
-    const bootstrap = run('launchctl', ['bootstrap', domain, plistPath]);
-    if (bootstrap.status !== 0) {
+    const guiDomain = `gui/${uid}`;
+    const userDomain = `user/${uid}`;
+    const tryBootstrap = (domain: string) =>
+        run('launchctl', ['bootstrap', domain, plistPath]);
+
+    let loaded = false;
+    let via = '';
+
+    const gui = tryBootstrap(guiDomain);
+    if (gui.status === 0) { loaded = true; via = `\`launchctl bootstrap ${guiDomain}\``; }
+
+    if (!loaded) {
+        const headless = tryBootstrap(userDomain);
+        if (headless.status === 0) { loaded = true; via = `\`launchctl bootstrap ${userDomain}\` (headless-compatible)`; }
+    }
+
+    if (!loaded) {
         const load = run('launchctl', ['load', plistPath]);
-        if (load.status !== 0) {
-            followUp.push(
-                `Plist written to ${plistPath}, but launchctl refused to load it. ` +
-                `Check logs in ${logDir}.`,
-            );
-        } else {
-            followUp.push(`Loaded via legacy \`launchctl load\`.`);
-        }
+        if (load.status === 0) { loaded = true; via = `legacy \`launchctl load\``; }
+    }
+
+    if (loaded) {
+        followUp.push(`Loaded via ${via}. Auto-starts on login.`);
     } else {
-        followUp.push(`Loaded via \`launchctl bootstrap ${domain}\`. Auto-starts on login.`);
+        followUp.push(
+            `Plist written to ${plistPath}, but launchctl refused to load it. ` +
+            `Check logs in ${logDir}.`,
+        );
     }
     followUp.push(
         `PATH was baked into the plist. If you later install tools in a new ` +
@@ -316,10 +334,11 @@ async function uninstallMacOS(): Promise<ServiceResult> {
     const plistPath = join(homedir(), 'Library', 'LaunchAgents', `${SERVICE_LABEL}.plist`);
     const followUp: string[] = [];
 
+    // Try both domains in case the install used the headless-compatible one.
     const uid = userInfo().uid;
-    const domain = `gui/${uid}`;
-    const bootout = run('launchctl', ['bootout', `${domain}/${SERVICE_LABEL}`]);
-    if (bootout.status !== 0) {
+    const bootoutGui = run('launchctl', ['bootout', `gui/${uid}/${SERVICE_LABEL}`]);
+    const bootoutUser = run('launchctl', ['bootout', `user/${uid}/${SERVICE_LABEL}`]);
+    if (bootoutGui.status !== 0 && bootoutUser.status !== 0) {
         run('launchctl', ['unload', plistPath]);
     }
 

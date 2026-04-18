@@ -43,8 +43,12 @@ export function createServer(logger: Logger): FastifyInstance {
     // instance. Response shape is stable — it is the contract the public site
     // validates against. Strict CORS: only sokuza.ai (and dev origins when
     // explicitly enabled) may read this cross-origin.
+    //
+    // `Cache-Control: no-store` prevents the browser from serving a stale
+    // response if the user restarts sokuza on a different port mid-session.
     server.get('/health', async (request, reply) => {
         applyDiscoveryCors(request, reply);
+        reply.header('Cache-Control', 'no-store');
         return buildHealthResponse();
     });
 
@@ -52,6 +56,7 @@ export function createServer(logger: Logger): FastifyInstance {
     // GET that sets non-simple headers or is inspected as JSON from JS.
     server.options('/health', async (request, reply) => {
         applyDiscoveryCors(request, reply);
+        reply.header('Cache-Control', 'no-store');
         reply.status(204).send();
     });
 

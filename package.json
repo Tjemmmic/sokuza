@@ -7,6 +7,9 @@
   "bin": {
     "sokuza": "dist/index.js"
   },
+  "engines": {
+    "node": ">=20"
+  },
   "files": [
     "dist",
     "dashboard",

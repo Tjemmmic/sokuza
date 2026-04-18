@@ -26,10 +26,19 @@ const DEV_ORIGINS: ReadonlySet<string> = new Set([
     'http://localhost:4323', 'http://127.0.0.1:4323',
 ]);
 
+/**
+ * Accept the truthy env-var spellings people actually type. Strict-equals
+ * against '1' was surprising — `=true` and `=yes` should work too.
+ */
+function isTruthyEnv(value: string | undefined): boolean {
+    if (!value) return false;
+    return /^(1|true|yes|on)$/i.test(value.trim());
+}
+
 export function isAllowedDiscoveryOrigin(origin: string | undefined): boolean {
     if (!origin) return false;
     if (PRODUCTION_ORIGINS.has(origin)) return true;
-    return process.env.SOKUZA_ALLOW_DEV_ORIGINS === '1' && DEV_ORIGINS.has(origin);
+    return isTruthyEnv(process.env.SOKUZA_ALLOW_DEV_ORIGINS) && DEV_ORIGINS.has(origin);
 }
 
 /**
