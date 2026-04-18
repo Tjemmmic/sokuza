@@ -13,6 +13,7 @@ import { runStart } from './cli/start.js';
 import { runInit } from './cli/init.js';
 import { runStatus } from './cli/status.js';
 import { runLogs } from './cli/logs.js';
+import { runToken } from './cli/token.js';
 import { installService, uninstallService } from './cli/service.js';
 
 interface ParsedArgs {
@@ -22,6 +23,8 @@ interface ParsedArgs {
     force: boolean;
     follow: boolean;
     lines?: number;
+    rotate: boolean;
+    json: boolean;
     positional: string[];
 }
 
@@ -43,7 +46,7 @@ interface ParsedArgs {
 function parseArgs(argv: string[]): ParsedArgs {
     const rest = argv.slice(2);
     const KNOWN_COMMANDS = new Set([
-        'start', 'init', 'status', 'logs',
+        'start', 'init', 'status', 'logs', 'token',
         'install-service', 'uninstall-service',
         'version', '--version', '-v', 'help', '--help', '-h',
     ]);
@@ -54,6 +57,8 @@ function parseArgs(argv: string[]): ParsedArgs {
     let force = false;
     let follow = false;
     let lines: number | undefined;
+    let rotate = false;
+    let json = false;
     const positional: string[] = [];
 
     if (rest.length > 0 && KNOWN_COMMANDS.has(rest[0])) {
@@ -90,6 +95,10 @@ function parseArgs(argv: string[]): ParsedArgs {
         } else if (arg.startsWith('--lines=')) {
             const v = Number.parseInt(arg.slice('--lines='.length), 10);
             if (Number.isFinite(v) && v > 0) lines = v;
+        } else if (arg === '--rotate') {
+            rotate = true;
+        } else if (arg === '--json') {
+            json = true;
         } else {
             positional.push(arg);
         }
@@ -99,7 +108,7 @@ function parseArgs(argv: string[]): ParsedArgs {
         configPath = positional[0];
     }
 
-    return { command, configPath, port, force, follow, lines, positional };
+    return { command, configPath, port, force, follow, lines, rotate, json, positional };
 }
 
 function printHelp(): void {
@@ -111,6 +120,7 @@ Usage:
   sokuza init [--force]            Scaffold sokuza.config.yaml and .env
   sokuza status                    Report locally-running instances
   sokuza logs [-f] [-n N]          Show platform-appropriate logs (-f to follow)
+  sokuza token [--rotate] [--json] Print the dashboard bearer token
   sokuza install-service [--config PATH]
                                    Install autostart service for this OS
   sokuza uninstall-service         Remove the autostart service
@@ -151,6 +161,10 @@ async function main(): Promise<void> {
 
         case 'logs':
             await runLogs({ follow: args.follow, lines: args.lines });
+            return;
+
+        case 'token':
+            await runToken({ rotate: args.rotate, json: args.json });
             return;
 
         case 'install-service': {

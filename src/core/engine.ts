@@ -22,6 +22,7 @@ import {
     persistRuntimeState,
     pruneStaleRuntimeStates,
 } from '../server/discovery.js';
+import { loadOrCreateDashboardToken, registerAuthGate } from '../server/auth.js';
 import type { FastifyInstance } from 'fastify';
 import { resolve, join } from 'node:path';
 import { WorkflowQueue } from './queue.js';
@@ -445,6 +446,11 @@ export class SokuzaEngine {
 
         this.server = createServer(this.logger);
 
+        // Gate /api/* behind a bearer token. The dashboard HTML itself still
+        // loads without auth so its JS can prompt the user for the token.
+        const dashboardToken = await loadOrCreateDashboardToken();
+        registerAuthGate(this.server, dashboardToken, this.logger);
+
         const templateDir = join(resolve(this.configPath, '..'), 'templates');
         registerApiRoutes(this.server, {
             logger: this.logger,
@@ -496,9 +502,16 @@ export class SokuzaEngine {
         }
 
         const localUrl = `http://localhost:${actualPort}`;
+        const dashboardUrl = `${localUrl}/?t=${dashboardToken}`;
         this.logger.info(
             { port: actualPort, host, url: localUrl, state: this.stateFile },
             `🚀 Sokuza is listening at ${localUrl}`,
+        );
+        this.logger.info(
+            `🔐 Dashboard (one-time link): ${dashboardUrl}`,
+        );
+        this.logger.info(
+            `   Reveal again any time with \`sokuza token\`.`,
         );
     }
 
