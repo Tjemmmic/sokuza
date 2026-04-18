@@ -6,7 +6,7 @@ import { spawnSync } from 'node:child_process';
 
 /**
  * Cross-platform service installer. The goal is a low-drama autostart:
- * user runs `sokuza install-service` once, and the engine comes back up
+ * user runs `sokuza service enable` once, and the engine comes back up
  * after reboot without the user having to remember anything.
  *
  * Each platform writes a *user-scoped* unit (no admin/sudo required):
@@ -23,7 +23,7 @@ import { spawnSync } from 'node:child_process';
  * Capturing absolute paths and the full PATH at install time makes the
  * service immune to the minimised environment systemd and launchd hand to
  * user services — a workflow that shells out to `gh` or `claude` finds them
- * on exactly the PATH the user had when they ran `install-service`.
+ * on exactly the PATH the user had when they ran `service enable`.
  */
 
 const SERVICE_LABEL = 'ai.sokuza';
@@ -76,8 +76,8 @@ export function assertEntryIsExecutableByService(entry: string): void {
     const lower = entry.toLowerCase();
     if (lower.endsWith('.ts') || lower.endsWith('.tsx') || lower.endsWith('.mts') || lower.endsWith('.cts')) {
         throw new Error(
-            `install-service refuses to register a TypeScript entry (${entry}). ` +
-            `Run \`sokuza install-service\` from the built binary — typically the ` +
+            `service enable refuses to register a TypeScript entry (${entry}). ` +
+            `Run \`sokuza service enable\` from the built binary — typically the ` +
             `globally-installed \`sokuza\` on your PATH — not from \`tsx\` or \`npm run dev\`. ` +
             `If you need an autostart for a development checkout, build first with ` +
             `\`npm run build\` and run the resulting \`dist/index.js\` directly.`,
@@ -89,9 +89,9 @@ export function assertEntryIsExecutableByService(entry: string): void {
     const segs = entry.split(/[/\\]/);
     if (segs.includes('tsx') || segs.includes('ts-node') || segs.includes('vite-node')) {
         throw new Error(
-            `install-service refuses to register a dev-runtime entry (${entry}). ` +
+            `service enable refuses to register a dev-runtime entry (${entry}). ` +
             `Install sokuza globally with \`npm install -g sokuza\` and run ` +
-            `\`sokuza install-service\` from there instead.`,
+            `\`sokuza service enable\` from there instead.`,
         );
     }
 }
@@ -131,6 +131,158 @@ export async function uninstallService(): Promise<ServiceResult> {
     if (plat === 'darwin') return uninstallMacOS();
     if (plat === 'win32') return uninstallWindows();
     throw new Error(`Unsupported platform for service uninstall: ${plat}`);
+}
+
+export interface ServiceStatus {
+    platform: NodeJS.Platform;
+    /** Label for the underlying mechanism: "systemd --user", "launchd", "Task Scheduler". */
+    mechanism: string;
+    /** Did we find the unit/plist/task this sokuza would have installed? */
+    installed: boolean;
+    /** Will it auto-start at login/boot? */
+    enabled: boolean;
+    /** Is it currently running right now? */
+    active: boolean;
+    /** Absolute path to the unit/plist/task XML file (even if not installed — useful for guidance). */
+    unitPath: string;
+    /** Extra diagnostic lines to surface to the user. */
+    notes: string[];
+}
+
+/**
+ * Query the platform-specific service manager about sokuza's autostart state.
+ * Every OS path answers the same three questions — installed, enabled,
+ * active — so the CLI formatter can render a consistent report.
+ */
+export async function serviceStatus(): Promise<ServiceStatus> {
+    const plat = platform();
+    if (plat === 'linux') return statusLinux();
+    if (plat === 'darwin') return statusMacOS();
+    if (plat === 'win32') return statusWindows();
+    throw new Error(`Unsupported platform for service status: ${plat}`);
+}
+
+function statusLinux(): ServiceStatus {
+    const unitPath = join(homedir(), '.config', 'systemd', 'user', LINUX_UNIT_NAME);
+    const notes: string[] = [];
+    const installed = existsSync(unitPath);
+
+    let enabled = false;
+    let active = false;
+
+    if (!commandExists('systemctl')) {
+        notes.push('systemctl not found on PATH — cannot query service state.');
+        return {
+            platform: 'linux',
+            mechanism: 'systemd --user',
+            installed,
+            enabled,
+            active,
+            unitPath,
+            notes,
+        };
+    }
+
+    // `is-enabled` and `is-active` print a single status word on stdout and
+    // use the exit code to disambiguate (0 = enabled/active). The stdout
+    // value is the clearest signal, so we use it directly.
+    const enabledOut = run('systemctl', ['--user', 'is-enabled', LINUX_UNIT_NAME]).stdout.trim();
+    const activeOut = run('systemctl', ['--user', 'is-active', LINUX_UNIT_NAME]).stdout.trim();
+    enabled = enabledOut === 'enabled' || enabledOut === 'enabled-runtime' || enabledOut === 'static';
+    active = activeOut === 'active';
+
+    return {
+        platform: 'linux',
+        mechanism: 'systemd --user',
+        installed,
+        enabled,
+        active,
+        unitPath,
+        notes,
+    };
+}
+
+function statusMacOS(): ServiceStatus {
+    const plistPath = join(homedir(), 'Library', 'LaunchAgents', `${SERVICE_LABEL}.plist`);
+    const notes: string[] = [];
+    const installed = existsSync(plistPath);
+
+    const uid = userInfo().uid;
+
+    // `launchctl print <domain>/<label>` exits 0 when the service is loaded
+    // in that domain, non-zero otherwise. We check both gui and user because
+    // installService tries gui first with user as a headless fallback.
+    const gui = run('launchctl', ['print', `gui/${uid}/${SERVICE_LABEL}`]);
+    const usr = run('launchctl', ['print', `user/${uid}/${SERVICE_LABEL}`]);
+    const loadedOutput = gui.status === 0 ? gui.stdout : usr.status === 0 ? usr.stdout : '';
+    const loaded = loadedOutput !== '';
+
+    // On launchd, "loaded" ≈ enabled. "Active" is trickier: the plist sets
+    // KeepAlive=true, so if it's loaded it's effectively meant to be running.
+    // `state = running` in the print output is the authoritative signal.
+    const active = /state\s*=\s*running/i.test(loadedOutput);
+
+    return {
+        platform: 'darwin',
+        mechanism: 'launchd (user agent)',
+        installed,
+        enabled: loaded,
+        active,
+        unitPath: plistPath,
+        notes,
+    };
+}
+
+function statusWindows(): ServiceStatus {
+    const localAppData = process.env.LOCALAPPDATA ?? join(homedir(), 'AppData', 'Local');
+    const taskXmlPath = join(localAppData, 'Sokuza', 'task.xml');
+    const notes: string[] = [];
+    const installed = existsSync(taskXmlPath);
+
+    // `schtasks /Query /TN Sokuza /FO LIST /V` prints verbose key:value pairs
+    // including "Status:" and "Scheduled Task State:". Parse both to derive
+    // enabled/active. A non-zero exit means the task isn't registered.
+    const q = run('schtasks', ['/Query', '/TN', WINDOWS_TASK_NAME, '/FO', 'LIST', '/V']);
+    if (q.status !== 0) {
+        return {
+            platform: 'win32',
+            mechanism: 'Task Scheduler',
+            installed,
+            enabled: false,
+            active: false,
+            unitPath: taskXmlPath,
+            notes,
+        };
+    }
+
+    const state = extractField(q.stdout, 'Scheduled Task State');
+    const status = extractField(q.stdout, 'Status');
+    const enabled = state.toLowerCase() === 'enabled';
+    const active = status.toLowerCase() === 'running';
+
+    return {
+        platform: 'win32',
+        mechanism: 'Task Scheduler',
+        installed,
+        enabled,
+        active,
+        unitPath: taskXmlPath,
+        notes,
+    };
+}
+
+/**
+ * Pull a single `Name: Value` field out of `schtasks /FO LIST /V` output.
+ * Exported for test access.
+ */
+export function extractField(listOutput: string, name: string): string {
+    const lineRegex = new RegExp(`^\\s*${escapeRegex(name)}\\s*:\\s*(.*)$`, 'im');
+    const m = lineRegex.exec(listOutput);
+    return m ? m[1].trim() : '';
+}
+
+function escapeRegex(s: string): string {
+    return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 // ─── Linux (systemd --user) ─────────────────────────────────────────────────
@@ -210,7 +362,7 @@ async function installLinux(ctx: InstallCtx): Promise<ServiceResult> {
     followUp.push(
         `PATH was baked into the unit. If you later install tools in a new ` +
         `directory (e.g. NVM, mise) and workflows can't find them, re-run ` +
-        `\`sokuza install-service\` to refresh it.`,
+        `\`sokuza service enable\` to refresh it.`,
     );
 
     return { platform: 'linux', unitPath, followUp };
@@ -324,7 +476,7 @@ async function installMacOS(ctx: InstallCtx): Promise<ServiceResult> {
     followUp.push(
         `PATH was baked into the plist. If you later install tools in a new ` +
         `directory (e.g. NVM, mise) and workflows can't find them, re-run ` +
-        `\`sokuza install-service\` to refresh it.`,
+        `\`sokuza service enable\` to refresh it.`,
     );
 
     return { platform: 'darwin', unitPath: plistPath, followUp };
@@ -496,7 +648,7 @@ async function uninstallWindows(): Promise<ServiceResult> {
         followUp.push(`Removed ${taskXmlPath}`);
     }
 
-    // Also clean up the legacy Startup-folder shim from previous install-service
+    // Also clean up the legacy Startup-folder shim from previous autostart
     // implementations. Users upgrading shouldn't have a stray .cmd around.
     const legacyShim = process.env.APPDATA
         ? join(process.env.APPDATA, 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup', 'sokuza.cmd')

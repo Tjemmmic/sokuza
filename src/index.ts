@@ -14,10 +14,13 @@ import { runInit } from './cli/init.js';
 import { runStatus } from './cli/status.js';
 import { runLogs } from './cli/logs.js';
 import { runToken } from './cli/token.js';
-import { installService, uninstallService } from './cli/service.js';
+import { runUpdate } from './cli/update.js';
+import { maybeNotifyUpdate, refreshUpdateCache } from './cli/update-check.js';
+import { installService, uninstallService, serviceStatus, type ServiceStatus } from './cli/service.js';
 
 interface ParsedArgs {
     command: string;
+    subcommand?: string;
     configPath?: string;
     port?: number;
     force: boolean;
@@ -35,8 +38,10 @@ interface ParsedArgs {
  *   sokuza init [--force]             → write sokuza.config.yaml + .env
  *   sokuza status                     → report running instances
  *   sokuza logs [-f] [-n N]           → show platform-appropriate logs
- *   sokuza install-service [--config PATH]
- *   sokuza uninstall-service
+ *   sokuza service enable [--config PATH]
+ *   sokuza service disable
+ *   sokuza service status
+ *   sokuza update                     → upgrade via detected package manager
  *   sokuza version | --version | -v
  *   sokuza help    | --help    | -h
  *
@@ -46,12 +51,12 @@ interface ParsedArgs {
 function parseArgs(argv: string[]): ParsedArgs {
     const rest = argv.slice(2);
     const KNOWN_COMMANDS = new Set([
-        'start', 'init', 'status', 'logs', 'token',
-        'install-service', 'uninstall-service',
+        'start', 'init', 'status', 'logs', 'token', 'service', 'update',
         'version', '--version', '-v', 'help', '--help', '-h',
     ]);
 
     let command = 'start';
+    let subcommand: string | undefined;
     let configPath: string | undefined;
     let port: number | undefined;
     let force = false;
@@ -63,6 +68,13 @@ function parseArgs(argv: string[]): ParsedArgs {
 
     if (rest.length > 0 && KNOWN_COMMANDS.has(rest[0])) {
         command = rest.shift()!;
+    }
+
+    // `service` is a grouped command — the next token (if present and not a
+    // flag) is the subcommand. Consume it here so the flag loop below can
+    // treat the remainder uniformly.
+    if (command === 'service' && rest.length > 0 && !rest[0].startsWith('-')) {
+        subcommand = rest.shift();
     }
 
     for (let i = 0; i < rest.length; i++) {
@@ -108,7 +120,7 @@ function parseArgs(argv: string[]): ParsedArgs {
         configPath = positional[0];
     }
 
-    return { command, configPath, port, force, follow, lines, rotate, json, positional };
+    return { command, subcommand, configPath, port, force, follow, lines, rotate, json, positional };
 }
 
 function printHelp(): void {
@@ -121,18 +133,98 @@ Usage:
   sokuza status                    Report locally-running instances
   sokuza logs [-f] [-n N]          Show platform-appropriate logs (-f to follow)
   sokuza token [--rotate] [--json] Print the dashboard bearer token
-  sokuza install-service [--config PATH]
-                                   Install autostart service for this OS
-  sokuza uninstall-service         Remove the autostart service
+  sokuza service enable [--config PATH]
+                                   Install + start the autostart service
+  sokuza service disable           Stop + remove the autostart service
+  sokuza service status            Report autostart installation and state
+  sokuza update                    Upgrade sokuza via its installer (npm, brew, …)
   sokuza version                   Print version and exit
   sokuza help                      Show this message
 
+Env: set NO_UPDATE_NOTIFIER=1 to suppress "update available" notices.
 Docs: https://sokuza.ai
 `);
 }
 
+function printServiceResult(label: string, result: { platform: NodeJS.Platform; unitPath: string; followUp: string[] }): void {
+    process.stdout.write(
+        `${label} sokuza autostart (${result.platform}).\n` +
+        `  Unit: ${result.unitPath}\n` +
+        result.followUp.map((l) => `  - ${l}\n`).join(''),
+    );
+}
+
+function printServiceStatus(s: ServiceStatus): void {
+    const fmt = (ok: boolean, y: string, n: string): string => (ok ? y : n);
+    process.stdout.write(
+        `sokuza service (${s.platform} / ${s.mechanism}):\n` +
+        `  Installed: ${fmt(s.installed, 'yes', 'no')}\n` +
+        `  Enabled:   ${fmt(s.enabled, 'yes — starts at login', 'no')}\n` +
+        `  Active:    ${fmt(s.active, 'yes — running now', 'no')}\n` +
+        `  Unit file: ${s.unitPath}\n`,
+    );
+    for (const note of s.notes) process.stdout.write(`  - ${note}\n`);
+    if (!s.installed) {
+        process.stdout.write(`\nRun \`sokuza service enable\` to install the autostart unit.\n`);
+    }
+}
+
+async function runServiceCommand(args: ParsedArgs): Promise<void> {
+    switch (args.subcommand) {
+        case 'enable':
+        case 'install': {
+            const configPath = resolve(
+                args.configPath
+                ?? process.env.SOKUZA_CONFIG
+                ?? 'sokuza.config.yaml',
+            );
+            const result = await installService({ configPath });
+            printServiceResult('Installed', result);
+            return;
+        }
+        case 'disable':
+        case 'uninstall': {
+            const result = await uninstallService();
+            printServiceResult('Uninstalled', result);
+            return;
+        }
+        case 'status': {
+            const s = await serviceStatus();
+            printServiceStatus(s);
+            return;
+        }
+        case undefined:
+            process.stderr.write(
+                `sokuza service: missing subcommand. Expected one of: enable, disable, status.\n\n`,
+            );
+            printHelp();
+            process.exit(2);
+            return;
+        default:
+            process.stderr.write(
+                `sokuza service: unknown subcommand "${args.subcommand}". ` +
+                `Expected one of: enable, disable, status.\n\n`,
+            );
+            printHelp();
+            process.exit(2);
+            return;
+    }
+}
+
 async function main(): Promise<void> {
     const args = parseArgs(process.argv);
+
+    // Print a cached "update available" notice for interactive invocations.
+    // Non-TTY contexts (systemd/launchd service, piped output, CI) stay
+    // silent. Runs before the command so the notice always appears first.
+    await maybeNotifyUpdate();
+
+    // Populate the update-check cache from the long-running engine process.
+    // Short commands exit too quickly to safely hit the network themselves,
+    // so we piggy-back on `start` to keep the cache fresh for everyone else.
+    if (args.command === 'start') {
+        setImmediate(() => { void refreshUpdateCache(); });
+    }
 
     switch (args.command) {
         case 'version':
@@ -167,29 +259,13 @@ async function main(): Promise<void> {
             await runToken({ rotate: args.rotate, json: args.json });
             return;
 
-        case 'install-service': {
-            const configPath = resolve(
-                args.configPath
-                ?? process.env.SOKUZA_CONFIG
-                ?? 'sokuza.config.yaml',
-            );
-            const result = await installService({ configPath });
-            process.stdout.write(
-                `Installed sokuza autostart (${result.platform}).\n` +
-                `  Unit: ${result.unitPath}\n` +
-                result.followUp.map((l) => `  - ${l}\n`).join(''),
-            );
+        case 'service':
+            await runServiceCommand(args);
             return;
-        }
 
-        case 'uninstall-service': {
-            const result = await uninstallService();
-            process.stdout.write(
-                `Uninstalled sokuza autostart (${result.platform}).\n` +
-                result.followUp.map((l) => `  - ${l}\n`).join(''),
-            );
+        case 'update':
+            await runUpdate();
             return;
-        }
 
         default:
             process.stderr.write(`sokuza: unknown command "${args.command}"\n\n`);

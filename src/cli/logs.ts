@@ -55,7 +55,7 @@ function runLinux(opts: LogsOptions, lines: number): Promise<void> {
                 // that as a soft error with a hint, not a stack trace.
                 process.stderr.write(
                     `No journal entries for sokuza.service. Is the service running? ` +
-                    `Try \`sokuza install-service\` if you haven't set up autostart yet.\n`,
+                    `Try \`sokuza service enable\` if you haven't set up autostart yet.\n`,
                 );
                 resolve();
             } else {
@@ -74,7 +74,7 @@ async function runMacOS(opts: LogsOptions, lines: number): Promise<void> {
         process.stderr.write(
             `No logs found in ${logDir}.\n` +
             `macOS captures sokuza logs via launchd when the service is installed — ` +
-            `run \`sokuza install-service\` to start recording.\n`,
+            `run \`sokuza service enable\` to start recording.\n`,
         );
         return;
     }
