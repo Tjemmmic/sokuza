@@ -245,25 +245,127 @@ function ensureArray(val) {
     return val === '' ? [] : [val];
 }
 
+// ─── Auth ───────────────────────────────────────────────────────────────────
+// Bearer token gate for /api/*. Server generates the token and prints it on
+// first run (`sokuza token` reveals it again). We seed localStorage from the
+// ?t=<token> URL param when the user lands from the startup log, then strip
+// the param so the token isn't sitting in the tab title / history.
+const TOKEN_STORAGE_KEY = 'sokuza:dashboardToken';
+
+function tokenFromUrl() {
+    const qp = new URLSearchParams(window.location.search);
+    return qp.get('t');
+}
+
+function loadToken() {
+    const fromUrl = tokenFromUrl();
+    if (fromUrl) {
+        try { localStorage.setItem(TOKEN_STORAGE_KEY, fromUrl); } catch {}
+        const url = new URL(window.location.href);
+        url.searchParams.delete('t');
+        window.history.replaceState({}, '', url.pathname + url.hash);
+        return fromUrl;
+    }
+    try { return localStorage.getItem(TOKEN_STORAGE_KEY); } catch { return null; }
+}
+
+function saveToken(token) {
+    try { localStorage.setItem(TOKEN_STORAGE_KEY, token); } catch {}
+}
+
+function clearToken() {
+    try { localStorage.removeItem(TOKEN_STORAGE_KEY); } catch {}
+}
+
+let dashboardToken = loadToken();
+
+function authedFetch(url, init = {}) {
+    const headers = new Headers(init.headers || {});
+    if (dashboardToken) headers.set('Authorization', `Bearer ${dashboardToken}`);
+    return fetch(url, { ...init, headers });
+}
+
+async function handleAuthFailure(response) {
+    if (response.status !== 401) return false;
+    clearToken();
+    dashboardToken = null;
+    promptForToken();
+    return true;
+}
+
+function promptForToken() {
+    if (document.getElementById('sokuza-token-prompt')) return;
+    const overlay = document.createElement('div');
+    overlay.id = 'sokuza-token-prompt';
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(10,10,9,.92);z-index:9999;display:flex;align-items:center;justify-content:center;';
+    overlay.innerHTML = `
+        <div style="max-width:28rem;background:#1a1a18;border:1px solid #333;padding:1.75rem;">
+            <h2 style="margin:0 0 .5rem;font-size:1.2rem;color:#f5f5f0;">Dashboard token required</h2>
+            <p style="color:#b0b0a8;font-size:.9rem;margin-bottom:1rem;line-height:1.5;">
+                Paste the bearer token for this sokuza instance. Run
+                <code style="color:#e07b43;background:#222;padding:1px 4px;">sokuza token</code>
+                in a terminal to reveal it.
+            </p>
+            <input id="sokuza-token-input" type="password" placeholder="64-char hex token" autocomplete="off" autofocus
+                   style="width:100%;padding:.55rem .65rem;background:#0f0f0d;color:#f5f5f0;border:1px solid #333;font-family:ui-monospace,monospace;font-size:.85rem;margin-bottom:.75rem;" />
+            <div style="display:flex;gap:.5rem;justify-content:flex-end;">
+                <button id="sokuza-token-submit" style="padding:.5rem 1rem;background:#e07b43;color:#0a0a09;border:none;font-weight:500;cursor:pointer;">Unlock</button>
+            </div>
+            <p id="sokuza-token-error" style="color:#e0746a;font-size:.8rem;margin-top:.75rem;display:none;">Token rejected. Double-check and try again.</p>
+        </div>
+    `;
+    document.body.appendChild(overlay);
+
+    const input = overlay.querySelector('#sokuza-token-input');
+    const submit = overlay.querySelector('#sokuza-token-submit');
+    const error = overlay.querySelector('#sokuza-token-error');
+
+    const attempt = async () => {
+        const val = input.value.trim();
+        if (!val) return;
+        const probe = await fetch('/api/config', { headers: { Authorization: `Bearer ${val}` } });
+        if (probe.ok) {
+            saveToken(val);
+            // Reload so every initial-data fetch re-runs cleanly with the
+            // token attached, rather than patching the partially-initialised
+            // app state in place.
+            window.location.reload();
+        } else {
+            error.style.display = 'block';
+            input.select();
+        }
+    };
+    submit.addEventListener('click', attempt);
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') attempt(); });
+}
+
+// If we landed without a token, surface the prompt immediately so the
+// dashboard never renders a confused "everything is failing" state.
+if (!dashboardToken) promptForToken();
+
 // ─── API Layer ──────────────────────────────────────────────────────────────
 const api = {
     async get(p) {
-        const r = await fetch(p);
+        const r = await authedFetch(p);
+        if (r.status === 401) { await handleAuthFailure(r); throw new Error('unauthorized'); }
         if (!r.ok) throw new Error(`${r.status}`);
         return r.json();
     },
     async post(p, b) {
-        const r = await fetch(p, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(b) });
+        const r = await authedFetch(p, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(b) });
+        if (r.status === 401) { await handleAuthFailure(r); throw new Error('unauthorized'); }
         if (!r.ok) throw new Error(`${r.status}`);
         return r.json();
     },
     async put(p, b) {
-        const r = await fetch(p, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(b) });
+        const r = await authedFetch(p, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(b) });
+        if (r.status === 401) { await handleAuthFailure(r); throw new Error('unauthorized'); }
         if (!r.ok) throw new Error(`${r.status}`);
         return r.json();
     },
     async del(p) {
-        const r = await fetch(p, { method: 'DELETE' });
+        const r = await authedFetch(p, { method: 'DELETE' });
+        if (r.status === 401) { await handleAuthFailure(r); throw new Error('unauthorized'); }
         if (!r.ok) throw new Error(`${r.status}`);
         return r.json();
     },
@@ -3852,7 +3954,11 @@ function closeModal() {
 // ─── SSE ────────────────────────────────────────────────────────────────────
 function connectSSE() {
     if (eventSource) eventSource.close();
-    eventSource = new EventSource('/api/events/stream');
+    if (!dashboardToken) return; // Prompt is already up; connect retries when unlocked.
+    // EventSource can't set Authorization headers, so the auth gate accepts
+    // the token as a `?t=` query param as a second-class fallback.
+    const url = `/api/events/stream?t=${encodeURIComponent(dashboardToken)}`;
+    eventSource = new EventSource(url);
     eventSource.onmessage = (msg) => {
         try {
             const data = JSON.parse(msg.data);
