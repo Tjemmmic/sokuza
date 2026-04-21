@@ -91,34 +91,50 @@ export const DEFAULT_THRESHOLDS: Readonly<ApprovalThresholds> = {
 
 /**
  * Standardized review output format.
+ *
+ * We ask the model for **structured JSON**, not hand-formatted markdown.
+ * Renderer-side formatting means we don't depend on every AI model
+ * (GLM, Claude, GPT-4, etc.) correctly obeying a long list of markdown
+ * rules — some ignore heading levels, some add stray fences, some flatten
+ * lists. JSON is a target every modern model hits reliably.
+ *
+ * The action layer parses this JSON and calls \`renderReviewMarkdown()\`
+ * to produce the final GitHub comment. If parsing fails, the raw text
+ * is still posted with a warning so the user gets *something*.
  */
 export const STANDARD_OUTPUT_FORMAT = `
-For each issue found, output exactly this format:
+## Output format (strict JSON — no markdown, no prose before or after)
 
-\`\`\`
-{{PRIORITY_EMOJI}} {{PRIORITY_LEVEL}} — [Specific, descriptive title]
+Respond with a SINGLE JSON object matching the schema below. Do NOT wrap it in a code fence. Do NOT add explanatory text before or after. The FIRST character of your response MUST be \`{\` and the LAST must be \`}\`.
 
-**File:** \`path/to/file.ts:L42-L50\`
+Schema:
 
-**Problem:** [What is wrong and WHY it's a problem. Be concrete.]
+{
+  "summary": "1-3 sentence plain-text overview of what the PR does and your overall take. No markdown in this field.",
+  "issues": [
+    {
+      "priority": "P1" | "P2" | "P3",
+      "title": "Specific, descriptive one-line title. Plain text only.",
+      "file": "path/to/file.ts:L42-L50",
+      "problem": "What is wrong and WHY it's a problem. Concrete. Inline backticks for identifiers are OK.",
+      "fix": "Exact fix suggestion. You MAY include fenced code blocks inside this field when showing code — use \\\`\\\`\\\` as fence markers."
+    }
+  ],
+  "decision": "APPROVE" | "CHANGES_REQUESTED",
+  "justification": "Short paragraph explaining the decision. Plain text, max ~3 sentences."
+}
 
-**Fix:** [Exact suggestion — show code if possible]
+Decision rules (STRICT):
 
----
-\`\`\`
+- \`APPROVE\` — Zero P1s AND fewer than {{MAX_P2}} P2s. Ready to merge with at most minor follow-ups.
+- \`CHANGES_REQUESTED\` — ANY of:
+  - At least one P1 issue exists.
+  - {{MAX_P2}} or more P2 issues exist (cumulative risk warrants another pass).
+  - A P2 issue indicates missing tests for significant new logic.
 
-## Final Decision (REQUIRED — this determines the review status)
+If the PR is genuinely fine: return an empty \`issues\` array and \`"decision": "APPROVE"\`.
 
-Count your findings, then apply these rules STRICTLY:
-
-\`# ✅ APPROVE\` — Zero P1s AND fewer than {{MAX_P2}} P2s. The code is genuinely ready to merge with at most minor follow-ups.
-
-\`# ❌ CHANGES REQUESTED\` — ANY of these conditions:
-- Any P1 issue exists
-- {{MAX_P2}} or more P2 issues exist (even if no single one is critical, the cumulative risk means this PR needs another pass)
-- A P2 issue indicates missing tests for significant new logic
-
-After the decision, list a one-line summary of each issue for quick reference.
+Remember: JSON only. No leading commentary, no trailing commentary. First character \`{\`, last character \`}\`.
 `;
 
 /**
@@ -152,7 +168,7 @@ export const REVIEW_RULES = `
 - Do NOT approve just because no single issue is critical — cumulative risk matters.
 - If you're unsure whether something is a bug, investigate it (read the code, check callers) before dismissing it.
 - No \`Co-Authored-By\` or AI attribution in the output.
-- If genuinely no issues: output "No issues found." then \`# ✅ APPROVE\`
+- If genuinely no issues: return \`issues: []\` and \`decision: "APPROVE"\` with a one-sentence \`summary\` and \`justification\`.
 `;
 
 /**
@@ -206,13 +222,172 @@ export function determineDecision(
 
 /**
  * Parse decision from AI review response.
+ *
+ * Works with both the current JSON-based format and the older markdown-
+ * heading format — so a review posted before this migration is still
+ * parseable by any downstream tooling. Tries JSON first; falls back to
+ * the heading regex.
  */
 export function parseDecisionFromResponse(review: string): ReviewDecision | null {
-    if (review.includes('# ✅ APPROVE') || review.includes('# ✅ APPROVED')) {
+    const structured = parseStructuredReview(review);
+    if (structured) {
+        return structured.decision === 'CHANGES_REQUESTED'
+            ? ReviewDecision.CHANGES_REQUESTED
+            : ReviewDecision.APPROVE;
+    }
+
+    // Legacy markdown: match any heading level so minor drift doesn't change the outcome.
+    if (/^#{1,6}\s*✅\s*APPROVED?\b/m.test(review)) {
         return ReviewDecision.APPROVE;
     }
-    if (review.includes('# ❌ CHANGES REQUESTED')) {
+    if (/^#{1,6}\s*❌\s*CHANGES\s+REQUESTED\b/m.test(review)) {
         return ReviewDecision.CHANGES_REQUESTED;
     }
     return null;
+}
+
+// ─── Structured review (JSON in, markdown out) ──────────────────────────────
+
+/**
+ * Shape the model is asked to return (matches STANDARD_OUTPUT_FORMAT).
+ * Decision values are the raw JSON strings; the action layer maps them
+ * into \`ReviewDecision\` enum values if needed.
+ */
+export interface StructuredReview {
+    summary: string;
+    issues: Array<{
+        priority: ReviewPriority;
+        title: string;
+        file: string;
+        problem: string;
+        fix: string;
+    }>;
+    decision: 'APPROVE' | 'CHANGES_REQUESTED';
+    justification: string;
+}
+
+/**
+ * Extract and validate the structured review from the model's raw output.
+ *
+ * We accept a few forms because different models wrap JSON differently:
+ *  - bare JSON (preferred — matches the prompt)
+ *  - JSON inside a fenced code block (\`\`\`json … \`\`\`)
+ *  - JSON with leading/trailing prose (we slice between the first \`{\` and last \`}\`)
+ *
+ * Returns \`null\` when nothing parseable is found; callers should fall
+ * back to posting the raw text with a warning.
+ */
+export function parseStructuredReview(raw: string): StructuredReview | null {
+    const candidates: string[] = [];
+    const trimmed = raw.trim();
+    if (trimmed.startsWith('{')) candidates.push(trimmed);
+
+    // ```json … ``` fence
+    const fence = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
+    if (fence?.[1]) candidates.push(fence[1].trim());
+
+    // Broadest fallback: slice between first '{' and last '}'
+    const firstBrace = trimmed.indexOf('{');
+    const lastBrace = trimmed.lastIndexOf('}');
+    if (firstBrace >= 0 && lastBrace > firstBrace) {
+        candidates.push(trimmed.slice(firstBrace, lastBrace + 1));
+    }
+
+    for (const candidate of candidates) {
+        try {
+            const parsed = JSON.parse(candidate);
+            const validated = validateStructuredReview(parsed);
+            if (validated) return validated;
+        } catch { /* try next */ }
+    }
+    return null;
+}
+
+function validateStructuredReview(raw: unknown): StructuredReview | null {
+    if (!raw || typeof raw !== 'object') return null;
+    const obj = raw as Record<string, unknown>;
+
+    const summary = typeof obj.summary === 'string' ? obj.summary : '';
+    const decision = obj.decision === 'CHANGES_REQUESTED' ? 'CHANGES_REQUESTED' : 'APPROVE';
+    const justification = typeof obj.justification === 'string' ? obj.justification : '';
+    const rawIssues = Array.isArray(obj.issues) ? obj.issues : [];
+
+    const issues: StructuredReview['issues'] = [];
+    for (const rawIssue of rawIssues) {
+        if (!rawIssue || typeof rawIssue !== 'object') continue;
+        const i = rawIssue as Record<string, unknown>;
+        const priority = i.priority;
+        if (priority !== 'P1' && priority !== 'P2' && priority !== 'P3') continue;
+        issues.push({
+            priority: priority as ReviewPriority,
+            title: typeof i.title === 'string' ? i.title : '(no title)',
+            file: typeof i.file === 'string' ? i.file : '',
+            problem: typeof i.problem === 'string' ? i.problem : '',
+            fix: typeof i.fix === 'string' ? i.fix : '',
+        });
+    }
+
+    // A review is "valid" if it at least has a summary or a decision we
+    // recognize — we're forgiving of missing fields because the alternative
+    // is throwing away an otherwise-usable review.
+    if (!summary && issues.length === 0 && !justification) return null;
+
+    return { summary, issues, decision, justification };
+}
+
+/**
+ * Render a structured review into the markdown that gets posted as a
+ * GitHub PR comment. Deterministic: same input always produces the
+ * same output. Model obedience is no longer a factor here.
+ */
+export function renderReviewMarkdown(review: StructuredReview): string {
+    const lines: string[] = [];
+
+    if (review.summary) {
+        lines.push('### Summary', '', review.summary, '');
+    }
+
+    if (review.issues.length === 0) {
+        lines.push('### No Issues Found', '');
+    } else {
+        const counts = { P1: 0, P2: 0, P3: 0 };
+        for (const issue of review.issues) counts[issue.priority]++;
+        lines.push('### Issues Found');
+        lines.push(
+            `**${review.issues.length} total** — ` +
+            `${counts.P1} P1 (blocking) · ${counts.P2} P2 (should fix) · ${counts.P3} P3 (nice to have)`,
+        );
+        lines.push('');
+
+        for (const issue of review.issues) {
+            const emoji = PRIORITY_LEVELS[issue.priority].emoji;
+            lines.push(`#### ${emoji} ${issue.priority} — ${issue.title}`);
+            lines.push('');
+            if (issue.file) lines.push(`- **File:** \`${issue.file}\``);
+            if (issue.problem) lines.push(`- **Problem:** ${issue.problem}`);
+            if (issue.fix) lines.push(`- **Fix:** ${issue.fix}`);
+            lines.push('');
+            lines.push('---');
+            lines.push('');
+        }
+    }
+
+    const decisionHeading = review.decision === 'CHANGES_REQUESTED'
+        ? '### ❌ CHANGES REQUESTED'
+        : '### ✅ APPROVE';
+    lines.push(decisionHeading);
+    if (review.justification) {
+        lines.push('');
+        lines.push(review.justification);
+    }
+    lines.push('');
+
+    if (review.issues.length > 0) {
+        lines.push('### Quick Reference');
+        for (const issue of review.issues) {
+            lines.push(`- **${issue.priority}**: ${issue.title}`);
+        }
+    }
+
+    return lines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
 }

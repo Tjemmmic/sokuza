@@ -299,8 +299,9 @@ export class SokuzaEngine {
         return { ok: true, runId };
     }
 
-    /** Reload config from disk — workflows, AI, queue, integrations */
-    private async reloadConfig(): Promise<void> {
+    /** Reload config from disk — workflows, AI, queue, integrations.
+     *  Public so API handlers can trigger a refresh after writing the config. */
+    async reloadConfig(): Promise<void> {
         try {
             resetTemplateCache();
             const reloaded = await this.configStore.reloadAndNormalize();
@@ -478,6 +479,7 @@ export class SokuzaEngine {
             getQueue: () => this.queue,
             previewEvent: (event) => this.previewEvent(event),
             getWebhookDeliveries: (name?) => this.getWebhookDeliveries(name),
+            reloadConfig: () => this.reloadConfig(),
         });
 
         for (const integration of this.integrations.values()) {

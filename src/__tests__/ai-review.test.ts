@@ -33,7 +33,7 @@ const { mockCreate } = vi.hoisted(() => {
         content: [
             { type: 'text', text: 'This code looks good overall. Minor suggestion: add error handling for edge cases.' },
         ],
-        model: 'claude-sonnet-4-20250514',
+        model: 'claude-sonnet-4-6',
         usage: { input_tokens: 500, output_tokens: 100 },
     });
     return { mockCreate };

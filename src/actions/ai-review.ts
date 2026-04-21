@@ -1,6 +1,10 @@
 import type { ActionHandler } from '../core/types.js';
 import { truncateDiff, DEFAULT_MAX_CHARS } from '../core/diff-truncator.js';
-import { generateCodeReviewPrompt } from './review-templates.js';
+import {
+    generateCodeReviewPrompt,
+    parseStructuredReview,
+    renderReviewMarkdown,
+} from './review-templates.js';
 import { runCompletionWithFallback } from '../core/ai-providers.js';
 
 const DEFAULT_MAX_TOKENS = 4096;
@@ -154,11 +158,42 @@ export const aiReviewAction: ActionHandler = async (params, context) => {
         logger: context.logger,
     });
 
+    // The model is instructed to emit structured JSON; we render it into
+    // markdown here so the posted comment has consistent formatting
+    // regardless of how well the model obeyed its rules about headings,
+    // fences, etc. If parsing fails, fall back to the raw text so users
+    // still get *something* — but log loudly so we notice the drift.
+    const parsed = parseStructuredReview(completion.text);
+    let review: string;
+    if (parsed) {
+        review = renderReviewMarkdown(parsed);
+        context.logger.info(
+            {
+                provider: completion.provider,
+                model: completion.model,
+                issues: parsed.issues.length,
+                decision: parsed.decision,
+            },
+            'AI review rendered from structured JSON',
+        );
+    } else {
+        review = completion.text;
+        context.logger.warn(
+            {
+                provider: completion.provider,
+                model: completion.model,
+                preview: completion.text.slice(0, 300),
+            },
+            'AI review did not return valid JSON; posting raw text as fallback',
+        );
+    }
+
     return {
-        review: completion.text,
+        review,
         model: completion.model,
         provider: completion.provider,
         usage: completion.usage,
+        parsed: parsed ?? undefined,
         truncation: truncation.originalChars !== truncation.finalChars
             ? {
                 summary: truncation.summary,
