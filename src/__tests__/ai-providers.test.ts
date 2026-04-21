@@ -3,6 +3,8 @@ import {
     loadAIProviders,
     resolveProvider,
     buildCliArgs,
+    buildCliInvocation,
+    extractCliText,
 } from '../core/ai-providers.js';
 
 describe('loadAIProviders', () => {
@@ -171,20 +173,26 @@ describe('buildCliArgs', () => {
     it('builds opencode completion args (model flag, no system-prompt flag)', () => {
         const args = buildCliArgs('opencode', {
             mode: 'completion',
-            model: 'glm-4.6',
+            model: 'zai-coding-plan/glm-5.1',
             systemPrompt: 'ignored at arg level',
         });
-        expect(args).toEqual(['run', '--model', 'glm-4.6']);
+        // Always --format json because the default output is a TUI stream;
+        // extractCliText re-assembles the model's text from the JSONL events.
+        expect(args).toEqual(['run', '--model', 'zai-coding-plan/glm-5.1', '--format', 'json']);
     });
 
-    it('builds opencode agent args with --format json when requested', () => {
+    it('builds opencode agent args with --dangerously-skip-permissions', () => {
         const args = buildCliArgs('opencode', {
             mode: 'agent',
-            model: 'glm-4.6',
+            model: 'zai-coding-plan/glm-5.1',
             outputFormat: 'json',
             allowedTools: ['Read'],
         });
-        expect(args).toEqual(['run', '--model', 'glm-4.6', '--format', 'json']);
+        expect(args).toEqual([
+            'run', '--model', 'zai-coding-plan/glm-5.1',
+            '--format', 'json',
+            '--dangerously-skip-permissions',
+        ]);
     });
 
     it('parses fallback_providers from config', () => {
@@ -214,5 +222,56 @@ describe('buildCliArgs', () => {
     it('returns empty fallback chain when not configured', () => {
         const reg = loadAIProviders(undefined);
         expect(reg.fallbackChain).toEqual([]);
+    });
+});
+
+describe('buildCliInvocation', () => {
+    it('claude-code: prompt rides on stdin, not argv', () => {
+        const inv = buildCliInvocation(
+            'claude-code',
+            { mode: 'completion', model: 'sonnet', systemPrompt: 'sys' },
+            'user prompt here',
+        );
+        expect(inv.stdin).toBe('user prompt here');
+        expect(inv.args).not.toContain('user prompt here');
+    });
+
+    it('opencode: prompt is appended as a positional arg, stdin is null', () => {
+        const inv = buildCliInvocation(
+            'opencode',
+            { mode: 'completion', model: 'zai-coding-plan/glm-5.1', systemPrompt: 'sys' },
+            'user prompt here',
+        );
+        expect(inv.stdin).toBeNull();
+        expect(inv.args[inv.args.length - 1]).toBe('user prompt here');
+    });
+});
+
+describe('extractCliText', () => {
+    it('claude-code: returns trimmed raw output', () => {
+        expect(extractCliText('claude-code', '  hello world\n\n')).toBe('hello world');
+    });
+
+    it('opencode: concatenates all text event parts, ignores other events', () => {
+        const jsonl = [
+            '{"type":"step_start","timestamp":1,"part":{"id":"p1"}}',
+            '{"type":"text","timestamp":2,"part":{"id":"p2","type":"text","text":"hello "}}',
+            '{"type":"tool_use","timestamp":3,"part":{"id":"p3"}}',
+            '{"type":"text","timestamp":4,"part":{"id":"p4","type":"text","text":"world"}}',
+            '{"type":"step_finish","timestamp":5,"part":{"id":"p5"}}',
+        ].join('\n');
+        expect(extractCliText('opencode', jsonl)).toBe('hello world');
+    });
+
+    it('opencode: tolerates non-JSON prelude lines', () => {
+        const raw = [
+            'info: starting session abc',
+            '{"type":"text","part":{"type":"text","text":"PONG"}}',
+        ].join('\n');
+        expect(extractCliText('opencode', raw)).toBe('PONG');
+    });
+
+    it('opencode: empty result when stream has no text events', () => {
+        expect(extractCliText('opencode', '{"type":"step_start","part":{}}')).toBe('');
     });
 });

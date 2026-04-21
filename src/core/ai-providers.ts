@@ -27,6 +27,209 @@ import Anthropic from '@anthropic-ai/sdk';
 import { spawn } from 'node:child_process';
 import type { Logger } from 'pino';
 
+/**
+ * Quick non-blocking check that a CLI binary is on PATH.
+ * Used by the dashboard to show "installed" / "not installed" badges
+ * against CLI-kind providers (claude, opencode).
+ */
+export function isCliInstalled(command: string, timeoutMs = 2000): Promise<boolean> {
+    return new Promise<boolean>((resolveResult) => {
+        let settled = false;
+        const done = (ok: boolean) => {
+            if (settled) return;
+            settled = true;
+            resolveResult(ok);
+        };
+        try {
+            const child = spawn(command, ['--version'], { stdio: 'ignore' });
+            child.on('error', () => done(false));
+            child.on('close', (code) => done(code === 0));
+            setTimeout(() => {
+                try { child.kill(); } catch { /* ignore */ }
+                done(false);
+            }, timeoutMs);
+        } catch {
+            done(false);
+        }
+    });
+}
+
+/**
+ * Suggested model IDs per provider flavor. The dashboard uses these to
+ * populate a datalist so users pick a valid string by default, but any
+ * free-text value still works — new models ship all the time and we
+ * don't want a stale allow-list blocking legitimate use.
+ *
+ * Organized by *endpoint flavor* rather than strictly by `kind`, because
+ * the valid model-ID format depends on what's behind the endpoint:
+ *
+ *  - Anthropic direct  → "claude-sonnet-4-6", short aliases (sonnet/opus/haiku) work for CLI only
+ *  - ZAI's Anthropic-compatible endpoint → plain "glm-4.6", "glm-5.1"
+ *  - ZAI via opencode  → "zai-coding-plan/glm-4.6" (opencode's provider/model format)
+ *  - OpenAI direct     → "gpt-4o-mini", etc.
+ */
+
+// Current Claude generation (Claude 4.x family) — both CLI short aliases
+// and the full API model IDs are accepted by Claude Code; the API needs
+// the full ID form.
+const CLAUDE_API_MODELS = [
+    'claude-opus-4-7',
+    'claude-sonnet-4-6',
+    'claude-haiku-4-5',
+];
+
+const CLAUDE_CLI_MODELS = [
+    'sonnet',
+    'opus',
+    'haiku',
+    ...CLAUDE_API_MODELS,
+];
+
+// ZAI GLM models, plain form — used by ZAI's Anthropic-compatible endpoint
+// (`https://api.z.ai/api/anthropic`) and its OpenAI-compatible endpoint
+// (`https://api.z.ai/api/paas/v4`).
+const ZAI_GLM_MODELS = [
+    'glm-5.1',
+    'glm-5',
+    'glm-5-turbo',
+    'glm-4.7',
+    'glm-4.6',
+    'glm-4.5',
+];
+
+// Same GLM models under the opencode `zai-coding-plan/` provider prefix.
+// Used as the fallback when `opencode models` can't run (e.g. binary
+// missing). When the live probe succeeds its output supersedes this.
+const OPENCODE_ZAI_FALLBACK = ZAI_GLM_MODELS.map((m) => `zai-coding-plan/${m}`);
+
+const OPENAI_FALLBACK_MODELS = [
+    'gpt-4o-mini',
+    'gpt-4o',
+    'gpt-4-turbo',
+];
+
+function isZaiEndpoint(url: string | undefined): boolean {
+    return !!url && /(?:^|\.)z\.ai(?:$|\/|:)/.test(url);
+}
+
+/**
+ * Return model suggestions for a tentative provider configuration.
+ *
+ * For CLI providers we probe the binary when it's cheap and reliable
+ * (`opencode models`). For API providers we hit the OpenAI-standard
+ * `/v1/models` endpoint when credentials are supplied. Failures fall
+ * back to the hardcoded lists so the UI always shows something useful.
+ */
+export async function listModelSuggestions(
+    config: {
+        kind: ProviderKind;
+        command?: string;
+        base_url?: string;
+        api_key?: string;
+        /** For CLI providers — env bag (ANTHROPIC_BASE_URL etc.). Detects ZAI redirect. */
+        env?: Record<string, string>;
+    },
+): Promise<{ models: string[]; source: 'live' | 'hardcoded' | 'none'; note?: string }> {
+    if (config.kind === 'cli') {
+        if (config.command === 'opencode') {
+            const live = await runOpencodeModelsCommand().catch(() => null);
+            if (live && live.length > 0) {
+                return { models: live, source: 'live' };
+            }
+            return {
+                models: OPENCODE_ZAI_FALLBACK,
+                source: 'hardcoded',
+                note: 'Could not reach `opencode models` — install opencode and run `opencode providers` to configure credentials.',
+            };
+        }
+        if (config.command === 'claude' || !config.command) {
+            // If the CLI is being env-redirected at ZAI (e.g. the
+            // zai-glm-agent preset), the valid model IDs are the GLM ones
+            // served by ZAI's Anthropic-compatible endpoint — not Claude
+            // IDs. Detect that by looking at the provider env bag.
+            const envBaseUrl = config.env?.ANTHROPIC_BASE_URL;
+            const zaiRedirect = isZaiEndpoint(envBaseUrl);
+            return {
+                models: zaiRedirect ? ZAI_GLM_MODELS : CLAUDE_CLI_MODELS,
+                source: 'hardcoded',
+            };
+        }
+        return { models: [], source: 'none' };
+    }
+
+    if (config.kind === 'anthropic-api') {
+        return {
+            models: isZaiEndpoint(config.base_url) ? ZAI_GLM_MODELS : CLAUDE_API_MODELS,
+            source: 'hardcoded',
+        };
+    }
+
+    // openai-compatible-api — try live /v1/models if we have creds.
+    if (config.base_url && config.api_key) {
+        const live = await fetchOpenAICompatibleModels(config.base_url, config.api_key).catch(() => null);
+        if (live && live.length > 0) {
+            return { models: live, source: 'live' };
+        }
+    }
+    return {
+        models: isZaiEndpoint(config.base_url) ? ZAI_GLM_MODELS : OPENAI_FALLBACK_MODELS,
+        source: 'hardcoded',
+        note: config.base_url && config.api_key
+            ? 'Could not fetch /v1/models from the endpoint — using common fallbacks.'
+            : 'Enter base_url + api_key to load a live model list.',
+    };
+}
+
+function runOpencodeModelsCommand(): Promise<string[]> {
+    return new Promise((resolveResult, rejectResult) => {
+        const chunks: Buffer[] = [];
+        const stderrChunks: Buffer[] = [];
+        const child = spawn('opencode', ['models'], { stdio: ['ignore', 'pipe', 'pipe'] });
+        child.stdout.on('data', (c: Buffer) => chunks.push(c));
+        child.stderr.on('data', (c: Buffer) => stderrChunks.push(c));
+        child.on('error', rejectResult);
+        child.on('close', (code) => {
+            if (code !== 0) {
+                rejectResult(new Error(`opencode models exited ${code}: ${Buffer.concat(stderrChunks).toString('utf-8').slice(0, 200)}`));
+                return;
+            }
+            const lines = Buffer.concat(chunks)
+                .toString('utf-8')
+                .split('\n')
+                .map((l) => l.trim())
+                .filter((l) => l && l.includes('/'));
+            resolveResult(lines);
+        });
+        setTimeout(() => {
+            try { child.kill(); } catch { /* ignore */ }
+            rejectResult(new Error('opencode models timed out'));
+        }, 5000);
+    });
+}
+
+async function fetchOpenAICompatibleModels(baseUrl: string, apiKey: string): Promise<string[]> {
+    const url = `${baseUrl.replace(/\/$/, '')}/models`;
+    const res = await fetch(url, { headers: { Authorization: `Bearer ${apiKey}` } });
+    if (!res.ok) throw new Error(`${url} returned ${res.status}`);
+    const body = (await res.json()) as { data?: Array<{ id?: string }> };
+    const ids = (body.data ?? [])
+        .map((m) => m?.id)
+        .filter((id): id is string => typeof id === 'string' && id.length > 0);
+    return ids;
+}
+
+/**
+ * Mask a secret for UI display. `${VAR}` references are returned as-is
+ * so the UI can render them with an "env var" badge; plaintext values
+ * are truncated to `<prefix>…` so no full key ever reaches the browser.
+ */
+export function maskSecret(value: string | undefined): string {
+    if (!value) return '';
+    if (value.startsWith('${') && value.endsWith('}')) return value;
+    if (value.length <= 8) return '••••';
+    return `${value.slice(0, 6)}…${value.slice(-2)}`;
+}
+
 // ─── Types ──────────────────────────────────────────────────────────────────
 
 export type ProviderKind = 'anthropic-api' | 'openai-compatible-api' | 'cli';
@@ -93,7 +296,7 @@ export function loadAIProviders(
         name: 'anthropic',
         kind: 'anthropic-api',
         apiKey: process.env.ANTHROPIC_API_KEY,
-        defaultModel: 'claude-sonnet-4-20250514',
+        defaultModel: 'claude-sonnet-4-6',
     });
 
     // ─── Merge user-declared providers ──────────────────────────────────
@@ -427,35 +630,37 @@ async function runCliCompletion(
     provider: AIProvider,
     request: CompletionRequest & { model: string },
 ): Promise<CompletionResult> {
-    const args = buildCliArgs(provider.argsStyle!, {
-        mode: 'completion',
-        model: request.model,
-        systemPrompt: request.systemPrompt,
-    });
-
-    // For opencode the system prompt isn't a flag — embed it in the user
-    // message so review-template prompts still take effect.
-    const stdinPayload = provider.argsStyle === 'opencode'
+    const fullPrompt = provider.argsStyle === 'opencode'
+        // Opencode has no --system-prompt flag; embed instructions in the
+        // user message so review-template prompts still take effect.
         ? `System instructions:\n${request.systemPrompt}\n\n---\n\n${request.userMessage}`
         : request.userMessage;
 
+    const invocation = buildCliInvocation(provider.argsStyle!, {
+        mode: 'completion',
+        model: request.model,
+        systemPrompt: request.systemPrompt,
+    }, fullPrompt);
+
     const stdout = await spawnCli({
         command: provider.command!,
-        args,
+        args: invocation.args,
         env: provider.env,
         cwd: request.workdir,
-        stdin: stdinPayload,
+        stdin: invocation.stdin,
         logger: request.logger,
         providerName: provider.name,
     });
 
+    const text = extractCliText(provider.argsStyle!, stdout);
+
     request.logger.info(
-        { provider: provider.name, model: request.model, outputLength: stdout.length },
+        { provider: provider.name, model: request.model, outputLength: text.length },
         'AI completion done (cli)',
     );
 
     return {
-        text: stdout.trim(),
+        text,
         model: request.model,
         provider: provider.name,
     };
@@ -509,32 +714,38 @@ export async function runAgent(
     }
 
     const outputFormat = request.outputFormat ?? 'text';
-    const args = buildCliArgs(provider.argsStyle!, {
+    const invocation = buildCliInvocation(provider.argsStyle!, {
         mode: 'agent',
         model,
         outputFormat,
         allowedTools: request.allowedTools ?? ['Read', 'Grep', 'Glob', 'LS'],
-    });
+    }, request.prompt);
 
     const stdout = await spawnCli({
         command: provider.command!,
-        args,
+        args: invocation.args,
         env: provider.env,
         cwd: request.workdir,
-        stdin: request.prompt,
+        stdin: invocation.stdin,
         logger: request.logger,
         providerName: provider.name,
     });
 
+    const text = extractCliText(provider.argsStyle!, stdout);
+
     request.logger.info(
-        { provider: provider.name, model, outputLength: stdout.length },
+        { provider: provider.name, model, outputLength: text.length },
         'AI agent done (cli)',
     );
 
     let parsedJson: unknown;
     if (outputFormat === 'json') {
+        // For claude-code we asked the CLI itself for JSON output, so
+        // `text` IS the JSON. For opencode we always run in JSONL event
+        // mode and extracted the model's text above — if the user asked
+        // for JSON, the model's text should itself be parseable JSON.
         try {
-            parsedJson = JSON.parse(stdout);
+            parsedJson = JSON.parse(text);
         } catch {
             request.logger.warn(
                 { provider: provider.name },
@@ -544,7 +755,7 @@ export async function runAgent(
     }
 
     return {
-        output: stdout.trim(),
+        output: text.trim(),
         parsedJson,
         model,
         provider: provider.name,
@@ -569,8 +780,46 @@ interface AgentArgsInput {
 type CliArgsInput = CompletionArgsInput | AgentArgsInput;
 
 /**
- * Build argv for the given CLI style. Exported so unit tests can verify
- * the argument layout without spawning real processes.
+ * Full CLI invocation: argv plus whatever should go to stdin (or `null`
+ * when the prompt rides as a positional arg instead). Callers use this
+ * to spawn the process with both bits lined up correctly.
+ *
+ * Exported so unit tests can verify the invocation without spawning
+ * real processes.
+ */
+export interface CliInvocation {
+    args: string[];
+    /** Payload to pipe to stdin, or null when the prompt is in argv. */
+    stdin: string | null;
+}
+
+export function buildCliInvocation(
+    style: ArgsStyle,
+    input: CliArgsInput,
+    prompt: string,
+): CliInvocation {
+    switch (style) {
+        case 'claude-code':
+            // Claude Code reads the user message from stdin regardless of
+            // completion vs agent mode — no arg-size concerns.
+            return { args: buildClaudeCodeArgs(input), stdin: prompt };
+        case 'opencode': {
+            // Opencode `run` takes the message as a positional argument;
+            // stdin is ignored. Large diffs are already truncated to
+            // ~100KB by DEFAULT_MAX_CHARS so ARG_MAX (typically 2MB) is
+            // not a concern.
+            const args = buildOpencodeArgs(input);
+            args.push(prompt);
+            return { args, stdin: null };
+        }
+    }
+}
+
+/**
+ * Legacy entry point retained so the existing unit tests in
+ * `ai-providers.test.ts` keep passing without modification. New callers
+ * should use `buildCliInvocation` since it also handles stdin vs positional
+ * prompt delivery, which differs per CLI.
  */
 export function buildCliArgs(style: ArgsStyle, input: CliArgsInput): string[] {
     switch (style) {
@@ -603,22 +852,60 @@ function buildClaudeCodeArgs(input: CliArgsInput): string[] {
 }
 
 /**
- * Opencode `run` subcommand. Opencode reads the prompt from stdin when no
- * positional argument is given. The `-m/--model` flag selects the model;
- * the exact model string is provider-configured (e.g. "glm-4.6", "anthropic/claude-sonnet-4").
+ * Opencode `run` subcommand.
  *
- * Note: opencode does not have a first-class `--system-prompt` flag
- * equivalent; we embed the system prompt into the user message in
- * `runCliCompletion`. Tool allowlisting also differs from Claude Code;
- * we do not pass an explicit allowlist and rely on opencode's own
- * config/permissions model.
+ * - Prompt is a positional arg (caller appends it in `buildCliInvocation`).
+ * - `-m provider/model` is required (e.g. `zai-coding-plan/glm-5.1`). The
+ *   provider name comes from opencode's own `opencode providers` config,
+ *   not from sokuza.
+ * - We always use `--format json` because opencode's default "pretty"
+ *   output writes the whole TUI experience (headers, ANSI) to stdout,
+ *   which is unusable for programmatic capture. `extractCliText`
+ *   re-assembles the model's text from the JSONL event stream.
+ * - `--dangerously-skip-permissions` is required for non-interactive
+ *   tool use in agent mode; otherwise opencode blocks on permission
+ *   prompts it can't render without a TTY.
  */
 function buildOpencodeArgs(input: CliArgsInput): string[] {
-    const args = ['run', '--model', input.model];
-    if (input.mode === 'agent' && input.outputFormat === 'json') {
-        args.push('--format', 'json');
+    const args = ['run', '--model', input.model, '--format', 'json'];
+    if (input.mode === 'agent') {
+        args.push('--dangerously-skip-permissions');
     }
     return args;
+}
+
+/**
+ * Turn raw CLI stdout into the model's plain-text response.
+ *
+ * - Claude Code's `--output-format text` already gives us the answer
+ *   verbatim — we just trim it.
+ * - Opencode emits JSONL events: `step_start`, `text`, `tool_use`,
+ *   `step_finish`, etc. The model's reply is the concatenation of all
+ *   `{type: "text"}` event parts. Non-JSON lines are ignored so any
+ *   stray log lines don't poison the output.
+ */
+export function extractCliText(style: ArgsStyle, raw: string): string {
+    if (style === 'claude-code') {
+        return raw.trim();
+    }
+    // opencode
+    const parts: string[] = [];
+    for (const line of raw.split('\n')) {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith('{')) continue;
+        try {
+            const evt = JSON.parse(trimmed) as Record<string, unknown>;
+            if (evt.type === 'text') {
+                const part = evt.part as { text?: unknown } | undefined;
+                if (part && typeof part.text === 'string') {
+                    parts.push(part.text);
+                }
+            }
+        } catch {
+            // Not JSON — ignore (could be a prelude log line).
+        }
+    }
+    return parts.join('').trim();
 }
 
 // ─── Subprocess helper ──────────────────────────────────────────────────────
@@ -628,7 +915,8 @@ interface SpawnCliOptions {
     args: string[];
     env?: Record<string, string>;
     cwd?: string;
-    stdin: string;
+    /** Payload for stdin. `null` closes stdin without writing (prompt rides in argv). */
+    stdin: string | null;
     logger: Logger;
     providerName: string;
 }
@@ -706,11 +994,12 @@ function spawnCli(opts: SpawnCliOptions): Promise<string> {
             resolve(stdout);
         });
 
-        // Write payload via stdin (no arg size limit, no escaping headaches).
         child.stdin.on('error', (err) => {
             logger.debug({ provider: providerName, err: err.message }, 'stdin write error (child may have exited early)');
         });
-        child.stdin.write(stdin);
+        if (stdin !== null) {
+            child.stdin.write(stdin);
+        }
         child.stdin.end();
     });
 }

@@ -661,17 +661,30 @@ async function renderMyPrs(el) {
 // Run a specific workflow against a PR
 window.runWorkflowForPr = async function (workflowName, owner, repo, prNumber) {
     const btn = event?.target;
-    if (btn) { btn.disabled = true; const orig = btn.textContent; btn.textContent = '⏳'; }
+    if (btn) { btn.disabled = true; btn.textContent = '⏳'; }
     try {
-        const result = await api.post(`/api/workflows/${encodeURIComponent(workflowName)}/run`, {
-            inputs: {
-                pull_request: { number: prNumber },
-                owner,
-                repo: `${owner}/${repo}`,
-                repoName: repo,
-                prNumber,
-            },
-        });
+        // The engine's input-enrichment (engine.ts runWorkflowByName) looks
+        // up `inputs[<def.name>]` where <def.name> comes from the workflow's
+        // own `inputs:` block, then synthesizes payload.pull_request and
+        // metadata.repo from the selection. So we need to figure out what
+        // that input is actually called for this specific workflow —
+        // hardcoding "pull_request" (like this button used to) didn't
+        // match the typical "pr" input name and enrichment silently
+        // skipped, leaving github-clone-repo with no repo to clone.
+        const wf = workflows.find(w => w.name === workflowName);
+        const prInputName = wf?.inputs?.find(i => i.type === 'github-pr')?.name;
+        const selection = {
+            number: prNumber,
+            repo: `${owner}/${repo}`,
+        };
+        const inputs = prInputName
+            ? { [prInputName]: selection }
+            // No github-pr input defined — fall back to the flat shape so
+            // legacy/custom workflows that read event.payload.inputs.* keep
+            // working.
+            : { pull_request: { number: prNumber }, owner, repo: `${owner}/${repo}`, repoName: repo, prNumber };
+
+        const result = await api.post(`/api/workflows/${encodeURIComponent(workflowName)}/run`, { inputs });
         if (result.error) {
             toast(result.error, 'error');
         } else {
@@ -897,19 +910,29 @@ window.runIssueAction = async function (actionId, owner, repo, issueNumber) {
     }
 };
 
+function buildIssueInputs(workflowName, owner, repo, issueNumber) {
+    // Mirror the engine's input-enrichment rules: it unpacks
+    // inputs[<def.name>] of type github-issue into payload.issue +
+    // metadata.repo. Look up the right field name on this specific
+    // workflow — hardcoding "issue" works for most but not all configs.
+    const wf = workflows.find(w => w.name === workflowName);
+    const issueInputName = wf?.inputs?.find(i => i.type === 'github-issue')?.name;
+    const selection = {
+        number: issueNumber,
+        repo: `${owner}/${repo}`,
+    };
+    return issueInputName
+        ? { [issueInputName]: selection }
+        : { issue: { number: issueNumber }, owner, repo: `${owner}/${repo}`, repoName: repo, issueNumber };
+}
+
 // Run a deck-sourced workflow against an issue
 window.runIssueWorkflow = async function (workflowName, owner, repo, issueNumber) {
     const btn = event?.target;
     if (btn) { btn.disabled = true; btn.textContent = '⏳'; }
     try {
         const result = await api.post(`/api/workflows/${encodeURIComponent(workflowName)}/run`, {
-            inputs: {
-                issue: { number: issueNumber },
-                owner,
-                repo: `${owner}/${repo}`,
-                repoName: repo,
-                issueNumber,
-            },
+            inputs: buildIssueInputs(workflowName, owner, repo, issueNumber),
         });
         if (result.error) {
             toast(result.error, 'error');
@@ -983,13 +1006,7 @@ window.runSelectedIssueWorkflow = async function (owner, repo, issueNumber) {
 
     try {
         const result = await api.post(`/api/workflows/${encodeURIComponent(workflowName)}/run`, {
-            inputs: {
-                issue: { number: issueNumber },
-                owner,
-                repo: `${owner}/${repo}`,
-                repoName: repo,
-                issueNumber,
-            },
+            inputs: buildIssueInputs(workflowName, owner, repo, issueNumber),
         });
         if (result.error) {
             toast(result.error, 'error');
@@ -3541,12 +3558,16 @@ window.previewLibraryItem = async function (itemId) {
 // INTEGRATIONS
 // ═════════════════════════════════════════════════════════════════════════════
 async function renderIntegrations(el) {
-    const [intData, cfgData] = await Promise.all([api.get('/api/integrations'), api.get('/api/config')]);
+    const [intData, cfgData, aiData, cliData] = await Promise.all([
+        api.get('/api/integrations'),
+        api.get('/api/config'),
+        api.get('/api/ai/providers').catch(() => ({ providers: [], default_provider: null })),
+        api.get('/api/ai/cli-status').catch(() => ({ claude: false, opencode: false })),
+    ]);
     integrations = intData.integrations || {};
-    const config = cfgData.config || {};
-    const aiConfig = config.ai || {};
-    const providers = aiConfig.providers || {};
-    const defaultProvider = aiConfig.default_provider || '';
+    const aiProviders = Array.isArray(aiData.providers) ? aiData.providers : [];
+    const defaultProvider = aiData.default_provider || '';
+    const cliStatus = cliData || { claude: false, opencode: false };
 
     const defs = [
         {
@@ -3632,38 +3653,435 @@ async function renderIntegrations(el) {
         </div>
 
         <div style="margin-top:32px">
-            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:12px">
                 <div>
                     <h2 style="font-size:18px;font-weight:600">AI Providers</h2>
-                    <p style="font-size:13px;color:var(--text-secondary);margin-top:4px">Configured LLM providers for workflow actions${defaultProvider ? ` — default: <strong>${esc(defaultProvider)}</strong>` : ''}</p>
+                    <p style="font-size:13px;color:var(--text-secondary);margin-top:4px">Pick which model powers your AI actions. Keys are stored in <code>~/.sokuza/config.yaml</code>.</p>
                 </div>
-                <button class="btn btn-primary btn-sm" onclick="openAiTestModal()">🧪 Test Provider</button>
+                <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+                    ${aiProviders.length > 0 ? `
+                    <label style="font-size:12px;color:var(--text-secondary)">Default:</label>
+                    <select class="form-input" id="ai-default-select" style="width:auto;min-width:160px;padding:6px 10px;font-size:13px" onchange="setDefaultProvider(this.value)">
+                        ${aiProviders.map(p => `<option value="${esc(p.name)}" ${p.name === defaultProvider ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}
+                    </select>` : ''}
+                    <button class="btn btn-primary btn-sm" onclick="openAiProviderAdd()">+ Add Provider</button>
+                    <button class="btn btn-ghost btn-sm" onclick="openAiTestModal()">🧪 Test</button>
+                </div>
             </div>
             <div class="card-grid card-grid-3">
-                ${Object.entries(providers).length > 0 ? Object.entries(providers).map(([name, p]) => {
-                    const cfg = p || {};
-                    const isDefault = name === defaultProvider;
-                    const kindLabels = { 'anthropic-api': 'Anthropic API', 'cli': 'CLI' };
-                    const hasKey = cfg.api_key && cfg.api_key !== '${' + (cfg.api_key || '').replace(/\$\{([^}]+)\}/, '$1') + '}';
-                    const maskedKey = cfg.api_key ? (cfg.api_key.startsWith('${') ? cfg.api_key : cfg.api_key.slice(0, 8) + '...') : '';
-                    return `<div class="card" style="flex-direction:column;gap:8px">
-                        <div style="display:flex;align-items:center;gap:8px">
-                            <strong style="font-size:14px">${esc(name)}</strong>
-                            ${isDefault ? '<span class="badge badge-success" style="font-size:10px">Default</span>' : ''}
-                        </div>
-                        <div style="font-size:12px;color:var(--text-secondary)">
-                            <div>Kind: <code>${esc(kindLabels[cfg.kind] || cfg.kind || '—')}</code></div>
-                            ${cfg.default_model ? `<div>Model: <code>${esc(cfg.default_model)}</code></div>` : ''}
-                            ${cfg.command ? `<div>Command: <code>${esc(cfg.command)}</code></div>` : ''}
-                            ${cfg.base_url ? `<div>Base URL: <code style="font-size:11px">${esc(cfg.base_url)}</code></div>` : ''}
-                            ${maskedKey ? `<div>API Key: <code style="font-size:11px">${esc(maskedKey)}</code></div>` : ''}
-                        </div>
-                    </div>`;
-                }).join('') : '<div class="empty-state" style="grid-column:1/-1"><div class="empty-icon">🤖</div><p class="empty-text">No AI providers configured</p><p style="font-size:12px;color:var(--text-muted)">Add providers in your sokuza.config.yaml under <code>ai.providers</code></p></div>'}
+                ${aiProviders.length > 0 ? aiProviders.map(p => renderProviderCard(p, cliStatus)).join('') : `
+                    <div class="empty-state" style="grid-column:1/-1">
+                        <div class="empty-icon">🤖</div>
+                        <p class="empty-text">No AI providers configured</p>
+                        <p style="font-size:12px;color:var(--text-muted);margin-top:6px">Click <strong>Add Provider</strong> to set one up — ZAI GLM, Anthropic, Claude Code, Opencode, or custom.</p>
+                    </div>`}
             </div>
         </div>
     `;
 }
+
+// ─── AI Provider cards & CRUD modal ────────────────────────────────────────
+
+const PROVIDER_PRESETS = [
+    {
+        id: 'anthropic', label: 'Anthropic', icon: '🟣',
+        desc: 'Official Anthropic API (Claude models)',
+        entry: { name: 'anthropic', kind: 'anthropic-api', default_model: 'claude-sonnet-4-6' },
+        needsKey: true,
+    },
+    {
+        id: 'zai-glm', label: 'ZAI GLM (API)', icon: '🅾',
+        desc: 'ZAI GLM via its Anthropic-compatible API — works with the ZAI Coding Plan.',
+        entry: {
+            name: 'zai-glm', kind: 'anthropic-api',
+            base_url: 'https://api.z.ai/api/anthropic',
+            default_model: 'glm-5.1',
+        },
+        needsKey: true,
+    },
+    {
+        id: 'zai-glm-agent', label: 'ZAI GLM (via Claude Code)', icon: '🅾',
+        desc: 'Route Claude Code CLI through ZAI GLM — enables agentic workflows',
+        entry: {
+            name: 'zai-glm-agent', kind: 'cli', command: 'claude', args_style: 'claude-code',
+            default_model: 'glm-5.1',
+        },
+        needsKey: true, envKey: 'ANTHROPIC_AUTH_TOKEN',
+        envExtra: { ANTHROPIC_BASE_URL: 'https://api.z.ai/api/anthropic' },
+    },
+    {
+        id: 'openai', label: 'OpenAI / Compatible', icon: '🟢',
+        desc: 'OpenAI, OpenRouter, Groq, Ollama, LM Studio — any /v1/chat/completions endpoint. Requires an API key for that service.',
+        entry: {
+            name: 'openai', kind: 'openai-compatible-api',
+            base_url: 'https://api.openai.com/v1',
+            default_model: 'gpt-4o-mini',
+        },
+        needsKey: true, editableBaseUrl: true,
+    },
+    {
+        id: 'claude-code', label: 'Claude Code CLI', icon: '🟨',
+        desc: 'Uses the `claude` CLI on your PATH (no API key needed)',
+        entry: { name: 'claude-code', kind: 'cli', command: 'claude', args_style: 'claude-code', default_model: 'sonnet' },
+        needsKey: false,
+    },
+    {
+        id: 'opencode', label: 'Opencode CLI', icon: '📡',
+        desc: 'Opencode binary — model must be "provider/model" (e.g. zai-coding-plan/glm-5.1). Configure credentials with `opencode providers`.',
+        entry: { name: 'opencode', kind: 'cli', command: 'opencode', args_style: 'opencode', default_model: 'zai-coding-plan/glm-5.1' },
+        needsKey: false,
+    },
+];
+
+function providerKindLabel(kind) {
+    return ({
+        'anthropic-api': 'Anthropic API',
+        'openai-compatible-api': 'OpenAI-compatible API',
+        'cli': 'CLI',
+    })[kind] || kind || '—';
+}
+
+function renderProviderCard(p, cliStatus) {
+    const isDefault = false; // visual marker only; real default is on the dropdown
+    const keyBadge = p.kind === 'cli' ? '' :
+        p.key_status === 'plaintext' ? '<span class="badge badge-success" style="font-size:10px">Key set</span>' :
+        p.key_status === 'env-var' ? '<span class="badge" style="font-size:10px;background:rgba(99,102,241,0.15);color:var(--accent-hover)">env var</span>' :
+        '<span class="badge badge-warning" style="font-size:10px">No key</span>';
+    const cliBadge = p.kind === 'cli'
+        ? (p.cli_installed
+            ? `<span class="badge badge-success" style="font-size:10px">${esc(p.command)} installed</span>`
+            : `<span class="badge badge-warning" style="font-size:10px">${esc(p.command)} not found</span>`)
+        : '';
+    const builtinNote = p.is_builtin ? '<span class="badge" style="font-size:10px;background:rgba(148,163,184,0.15);color:var(--text-secondary)">built-in</span>' : '';
+
+    return `<div class="card" style="flex-direction:column;gap:8px;align-items:stretch">
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+            <strong style="font-size:14px">${esc(p.name)}</strong>
+            ${builtinNote}
+            ${keyBadge}
+            ${cliBadge}
+        </div>
+        <div style="font-size:12px;color:var(--text-secondary)">
+            <div>Kind: <code>${esc(providerKindLabel(p.kind))}</code></div>
+            ${p.default_model ? `<div>Model: <code>${esc(p.default_model)}</code></div>` : ''}
+            ${p.command ? `<div>Command: <code>${esc(p.command)}</code></div>` : ''}
+            ${p.base_url ? `<div>Base URL: <code style="font-size:11px">${esc(p.base_url)}</code></div>` : ''}
+            ${p.api_key_masked ? `<div>Key: <code style="font-size:11px">${esc(p.api_key_masked)}</code></div>` : ''}
+        </div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:4px">
+            <button class="btn btn-ghost btn-sm" onclick="openAiProviderEdit('${esc(p.name)}')">Edit</button>
+            <button class="btn btn-ghost btn-sm" onclick="testOneProvider('${esc(p.name)}')">Test</button>
+            ${p.is_builtin ? '' : `<button class="btn btn-ghost btn-sm" style="color:#ef4444" onclick="deleteAiProvider('${esc(p.name)}')">Delete</button>`}
+        </div>
+    </div>`;
+}
+
+window.setDefaultProvider = async function (name) {
+    try {
+        await api.post('/api/ai/default', { provider: name });
+        toast(`Default provider set to "${name}"`);
+        if (currentPage === 'integrations') await renderIntegrations(document.getElementById('content'));
+    } catch (err) {
+        toast('Failed to set default: ' + (err.message || 'Unknown error'), 'error');
+    }
+};
+
+window.deleteAiProvider = async function (name) {
+    if (!confirm(`Delete provider "${name}"? This cannot be undone.`)) return;
+    try {
+        await api.del('/api/ai/providers/' + encodeURIComponent(name));
+        toast(`Provider "${name}" deleted`);
+        if (currentPage === 'integrations') await renderIntegrations(document.getElementById('content'));
+    } catch (err) {
+        toast('Failed to delete: ' + (err.message || 'Unknown error'), 'error');
+    }
+};
+
+window.testOneProvider = async function (name) {
+    openModal('Test "' + name + '"', `
+        <div class="form-group">
+            <label class="form-label">Prompt</label>
+            <input type="text" class="form-input" id="ai-test-prompt" value="Reply with exactly: OK">
+            <input type="hidden" id="ai-test-provider" value="${esc(name)}">
+        </div>
+        <div id="ai-test-result" style="margin-top:12px"></div>
+    `, `
+        <button class="btn btn-ghost" onclick="closeModal()">Close</button>
+        <button class="btn btn-primary" id="ai-test-run-btn" onclick="runAiTest()">Run Test</button>
+    `);
+};
+
+window.openAiProviderAdd = function () {
+    openAiProviderModal(null);
+};
+
+window.openAiProviderEdit = async function (name) {
+    try {
+        const data = await api.get('/api/ai/providers');
+        const provider = (data.providers || []).find(p => p.name === name);
+        if (!provider) { toast('Provider not found', 'error'); return; }
+        openAiProviderModal(provider);
+    } catch (err) {
+        toast('Failed to load provider: ' + (err.message || 'Unknown error'), 'error');
+    }
+};
+
+function openAiProviderModal(existing) {
+    const isEdit = !!existing;
+    const presets = PROVIDER_PRESETS;
+    const presetCards = isEdit ? '' : `
+        <div class="panel" style="margin-bottom:16px">
+            <div class="panel-header"><span class="panel-title">Quick start</span></div>
+            <div class="panel-body">
+                <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px">
+                    ${presets.map(p => `
+                        <button type="button" class="card" style="text-align:left;padding:10px;cursor:pointer;border:1px solid var(--border-color);background:var(--bg-secondary);flex-direction:column;align-items:flex-start;gap:2px" onclick="applyProviderPreset('${p.id}')">
+                            <div style="display:flex;align-items:center;gap:8px">
+                                <span style="font-size:18px">${p.icon}</span>
+                                <strong style="font-size:13px">${esc(p.label)}</strong>
+                            </div>
+                            <div style="font-size:11px;color:var(--text-secondary)">${esc(p.desc)}</div>
+                        </button>
+                    `).join('')}
+                </div>
+                <div style="margin-top:10px;font-size:11px;color:var(--text-muted)">Presets pre-fill the form — you can still tweak any field before saving.</div>
+            </div>
+        </div>`;
+
+    const init = existing || { name: '', kind: 'anthropic-api' };
+
+    const existingName = existing?.name;
+    openModal(isEdit ? `Edit "${existing.name}"` : 'Add AI Provider', `
+        ${presetCards}
+        <div class="panel">
+            <div class="panel-header"><span class="panel-title">Provider details</span></div>
+            <div class="panel-body">
+                <div class="form-group">
+                    <label class="form-label">Name</label>
+                    <input type="text" class="form-input" id="ap-name" value="${esc(init.name || '')}" placeholder="e.g. zai-glm" ${isEdit ? 'disabled' : ''}>
+                    <div class="form-hint">Lowercase identifier used to reference this provider from workflows.</div>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Kind</label>
+                    <select class="form-input" id="ap-kind" onchange="onAiProviderKindChange()">
+                        <option value="anthropic-api" ${init.kind === 'anthropic-api' ? 'selected' : ''}>Anthropic API (Claude / ZAI / Moonshot)</option>
+                        <option value="openai-compatible-api" ${init.kind === 'openai-compatible-api' ? 'selected' : ''}>OpenAI-compatible API</option>
+                        <option value="cli" ${init.kind === 'cli' ? 'selected' : ''}>CLI (claude / opencode)</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Default model</label>
+                    <input type="text" class="form-input" id="ap-model" list="ap-model-list" value="${esc(init.default_model || '')}" placeholder="Start typing or pick from the list…">
+                    <datalist id="ap-model-list"></datalist>
+                    <div class="form-hint" id="ap-model-hint">Model suggestions load when you pick a kind, command, or base URL.</div>
+                </div>
+
+                <div id="ap-api-fields" style="display:none">
+                    <div class="form-group">
+                        <label class="form-label">Base URL <span style="color:var(--text-muted);font-weight:400">(optional for Anthropic, required for OpenAI-compatible)</span></label>
+                        <input type="text" class="form-input" id="ap-base-url" value="${esc(init.base_url || '')}" placeholder="https://api.openai.com/v1">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">API key</label>
+                        <input type="password" class="form-input" id="ap-api-key" value="" placeholder="${isEdit && init.key_status === 'plaintext' ? '(leave blank to keep existing key)' : 'sk-…'}">
+                        <div class="form-hint">Stored in <code>~/.sokuza/config.yaml</code> (chmod 0600). Prefix with <code>\${VAR}</code> to use an env var instead.</div>
+                    </div>
+                </div>
+
+                <div id="ap-cli-fields" style="display:none">
+                    <div class="form-group">
+                        <label class="form-label">Command</label>
+                        <input type="text" class="form-input" id="ap-command" value="${esc(init.command || 'claude')}" placeholder="claude">
+                        <div class="form-hint">Must be on PATH. Sokuza spawns this binary per AI action.</div>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Args style</label>
+                        <select class="form-input" id="ap-args-style">
+                            <option value="claude-code" ${init.args_style === 'claude-code' ? 'selected' : ''}>claude-code (--print --model …)</option>
+                            <option value="opencode" ${init.args_style === 'opencode' ? 'selected' : ''}>opencode (run --model …)</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Env vars <span style="color:var(--text-muted);font-weight:400">(optional)</span></label>
+                        <textarea class="form-input" id="ap-env" rows="3" placeholder="KEY=value\nANOTHER_KEY=value">${esc(serializeEnvBag(init.env))}</textarea>
+                        <div class="form-hint">One per line. Useful for redirecting Claude Code to ZAI GLM (<code>ANTHROPIC_BASE_URL</code> + <code>ANTHROPIC_AUTH_TOKEN</code>).</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    `, `
+        <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
+        <button class="btn btn-primary" onclick="submitAiProvider(${isEdit ? 'true' : 'false'})">${isEdit ? 'Save' : 'Add Provider'}</button>
+    `);
+
+    // onAiProviderKindChange() both toggles field visibility and attaches
+    // the input listeners that drive `refreshModelSuggestions`.
+    onAiProviderKindChange();
+
+    // Kick off an initial model-list fetch based on whatever values the
+    // modal opened with (preset defaults or the existing entry). For
+    // existing providers, pass the name so the backend can use the
+    // saved api_key without it bouncing through the browser.
+    refreshModelSuggestions(existingName);
+}
+
+let __modelRefreshToken = 0;
+async function refreshModelSuggestions(existingName) {
+    const token = ++__modelRefreshToken;
+    const datalist = document.getElementById('ap-model-list');
+    const hint = document.getElementById('ap-model-hint');
+    if (!datalist) return;
+
+    const kind = document.getElementById('ap-kind')?.value;
+    const command = document.getElementById('ap-command')?.value;
+    const baseUrl = document.getElementById('ap-base-url')?.value;
+    const apiKey = document.getElementById('ap-api-key')?.value;
+    const env = parseEnvBag(document.getElementById('ap-env')?.value || '');
+
+    if (!kind) return;
+
+    if (hint) hint.textContent = 'Loading model suggestions…';
+
+    const body = existingName
+        ? { name: existingName }
+        : {
+            kind, command,
+            base_url: baseUrl,
+            api_key: apiKey || undefined,
+            env: Object.keys(env).length > 0 ? env : undefined,
+        };
+
+    try {
+        const res = await api.post('/api/ai/models', body);
+        if (token !== __modelRefreshToken) return; // stale response
+        const models = Array.isArray(res.models) ? res.models : [];
+        datalist.innerHTML = models.map(m => `<option value="${esc(m)}"></option>`).join('');
+        if (hint) {
+            if (res.source === 'live') {
+                hint.textContent = `${models.length} models loaded live from the provider.`;
+            } else if (res.source === 'hardcoded') {
+                hint.textContent = res.note || `Showing ${models.length} common model IDs. You can type any value.`;
+            } else {
+                hint.textContent = 'No suggestions — type any model ID that your provider accepts.';
+            }
+        }
+    } catch (err) {
+        if (token !== __modelRefreshToken) return;
+        if (hint) hint.textContent = 'Could not load model list — you can still type a custom value.';
+    }
+}
+
+function serializeEnvBag(env) {
+    if (!env || typeof env !== 'object') return '';
+    return Object.entries(env).map(([k, v]) => `${k}=${v}`).join('\n');
+}
+
+function parseEnvBag(raw) {
+    const out = {};
+    if (!raw) return out;
+    for (const line of raw.split('\n')) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith('#')) continue;
+        const eq = trimmed.indexOf('=');
+        if (eq <= 0) continue;
+        const k = trimmed.slice(0, eq).trim();
+        const v = trimmed.slice(eq + 1).trim();
+        if (k) out[k] = v;
+    }
+    return out;
+}
+
+window.onAiProviderKindChange = function () {
+    const kind = document.getElementById('ap-kind')?.value;
+    const apiBox = document.getElementById('ap-api-fields');
+    const cliBox = document.getElementById('ap-cli-fields');
+    if (!apiBox || !cliBox) return;
+    if (kind === 'cli') {
+        apiBox.style.display = 'none';
+        cliBox.style.display = 'block';
+    } else {
+        apiBox.style.display = 'block';
+        cliBox.style.display = 'none';
+    }
+    // Re-bind the inputs that just became visible so they refresh the
+    // model suggestions as the user types.
+    ['ap-kind', 'ap-command', 'ap-base-url', 'ap-env'].forEach(id => {
+        const el = document.getElementById(id);
+        if (!el || el.dataset.modelHookBound === '1') return;
+        const ev = el.tagName === 'SELECT' ? 'change' : 'input';
+        el.addEventListener(ev, () => refreshModelSuggestions(null));
+        el.dataset.modelHookBound = '1';
+    });
+};
+
+window.applyProviderPreset = function (presetId) {
+    const preset = PROVIDER_PRESETS.find(p => p.id === presetId);
+    if (!preset) return;
+    const e = preset.entry;
+    const set = (id, val) => { const el = document.getElementById(id); if (el && val !== undefined) el.value = val; };
+
+    set('ap-name', e.name);
+    set('ap-kind', e.kind);
+    set('ap-model', e.default_model || '');
+    onAiProviderKindChange();
+
+    if (e.kind === 'cli') {
+        set('ap-command', e.command || 'claude');
+        set('ap-args-style', e.args_style || 'claude-code');
+        if (preset.envExtra) {
+            set('ap-env', serializeEnvBag(preset.envExtra) +
+                (preset.envKey ? `\n${preset.envKey}=` : ''));
+        } else {
+            set('ap-env', '');
+        }
+    } else {
+        set('ap-base-url', e.base_url || '');
+        set('ap-api-key', '');
+    }
+
+    refreshModelSuggestions(null);
+    toast(`Preset "${preset.label}" applied — fill in your API key and click save.`);
+};
+
+window.submitAiProvider = async function (isEdit) {
+    const name = document.getElementById('ap-name')?.value.trim();
+    const kind = document.getElementById('ap-kind')?.value;
+    const model = document.getElementById('ap-model')?.value.trim();
+    if (!name) { toast('Name is required', 'error'); return; }
+    if (!kind) { toast('Kind is required', 'error'); return; }
+
+    const body = { name, kind };
+    if (model) body.default_model = model;
+
+    if (kind === 'cli') {
+        body.command = document.getElementById('ap-command')?.value.trim() || 'claude';
+        body.args_style = document.getElementById('ap-args-style')?.value || 'claude-code';
+        const envBag = parseEnvBag(document.getElementById('ap-env')?.value || '');
+        if (Object.keys(envBag).length > 0) body.env = envBag;
+    } else {
+        const baseUrl = document.getElementById('ap-base-url')?.value.trim();
+        if (baseUrl) body.base_url = baseUrl;
+        const apiKey = document.getElementById('ap-api-key')?.value;
+        if (apiKey) body.api_key = apiKey;
+    }
+
+    try {
+        if (isEdit) {
+            // Server preserves the existing api_key when the body omits one,
+            // so we just pass the field through only when the user actually
+            // typed a new value.
+            await api.put('/api/ai/providers/' + encodeURIComponent(name), body);
+            toast(`Provider "${name}" updated`);
+        } else {
+            await api.post('/api/ai/providers', body);
+            toast(`Provider "${name}" added`);
+        }
+        closeModal();
+        if (currentPage === 'integrations') await renderIntegrations(document.getElementById('content'));
+    } catch (err) {
+        toast('Failed to save: ' + (err.message || 'Unknown error'), 'error');
+    }
+};
 
 // ─── Integration Setup Modal ────────────────────────────────────────────────
 const integrationDefs = {

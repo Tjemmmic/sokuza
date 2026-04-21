@@ -29,6 +29,8 @@ interface ApiDeps {
     getQueue?: () => WorkflowQueue;
     previewEvent: (event: EventPayload) => { matched: string[]; unmatched: Array<{ name: string; reason: string }> };
     getWebhookDeliveries: (workflowName?: string) => WebhookDelivery[];
+    /** Force the engine to re-read the config from disk (workflows + AI + queue + integrations). */
+    reloadConfig: () => Promise<void>;
 }
 
 function sanitizeFileName(name: string): string {
@@ -696,6 +698,313 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
                 durationMs: Date.now() - start,
             };
         }
+    });
+
+    // ─── AI Provider CRUD ────────────────────────────────────────────────
+    //
+    // All mutations are performed via configStore.update so the config
+    // file is the source of truth; after any write we call reloadConfig()
+    // so the in-memory registry picks up the change immediately (no
+    // restart required).
+    //
+    // Secrets: api_key values that the dashboard sends in plaintext are
+    // written to the YAML as-is. The config file is chmod 0600 (see
+    // ConfigStore.atomicWrite) so keys stay owner-only. `${VAR}` env
+    // references are preserved verbatim — power users can still wire
+    // secrets through environment variables if they prefer.
+
+    /** Providers that ship built-in — cannot be deleted, only their settings edited. */
+    const BUILTIN_PROVIDERS = new Set(['claude-code', 'anthropic']);
+
+    function getAiSection(config: Record<string, unknown>): Record<string, unknown> {
+        const existing = config.ai;
+        if (existing && typeof existing === 'object') return existing as Record<string, unknown>;
+        const fresh = {};
+        config.ai = fresh;
+        return fresh;
+    }
+
+    function getAiProviders(config: Record<string, unknown>): Record<string, unknown> {
+        const ai = getAiSection(config);
+        const existing = ai.providers;
+        if (existing && typeof existing === 'object') return existing as Record<string, unknown>;
+        const fresh = {};
+        ai.providers = fresh;
+        return fresh;
+    }
+
+    /** Return the dashboard-safe JSON for one provider entry — masks secrets. */
+    async function maskProviderEntry(
+        name: string,
+        entry: Record<string, unknown>,
+    ): Promise<Record<string, unknown>> {
+        const { maskSecret, isCliInstalled } = await import('../core/ai-providers.js');
+        const apiKey = entry.api_key as string | undefined;
+        let keyStatus: 'plaintext' | 'env-var' | 'empty' = 'empty';
+        if (apiKey) {
+            keyStatus = apiKey.startsWith('${') && apiKey.endsWith('}') ? 'env-var' : 'plaintext';
+        }
+
+        let cliInstalled: boolean | undefined;
+        if (entry.kind === 'cli' && typeof entry.command === 'string') {
+            cliInstalled = await isCliInstalled(entry.command);
+        }
+
+        return {
+            name,
+            kind: entry.kind,
+            default_model: entry.default_model,
+            command: entry.command,
+            args_style: entry.args_style,
+            base_url: entry.base_url,
+            env: entry.env,
+            api_key_masked: maskSecret(apiKey),
+            key_status: keyStatus,
+            cli_installed: cliInstalled,
+            is_builtin: BUILTIN_PROVIDERS.has(name),
+        };
+    }
+
+    /**
+     * Validate a provider body from the dashboard. Returns a cleaned YAML
+     * entry (snake_case keys) or an Error.
+     */
+    function validateProviderBody(body: Record<string, unknown>): Record<string, unknown> | Error {
+        const kind = body.kind;
+        if (kind !== 'anthropic-api' && kind !== 'openai-compatible-api' && kind !== 'cli') {
+            return new Error('kind must be "anthropic-api", "openai-compatible-api", or "cli"');
+        }
+
+        const entry: Record<string, unknown> = { kind };
+        if (typeof body.default_model === 'string' && body.default_model.trim()) {
+            entry.default_model = body.default_model.trim();
+        }
+
+        if (kind === 'anthropic-api' || kind === 'openai-compatible-api') {
+            if (typeof body.api_key === 'string' && body.api_key.trim()) {
+                entry.api_key = body.api_key.trim();
+            }
+            if (typeof body.base_url === 'string' && body.base_url.trim()) {
+                entry.base_url = body.base_url.trim();
+            }
+            if (kind === 'openai-compatible-api' && !entry.base_url) {
+                return new Error('openai-compatible-api providers require base_url');
+            }
+        }
+
+        if (kind === 'cli') {
+            entry.command = (typeof body.command === 'string' && body.command.trim())
+                ? body.command.trim()
+                : 'claude';
+            const argsStyle = body.args_style;
+            if (argsStyle !== 'claude-code' && argsStyle !== 'opencode') {
+                return new Error('args_style must be "claude-code" or "opencode"');
+            }
+            entry.args_style = argsStyle;
+            if (body.env && typeof body.env === 'object' && !Array.isArray(body.env)) {
+                const envObj = body.env as Record<string, unknown>;
+                const cleanEnv: Record<string, string> = {};
+                for (const [k, v] of Object.entries(envObj)) {
+                    if (typeof v === 'string' && v.length > 0) cleanEnv[k] = v;
+                }
+                if (Object.keys(cleanEnv).length > 0) entry.env = cleanEnv;
+            }
+        }
+
+        return entry;
+    }
+
+    server.get('/api/ai/providers', async () => {
+        const config = await deps.configStore.read();
+        const providersRaw = (config.ai as Record<string, unknown> | undefined)?.providers;
+        const providers = providersRaw && typeof providersRaw === 'object'
+            ? providersRaw as Record<string, unknown>
+            : {};
+        const defaultProvider = (config.ai as Record<string, unknown> | undefined)?.default_provider as string | undefined;
+
+        const masked = await Promise.all(
+            Object.entries(providers).map(([name, entry]) =>
+                maskProviderEntry(name, (entry ?? {}) as Record<string, unknown>),
+            ),
+        );
+
+        return {
+            providers: masked,
+            default_provider: defaultProvider ?? null,
+        };
+    });
+
+    server.post('/api/ai/providers', async (request, reply) => {
+        const body = (request.body ?? {}) as Record<string, unknown>;
+        const name = typeof body.name === 'string' ? body.name.trim() : '';
+        if (!name || !/^[a-z0-9][a-z0-9_-]*$/i.test(name)) {
+            return reply.status(400).send({ error: 'name is required (letters, digits, underscore, dash)' });
+        }
+        const validated = validateProviderBody(body);
+        if (validated instanceof Error) {
+            return reply.status(400).send({ error: validated.message });
+        }
+
+        await deps.configStore.update((config) => {
+            const providers = getAiProviders(config);
+            if (providers[name]) {
+                throw new Error(`Provider "${name}" already exists — use PUT to update`);
+            }
+            providers[name] = validated;
+        }).catch((err: Error) => {
+            reply.status(409).send({ error: err.message });
+            throw err;
+        });
+
+        await deps.reloadConfig();
+        logger.info({ provider: name, kind: validated.kind }, 'AI provider added via dashboard');
+        return { ok: true, name };
+    });
+
+    server.put('/api/ai/providers/:name', async (request, reply) => {
+        const { name } = request.params as { name: string };
+        const body = (request.body ?? {}) as Record<string, unknown>;
+        const validated = validateProviderBody(body);
+        if (validated instanceof Error) {
+            return reply.status(400).send({ error: validated.message });
+        }
+
+        let existed = true;
+        await deps.configStore.update((config) => {
+            const providers = getAiProviders(config);
+            const prev = providers[name] as Record<string, unknown> | undefined;
+            if (!prev) {
+                existed = false;
+                return;
+            }
+            // Preserve the existing api_key when the client didn't send a new
+            // one (UI "edit without retyping the key" flow).
+            if (
+                (validated.kind === 'anthropic-api' || validated.kind === 'openai-compatible-api')
+                && !('api_key' in validated)
+                && typeof prev.api_key === 'string'
+            ) {
+                validated.api_key = prev.api_key;
+            }
+            providers[name] = validated;
+        });
+
+        if (!existed) {
+            return reply.status(404).send({ error: `Provider "${name}" not found` });
+        }
+
+        await deps.reloadConfig();
+        logger.info({ provider: name, kind: validated.kind }, 'AI provider updated via dashboard');
+        return { ok: true, name };
+    });
+
+    server.delete('/api/ai/providers/:name', async (request, reply) => {
+        const { name } = request.params as { name: string };
+        if (BUILTIN_PROVIDERS.has(name)) {
+            return reply.status(400).send({ error: `Built-in provider "${name}" cannot be deleted` });
+        }
+
+        let existed = true;
+        let wasDefault = false;
+        await deps.configStore.update((config) => {
+            const providers = getAiProviders(config);
+            if (!providers[name]) {
+                existed = false;
+                return;
+            }
+            delete providers[name];
+            const ai = getAiSection(config);
+            if (ai.default_provider === name) {
+                wasDefault = true;
+                delete ai.default_provider;
+            }
+        });
+
+        if (!existed) {
+            return reply.status(404).send({ error: `Provider "${name}" not found` });
+        }
+
+        await deps.reloadConfig();
+        logger.info({ provider: name, wasDefault }, 'AI provider deleted via dashboard');
+        return { ok: true, wasDefault };
+    });
+
+    server.post('/api/ai/default', async (request, reply) => {
+        const body = (request.body ?? {}) as { provider?: string };
+        const name = typeof body.provider === 'string' ? body.provider.trim() : '';
+        if (!name) {
+            return reply.status(400).send({ error: 'provider name is required' });
+        }
+
+        let found = true;
+        await deps.configStore.update((config) => {
+            const providers = getAiProviders(config);
+            const isBuiltin = BUILTIN_PROVIDERS.has(name);
+            if (!providers[name] && !isBuiltin) {
+                found = false;
+                return;
+            }
+            const ai = getAiSection(config);
+            ai.default_provider = name;
+        });
+
+        if (!found) {
+            return reply.status(404).send({ error: `Provider "${name}" not registered` });
+        }
+
+        await deps.reloadConfig();
+        logger.info({ provider: name }, 'AI default provider changed via dashboard');
+        return { ok: true, default_provider: name };
+    });
+
+    server.get('/api/ai/cli-status', async () => {
+        const { isCliInstalled } = await import('../core/ai-providers.js');
+        const [claude, opencode] = await Promise.all([
+            isCliInstalled('claude'),
+            isCliInstalled('opencode'),
+        ]);
+        return { claude, opencode };
+    });
+
+    server.post('/api/ai/models', async (request, reply) => {
+        const body = (request.body ?? {}) as {
+            kind?: string;
+            command?: string;
+            base_url?: string;
+            api_key?: string;
+            env?: Record<string, string>;
+            // For an existing provider, let the client pass its name instead
+            // of re-sending the api_key (so plaintext keys never bounce
+            // through the browser just to list models).
+            name?: string;
+        };
+
+        let kind = body.kind;
+        let command = body.command;
+        let baseUrl = body.base_url;
+        let apiKey = body.api_key;
+        let env = body.env;
+
+        if (body.name && !kind) {
+            const config = await deps.configStore.read();
+            const providers = (config.ai as Record<string, unknown> | undefined)?.providers as Record<string, unknown> | undefined;
+            const entry = providers?.[body.name] as Record<string, unknown> | undefined;
+            if (entry) {
+                kind = entry.kind as string;
+                command = entry.command as string | undefined;
+                baseUrl = entry.base_url as string | undefined;
+                apiKey = entry.api_key as string | undefined;
+                env = entry.env as Record<string, string> | undefined;
+            }
+        }
+
+        if (kind !== 'anthropic-api' && kind !== 'openai-compatible-api' && kind !== 'cli') {
+            return reply.status(400).send({ error: 'kind must be anthropic-api, openai-compatible-api, or cli' });
+        }
+
+        const { listModelSuggestions } = await import('../core/ai-providers.js');
+        const result = await listModelSuggestions({ kind, command, base_url: baseUrl, api_key: apiKey, env });
+        return result;
     });
 
     // ─── Queue ──────────────────────────────────────────────────────────
