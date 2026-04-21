@@ -9,7 +9,7 @@ process.stdout.on('error', (err) => {
 });
 
 import { VERSION } from './version.js';
-import { runStart } from './cli/start.js';
+import { runStart, homeConfigPath } from './cli/start.js';
 import { runInit } from './cli/init.js';
 import { runStatus } from './cli/status.js';
 import { runLogs } from './cli/logs.js';
@@ -28,6 +28,7 @@ interface ParsedArgs {
     lines?: number;
     rotate: boolean;
     json: boolean;
+    local: boolean;
     positional: string[];
 }
 
@@ -64,6 +65,7 @@ function parseArgs(argv: string[]): ParsedArgs {
     let lines: number | undefined;
     let rotate = false;
     let json = false;
+    let local = false;
     const positional: string[] = [];
 
     if (rest.length > 0 && KNOWN_COMMANDS.has(rest[0])) {
@@ -111,6 +113,8 @@ function parseArgs(argv: string[]): ParsedArgs {
             rotate = true;
         } else if (arg === '--json') {
             json = true;
+        } else if (arg === '--local') {
+            local = true;
         } else {
             positional.push(arg);
         }
@@ -120,7 +124,7 @@ function parseArgs(argv: string[]): ParsedArgs {
         configPath = positional[0];
     }
 
-    return { command, subcommand, configPath, port, force, follow, lines, rotate, json, positional };
+    return { command, subcommand, configPath, port, force, follow, lines, rotate, json, local, positional };
 }
 
 function printHelp(): void {
@@ -129,7 +133,7 @@ function printHelp(): void {
 Usage:
   sokuza [start] [--config PATH] [--port N]
                                    Start the engine (default)
-  sokuza init [--force]            Scaffold sokuza.config.yaml and .env
+  sokuza init [--local] [--force]  Scaffold config (default: ~/.sokuza/config.yaml; --local for CWD + .env)
   sokuza status                    Report locally-running instances
   sokuza logs [-f] [-n N]          Show platform-appropriate logs (-f to follow)
   sokuza token [--rotate] [--json] Print the dashboard bearer token
@@ -173,10 +177,13 @@ async function runServiceCommand(args: ParsedArgs): Promise<void> {
     switch (args.subcommand) {
         case 'enable':
         case 'install': {
+            // For the background service we prefer the home-dir config so
+            // autostart doesn't depend on which directory a user happened
+            // to be in when they enabled it.
             const configPath = resolve(
                 args.configPath
                 ?? process.env.SOKUZA_CONFIG
-                ?? 'sokuza.config.yaml',
+                ?? homeConfigPath(),
             );
             const result = await installService({ configPath });
             printServiceResult('Installed', result);
@@ -244,7 +251,7 @@ async function main(): Promise<void> {
             return;
 
         case 'init':
-            await runInit({ force: args.force });
+            await runInit({ force: args.force, local: args.local });
             return;
 
         case 'status':

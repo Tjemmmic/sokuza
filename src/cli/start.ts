@@ -1,7 +1,8 @@
 import 'dotenv/config';
-import { copyFile } from 'node:fs/promises';
+import { copyFile, mkdir, chmod } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { homedir } from 'node:os';
+import { resolve, join } from 'node:path';
 
 import { loadConfig } from '../core/config.js';
 import { SokuzaEngine } from '../core/engine.js';
@@ -24,6 +25,13 @@ const DEFAULT_CONFIG_NAME = 'sokuza.config.yaml';
 const DEFAULT_ENV_NAME = '.env';
 const CONFIG_EXAMPLE = 'sokuza.config.example.yaml';
 const ENV_EXAMPLE = 'sokuza.env.example';
+const HOME_CONFIG_DIR = join(homedir(), '.sokuza');
+const HOME_CONFIG_NAME = 'config.yaml';
+
+/** Absolute path to the canonical home-dir config (~/.sokuza/config.yaml). */
+export function homeConfigPath(): string {
+    return join(HOME_CONFIG_DIR, HOME_CONFIG_NAME);
+}
 
 export interface StartOptions {
     configPath?: string;
@@ -99,39 +107,43 @@ export async function runStart(opts: StartOptions): Promise<void> {
 }
 
 /**
- * Resolve a config path, creating one from the bundled example if none
- * exists yet. Also drops an `.env` skeleton next to it when missing, so
- * users get one obvious place to paste API keys. Prints a one-line
- * stderr notice for each file scaffolded.
+ * Resolve the config path to use on `sokuza start` with no explicit override.
+ *
+ * Order of precedence:
+ *   1. A `sokuza.config.yaml` in the current working directory — dev-mode
+ *      continues to work unchanged (running from the sokuza repo root).
+ *   2. `~/.sokuza/config.yaml` — the canonical location for installed users,
+ *      created from the bundled example on first run.
+ *
+ * This mirrors how gh CLI, AWS CLI, and Claude Code behave: shipped tools
+ * keep their config under the user's home directory, not in whatever
+ * directory the user happens to be in.
  */
 async function ensureDefaultConfig(): Promise<string> {
     const cwd = process.cwd();
     const cwdConfig = resolve(cwd, DEFAULT_CONFIG_NAME);
-    const cwdEnv = resolve(cwd, DEFAULT_ENV_NAME);
+    if (existsSync(cwdConfig)) {
+        return cwdConfig;
+    }
 
-    if (!existsSync(cwdConfig)) {
+    const homeConfig = homeConfigPath();
+    if (!existsSync(homeConfig)) {
+        await mkdir(HOME_CONFIG_DIR, { recursive: true });
         const example = locateBundledFile(CONFIG_EXAMPLE);
         if (example) {
-            await copyFile(example, cwdConfig);
+            await copyFile(example, homeConfig);
+            // API keys may end up here via the dashboard — tighten perms
+            // so other local users can't read them. Best-effort on platforms
+            // where POSIX perms don't apply (Windows).
+            await chmod(homeConfig, 0o600).catch(() => undefined);
             process.stderr.write(
-                `sokuza: created ${DEFAULT_CONFIG_NAME} from the bundled example — ` +
-                `edit it to enable integrations (github/slack/webhooks/cron).\n`,
+                `sokuza: created ${homeConfig} from the bundled example — ` +
+                `open the dashboard to configure integrations and AI providers.\n`,
             );
         }
         // If the example isn't bundled, fall through and let loadConfig
         // produce the actionable error.
     }
 
-    if (!existsSync(cwdEnv)) {
-        const envExample = locateBundledFile(ENV_EXAMPLE);
-        if (envExample) {
-            await copyFile(envExample, cwdEnv);
-            process.stderr.write(
-                `sokuza: created ${DEFAULT_ENV_NAME} — ` +
-                `add tokens for any integration you enabled in the config.\n`,
-            );
-        }
-    }
-
-    return cwdConfig;
+    return homeConfig;
 }

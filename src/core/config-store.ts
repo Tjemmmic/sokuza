@@ -1,4 +1,4 @@
-import { readFile, writeFile, rename, unlink } from 'node:fs/promises';
+import { readFile, writeFile, rename, unlink, chmod } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import yaml from 'js-yaml';
 import type { Logger } from 'pino';
@@ -117,6 +117,10 @@ export class ConfigStore {
         try {
             await writeFile(tmpPath, content, 'utf-8');
             await rename(tmpPath, this.configPath);
+            // The config may contain AI provider API keys now, so constrain
+            // read access to the owner. Best-effort: chmod is a no-op on
+            // Windows, and we shouldn't fail the write if perms can't be set.
+            await chmod(this.configPath, 0o600).catch(() => undefined);
         } catch (err) {
             try { await unlink(tmpPath); } catch { /* ignore */ }
             throw err;

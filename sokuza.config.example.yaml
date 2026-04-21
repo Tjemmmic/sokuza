@@ -1,5 +1,13 @@
 # ─── Sokuza Configuration ────────────────────────────────────────────────────
-# Copy this file to sokuza.config.yaml and fill in your values.
+# Sokuza reads this config from `~/.sokuza/config.yaml` by default. The file
+# is auto-scaffolded from this example on first run and chmod 0600 so it's
+# safe to store AI provider API keys directly in it (like gh CLI, AWS CLI,
+# Claude Code do). You can still use `${ENV_VAR}` references if you prefer
+# to keep secrets out of the file.
+#
+# For project-local development (running against the sokuza repo), drop a
+# `sokuza.config.yaml` next to your CWD and it will take precedence — this
+# is what `sokuza init --local` scaffolds.
 
 # The `server:` block is optional. When omitted, Sokuza binds 24847 (its
 # canonical discovery port) on 127.0.0.1 and falls back through 24848–24852
@@ -26,7 +34,7 @@ ai:
     anthropic:
       kind: anthropic-api
       api_key: ${ANTHROPIC_API_KEY}
-      default_model: claude-sonnet-4-20250514
+      default_model: claude-sonnet-4-6
 
     # Claude Code CLI (uses your ~/.claude subscription)
     claude-code:
@@ -178,7 +186,7 @@ workflows:
   #       action: ai-review
   #       ai:
   #         provider: anthropic
-  #         model: claude-sonnet-4-20250514
+  #         model: claude-sonnet-4-6
   #       params:
   #         diff: "{{steps.fetch_diff.diff}}"
   #         workdir: "{{steps.clone.path}}"
