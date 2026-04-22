@@ -1577,35 +1577,82 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
         return await res.json();
     }
 
-    // List open PRs for a repo
+    // Shape a raw GitHub PR record into the format the UI expects.
+    function shapePr(pr: Record<string, unknown>) {
+        return {
+            number: pr.number,
+            title: pr.title,
+            state: pr.state,
+            author: (pr.user as Record<string, unknown>)?.login,
+            head: {
+                ref: (pr.head as Record<string, unknown>)?.ref,
+                sha: (pr.head as Record<string, unknown>)?.sha,
+            },
+            base: {
+                ref: (pr.base as Record<string, unknown>)?.ref,
+            },
+            labels: ((pr.labels as Array<Record<string, unknown>>) ?? []).map((l) => l.name),
+            created_at: pr.created_at,
+            updated_at: pr.updated_at,
+            draft: pr.draft,
+            html_url: pr.html_url,
+        };
+    }
+
+    // List PRs for a repo (state: open|closed|all, optional author filter)
     server.get('/api/github/:owner/:repo/pulls', async (request, reply) => {
         const { owner, repo } = request.params as { owner: string; repo: string };
-        const { state } = (request.query ?? {}) as { state?: string };
+        const { state, author } = (request.query ?? {}) as { state?: string; author?: string };
         try {
+            // When filtering by author, use search API (pulls endpoint doesn't support author filter).
+            if (author) {
+                const q = [
+                    'is:pr',
+                    `repo:${owner}/${repo}`,
+                    `author:${author}`,
+                    state && state !== 'all' ? `is:${state === 'open' ? 'open' : 'closed'}` : '',
+                ].filter(Boolean).join('+');
+                const search = await githubProxyGet(
+                    '/search/issues',
+                    { q, sort: 'updated', order: 'desc', per_page: '30' },
+                ) as { items?: Array<Record<string, unknown>> };
+                return {
+                    items: (search.items ?? []).map((item) => ({
+                        number: item.number,
+                        title: item.title,
+                        state: item.state,
+                        author: (item.user as Record<string, unknown>)?.login,
+                        head: { ref: null, sha: null }, // not in search response; frontend resolves on select
+                        base: { ref: null },
+                        labels: ((item.labels as Array<Record<string, unknown>>) ?? []).map((l) => l.name),
+                        created_at: item.created_at,
+                        updated_at: item.updated_at,
+                        draft: item.draft,
+                        html_url: item.html_url,
+                    })),
+                };
+            }
+
             const prs = await githubProxyGet(
                 `/repos/${owner}/${repo}/pulls`,
                 { state: state ?? 'open', sort: 'updated', direction: 'desc', per_page: '30' },
             ) as Array<Record<string, unknown>>;
+            return { items: prs.map(shapePr) };
+        } catch (err: any) {
+            return reply.status(502).send({ error: err.message });
+        }
+    });
 
-            return {
-                items: prs.map((pr) => ({
-                    number: pr.number,
-                    title: pr.title,
-                    state: pr.state,
-                    author: (pr.user as Record<string, unknown>)?.login,
-                    head: {
-                        ref: (pr.head as Record<string, unknown>)?.ref,
-                        sha: (pr.head as Record<string, unknown>)?.sha,
-                    },
-                    base: {
-                        ref: (pr.base as Record<string, unknown>)?.ref,
-                    },
-                    labels: ((pr.labels as Array<Record<string, unknown>>) ?? []).map((l) => l.name),
-                    created_at: pr.created_at,
-                    updated_at: pr.updated_at,
-                    draft: pr.draft,
-                })),
-            };
+    // Fetch a single PR (needed to resolve head.ref for URL pastes / My-PRs selection)
+    server.get('/api/github/:owner/:repo/pulls/:number', async (request, reply) => {
+        const { owner, repo, number } = request.params as { owner: string; repo: string; number: string };
+        const n = Number(number);
+        if (!Number.isFinite(n) || n <= 0) {
+            return reply.status(400).send({ error: 'Invalid PR number' });
+        }
+        try {
+            const pr = await githubProxyGet(`/repos/${owner}/${repo}/pulls/${n}`) as Record<string, unknown>;
+            return { pr: shapePr(pr) };
         } catch (err: any) {
             return reply.status(502).send({ error: err.message });
         }
@@ -1660,7 +1707,7 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
         }
     });
 
-    // List repos from config + user's accessible repos
+    // List repos from config + user's accessible repos (includes owner info for grouping).
     server.get('/api/github/repos', async (_request, reply) => {
         try {
             const config = deps.getConfig();
@@ -1670,40 +1717,119 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
             if (ghPoll?.repos && Array.isArray(ghPoll.repos)) {
                 for (const r of ghPoll.repos) configRepos.add(r as string);
             }
-            // Also gather from workflow triggers
             for (const wf of config.workflows ?? []) {
                 const repos = Array.isArray(wf.trigger?.repo) ? wf.trigger.repo : wf.trigger?.repo ? [wf.trigger.repo] : [];
                 for (const r of repos) configRepos.add(r);
             }
 
-            // Fetch user's repos from GitHub for discovery
-            let apiRepos: Array<{ full_name: string; description: string | null }> = [];
+            // Fetch user's repos from GitHub (all affiliations, most-recently-pushed first).
+            let apiRepos: Array<{
+                full_name: string;
+                description: string | null;
+                owner_login: string | null;
+                owner_type: string | null;
+                private: boolean;
+                fork: boolean;
+            }> = [];
             try {
                 const userRepos = await githubProxyGet(
                     '/user/repos',
-                    { sort: 'updated', direction: 'desc', per_page: '30', type: 'all' },
+                    { sort: 'pushed', direction: 'desc', per_page: '100', affiliation: 'owner,collaborator,organization_member' },
                 ) as Array<Record<string, unknown>>;
-                apiRepos = userRepos.map((r) => ({
-                    full_name: r.full_name as string,
-                    description: r.description as string | null,
-                }));
+                apiRepos = userRepos.map((r) => {
+                    const owner = (r.owner as Record<string, unknown>) ?? {};
+                    return {
+                        full_name: r.full_name as string,
+                        description: (r.description as string | null) ?? null,
+                        owner_login: (owner.login as string | null) ?? null,
+                        owner_type: (owner.type as string | null) ?? null,
+                        private: Boolean(r.private),
+                        fork: Boolean(r.fork),
+                    };
+                });
             } catch { /* token may not have user scope - that's fine */ }
 
-            // Merge: config repos first, then API repos
+            // Merge: config repos first (marked source=config), then API repos.
             const seen = new Set<string>();
-            const items: Array<{ full_name: string; description?: string | null; source: string }> = [];
+            const items: Array<Record<string, unknown>> = [];
 
             for (const r of configRepos) {
                 seen.add(r);
-                items.push({ full_name: r, source: 'config' });
+                const [ownerLogin] = r.split('/');
+                items.push({
+                    full_name: r,
+                    source: 'config',
+                    owner_login: ownerLogin ?? null,
+                    owner_type: null,
+                });
             }
             for (const r of apiRepos) {
                 if (!seen.has(r.full_name)) {
                     seen.add(r.full_name);
-                    items.push({ full_name: r.full_name, description: r.description, source: 'github' });
+                    items.push({
+                        full_name: r.full_name,
+                        description: r.description,
+                        source: 'github',
+                        owner_login: r.owner_login,
+                        owner_type: r.owner_type,
+                        private: r.private,
+                        fork: r.fork,
+                    });
                 }
             }
 
+            return { items };
+        } catch (err: any) {
+            return reply.status(502).send({ error: err.message });
+        }
+    });
+
+    // Authenticated user (used by the UI to label "My PRs" and group personal repos).
+    server.get('/api/github/me', async (_request, reply) => {
+        try {
+            const user = await githubProxyGet('/user') as Record<string, unknown>;
+            return {
+                login: user.login as string,
+                name: (user.name as string | null) ?? null,
+                avatar_url: (user.avatar_url as string | null) ?? null,
+            };
+        } catch (err: any) {
+            return reply.status(502).send({ error: err.message });
+        }
+    });
+
+    // PRs authored by the authenticated user across all repos (via search API).
+    server.get('/api/github/my-prs', async (request, reply) => {
+        const { state } = (request.query ?? {}) as { state?: string };
+        const qualifiers = ['is:pr', 'author:@me'];
+        if (!state || state === 'open') qualifiers.push('is:open');
+        else if (state === 'closed') qualifiers.push('is:closed');
+        // state='all' adds no qualifier
+
+        try {
+            const result = await githubProxyGet(
+                '/search/issues',
+                { q: qualifiers.join('+'), sort: 'updated', order: 'desc', per_page: '50' },
+            ) as { items?: Array<Record<string, unknown>> };
+
+            const items = (result.items ?? []).map((pr) => {
+                // html_url: https://github.com/<owner>/<repo>/pull/<number>
+                const html = (pr.html_url as string) ?? '';
+                const m = html.match(/^https:\/\/github\.com\/([^/]+)\/([^/]+)\/pull\/\d+/);
+                const repo = m ? `${m[1]}/${m[2]}` : null;
+                return {
+                    number: pr.number,
+                    title: pr.title,
+                    state: pr.state,
+                    repo,
+                    author: (pr.user as Record<string, unknown>)?.login,
+                    labels: ((pr.labels as Array<Record<string, unknown>>) ?? []).map((l) => l.name),
+                    created_at: pr.created_at,
+                    updated_at: pr.updated_at,
+                    draft: pr.draft,
+                    html_url: html,
+                };
+            }).filter((item) => item.repo);
             return { items };
         } catch (err: any) {
             return reply.status(502).send({ error: err.message });

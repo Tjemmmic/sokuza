@@ -1718,6 +1718,68 @@ tr:hover td {
     color: var(--text-muted);
 }
 
+/* ─── Chat Session Modal ─────────────────────────────────────────────────── */
+.chat-scope-radios {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.chat-scope-chip {
+    flex: 1;
+    min-width: 120px;
+    padding: 10px;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    transition: border-color var(--transition), background var(--transition);
+}
+
+.chat-scope-chip:hover {
+    border-color: var(--accent);
+}
+
+.chat-scope-chip:has(input:checked) {
+    border-color: var(--accent);
+    background: rgba(99, 102, 241, 0.08);
+}
+
+.chat-pr-state-row {
+    display: flex;
+    align-items: center;
+    margin-top: 8px;
+}
+
+.chat-inline-select {
+    padding: 4px 8px;
+    font-size: 12px;
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    border: 1px solid var(--border-subtle);
+    border-radius: 6px;
+    cursor: pointer;
+}
+
+.chat-selection-preview {
+    padding: 10px 12px;
+    margin-bottom: 16px;
+    background: rgba(99, 102, 241, 0.08);
+    border: 1px solid rgba(99, 102, 241, 0.25);
+    border-radius: 8px;
+    font-size: 12px;
+    color: var(--text-secondary);
+    line-height: 1.6;
+}
+
+.chat-selection-label {
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-right: 4px;
+}
+
 /* ─── Picker Items (run modal) ───────────────────────────────────────────── */
 .picker-item {
     padding: 8px 12px;

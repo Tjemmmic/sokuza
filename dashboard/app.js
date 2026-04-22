@@ -5349,11 +5349,33 @@ window.deleteChatSession = async function (id) {
 };
 
 // ─── New session modal ──────────────────────────────────────────────────────
+//
+// Users rarely remember repo/branch/PR strings by heart. The modal drives
+// every scope field from a picker that reads live GitHub data through the
+// proxy endpoints in api.ts, and falls back to pasting a github.com URL or
+// typing a literal owner/repo for anything that's not yet discoverable.
+//
+// State lives on window._chatPicker so the dropdowns can share cached data
+// without re-fetching on every keystroke.
+
+function chatPickerInitState() {
+    window._chatPicker = {
+        me: null,            // { login } — authenticated user, for grouping + my-PRs
+        repos: null,         // array from /api/github/repos
+        reposLoading: false,
+        reposError: null,
+        branches: {},        // { "owner/repo": array }
+        prsByRepo: {},       // { "owner/repo:state": array }
+        myPrs: {},           // { state: array }
+        selected: { repo: '', ref: '', prNumber: null, title: '', author: '' },
+        prSource: 'my',      // 'my' (cross-repo) or 'repo' (scoped)
+        prState: 'open',     // 'open' | 'closed' | 'all'
+    };
+}
 
 window.openNewChatSession = function () {
     const config = window._chatLastConfig || {};
     const providers = config.ai?.providers || {};
-    // Only anthropic-api providers work for chat in MVP.
     const chatProviders = Object.entries(providers)
         .filter(([, p]) => p.kind === 'anthropic-api')
         .map(([name]) => name);
@@ -5368,35 +5390,97 @@ window.openNewChatSession = function () {
         return;
     }
 
+    chatPickerInitState();
     const providerOptions = chatProviders.map((p) => `<option value="${esc(p)}" ${p === preferredProvider ? 'selected' : ''}>${esc(p)}</option>`).join('');
 
     openModal('New Chat Session', `
         <div class="form-group">
+            <label class="form-label">Paste a GitHub URL <span style="color:var(--text-muted);font-weight:400">(optional shortcut)</span></label>
+            <input type="text" class="form-input" id="chat-url-paste"
+                placeholder="https://github.com/owner/repo/pull/123"
+                oninput="onChatUrlPaste()">
+            <div class="form-hint">Repo, branch (<code>/tree/&lt;branch&gt;</code>), or PR (<code>/pull/&lt;n&gt;</code>) URLs auto-fill the pickers below.</div>
+        </div>
+        <div class="form-group">
             <label class="form-label">Scope</label>
-            <div style="display:flex;gap:8px;flex-wrap:wrap">
-                <label style="flex:1;min-width:120px;padding:10px;border:1px solid var(--border-color);border-radius:8px;cursor:pointer;display:flex;align-items:center;gap:8px">
+            <div class="chat-scope-radios">
+                <label class="chat-scope-chip">
                     <input type="radio" name="chat-scope-kind" value="repo" onchange="onChatScopeChange()"> Repo
                 </label>
-                <label style="flex:1;min-width:120px;padding:10px;border:1px solid var(--border-color);border-radius:8px;cursor:pointer;display:flex;align-items:center;gap:8px">
+                <label class="chat-scope-chip">
                     <input type="radio" name="chat-scope-kind" value="branch" onchange="onChatScopeChange()"> Branch
                 </label>
-                <label style="flex:1;min-width:120px;padding:10px;border:1px solid var(--border-color);border-radius:8px;cursor:pointer;display:flex;align-items:center;gap:8px">
+                <label class="chat-scope-chip">
                     <input type="radio" name="chat-scope-kind" value="pr" checked onchange="onChatScopeChange()"> Pull Request
                 </label>
             </div>
         </div>
-        <div class="form-group">
+
+        <!-- PR source toggle (only shown for PR scope) -->
+        <div class="form-group" id="chat-pr-source-wrap">
+            <label class="form-label">Find a PR</label>
+            <div class="chat-scope-radios">
+                <label class="chat-scope-chip">
+                    <input type="radio" name="chat-pr-source" value="my" checked onchange="onChatPrSourceChange()"> My PRs
+                </label>
+                <label class="chat-scope-chip">
+                    <input type="radio" name="chat-pr-source" value="repo" onchange="onChatPrSourceChange()"> PRs in a repo
+                </label>
+            </div>
+            <div class="chat-pr-state-row">
+                <span class="form-hint" style="margin-right:8px">State:</span>
+                <select class="form-select chat-inline-select" id="chat-pr-state" onchange="onChatPrStateChange()">
+                    <option value="open" selected>Open</option>
+                    <option value="closed">Closed</option>
+                    <option value="all">All</option>
+                </select>
+            </div>
+        </div>
+
+        <!-- Repo picker (shown for Repo/Branch scopes, and for PR scope when source=repo) -->
+        <div class="form-group" id="chat-repo-wrap">
             <label class="form-label">Repository</label>
-            <input type="text" class="form-input" id="chat-scope-repo" placeholder="owner/repo">
+            <div class="combobox-container" id="chat-repo-combobox">
+                <div class="combobox-selected" id="chat-repo-selected" onclick="document.getElementById('chat-repo-search').focus()">
+                    <input type="text" class="combobox-search" id="chat-repo-search"
+                        placeholder="Search repos or type owner/repo…"
+                        oninput="onChatRepoInput()" onfocus="showChatRepoDropdown()" autocomplete="off">
+                </div>
+                <div class="combobox-dropdown" id="chat-repo-dropdown"></div>
+            </div>
+            <div class="form-hint" id="chat-repo-hint">Loading your repos…</div>
         </div>
-        <div class="form-group" id="chat-scope-ref-wrap">
-            <label class="form-label" id="chat-scope-ref-label">Branch (PR head ref)</label>
-            <input type="text" class="form-input" id="chat-scope-ref" placeholder="e.g. feat/new-thing">
+
+        <!-- Branch picker (Branch scope only) -->
+        <div class="form-group" id="chat-branch-wrap" style="display:none">
+            <label class="form-label">Branch</label>
+            <div class="combobox-container" id="chat-branch-combobox">
+                <div class="combobox-selected" id="chat-branch-selected" onclick="document.getElementById('chat-branch-search').focus()">
+                    <input type="text" class="combobox-search" id="chat-branch-search"
+                        placeholder="Pick a repository first…" disabled
+                        oninput="onChatBranchInput()" onfocus="showChatBranchDropdown()" autocomplete="off">
+                </div>
+                <div class="combobox-dropdown" id="chat-branch-dropdown"></div>
+            </div>
         </div>
-        <div class="form-group" id="chat-scope-pr-wrap">
-            <label class="form-label">PR number</label>
-            <input type="number" class="form-input" id="chat-scope-pr" placeholder="e.g. 42">
+
+        <!-- PR picker (PR scope only) -->
+        <div class="form-group" id="chat-pr-wrap">
+            <label class="form-label" id="chat-pr-label">Pull Request</label>
+            <div class="combobox-container" id="chat-pr-combobox">
+                <div class="combobox-selected" id="chat-pr-selected" onclick="document.getElementById('chat-pr-search').focus()">
+                    <input type="text" class="combobox-search" id="chat-pr-search"
+                        placeholder="Loading your PRs…"
+                        oninput="onChatPrInput()" onfocus="showChatPrDropdown()" autocomplete="off">
+                </div>
+                <div class="combobox-dropdown" id="chat-pr-dropdown"></div>
+            </div>
+            <div class="form-hint" id="chat-pr-hint"></div>
         </div>
+
+        <!-- Resolved selection preview -->
+        <div class="chat-selection-preview" id="chat-selection-preview" style="display:none"></div>
+
         <div class="form-group">
             <label class="form-label">Provider</label>
             <select class="form-input" id="chat-provider">${providerOptions}</select>
@@ -5411,54 +5495,596 @@ window.openNewChatSession = function () {
         <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
         <button class="btn btn-primary" id="chat-create-btn" onclick="submitNewChatSession()">Create session</button>
     `);
+
+    // Kick off initial data loads in parallel and render UI state.
     onChatScopeChange();
+    loadChatRepos();
+    loadChatMyPrs();
+    loadChatMe();
 };
+
+// ─── Scope / source toggles ─────────────────────────────────────────────────
 
 window.onChatScopeChange = function () {
     const kind = document.querySelector('input[name="chat-scope-kind"]:checked')?.value;
-    const refWrap = document.getElementById('chat-scope-ref-wrap');
-    const prWrap = document.getElementById('chat-scope-pr-wrap');
-    const refLabel = document.getElementById('chat-scope-ref-label');
-    if (!refWrap || !prWrap || !refLabel) return;
+    const repoWrap = document.getElementById('chat-repo-wrap');
+    const branchWrap = document.getElementById('chat-branch-wrap');
+    const prWrap = document.getElementById('chat-pr-wrap');
+    const prSourceWrap = document.getElementById('chat-pr-source-wrap');
+    if (!repoWrap || !branchWrap || !prWrap || !prSourceWrap) return;
+
+    // Reset dependent selections when scope changes so stale values don't leak.
+    const s = window._chatPicker.selected;
+    s.ref = '';
+    s.prNumber = null;
+    s.title = '';
+    s.author = '';
+
+    // Keep the repo search input synced to selected.repo (may have been set by
+    // URL paste or a My-PR selection while the picker was hidden).
+    const repoSearch = document.getElementById('chat-repo-search');
+    if (repoSearch) repoSearch.value = s.repo || '';
+
     if (kind === 'repo') {
-        refWrap.style.display = 'none';
+        repoWrap.style.display = '';
+        branchWrap.style.display = 'none';
         prWrap.style.display = 'none';
+        prSourceWrap.style.display = 'none';
     } else if (kind === 'branch') {
-        refWrap.style.display = '';
+        repoWrap.style.display = '';
+        branchWrap.style.display = '';
         prWrap.style.display = 'none';
-        refLabel.textContent = 'Branch';
-    } else {
-        refWrap.style.display = '';
+        prSourceWrap.style.display = 'none';
+        // Enable the branch picker if we already have a repo.
+        const bs = document.getElementById('chat-branch-search');
+        if (bs) {
+            bs.disabled = !s.repo;
+            bs.value = '';
+            bs.placeholder = s.repo ? `Search branches in ${s.repo}…` : 'Pick a repository first…';
+        }
+        if (s.repo) loadChatRepoBranches(s.repo);
+    } else { // pr
+        prSourceWrap.style.display = '';
         prWrap.style.display = '';
-        refLabel.textContent = 'Branch (PR head ref)';
+        // repoWrap visibility is governed by pr source (my vs repo)
+        branchWrap.style.display = 'none';
+        onChatPrSourceChange();
+        return;
+    }
+    updateChatSelectionPreview();
+};
+
+window.onChatPrSourceChange = function () {
+    const src = document.querySelector('input[name="chat-pr-source"]:checked')?.value || 'my';
+    window._chatPicker.prSource = src;
+    const repoWrap = document.getElementById('chat-repo-wrap');
+    const prLabel = document.getElementById('chat-pr-label');
+    const prSearch = document.getElementById('chat-pr-search');
+    const prHint = document.getElementById('chat-pr-hint');
+
+    // Clear PR selection when switching sources.
+    const s = window._chatPicker.selected;
+    s.prNumber = null;
+    s.ref = '';
+    s.title = '';
+    s.author = '';
+    if (prSearch) prSearch.value = '';
+
+    if (src === 'my') {
+        if (repoWrap) repoWrap.style.display = 'none';
+        if (prLabel) prLabel.textContent = 'My Pull Requests';
+        if (prSearch) {
+            prSearch.disabled = false;
+            prSearch.placeholder = 'Search your PRs across all repos…';
+        }
+        if (prHint) prHint.textContent = 'Shows PRs authored by you. Selecting one fills repo + branch automatically.';
+        renderChatPrDropdown();
+    } else {
+        if (repoWrap) repoWrap.style.display = '';
+        if (prLabel) prLabel.textContent = 'Pull Request';
+        if (prSearch) {
+            const repo = s.repo;
+            prSearch.disabled = !repo;
+            prSearch.placeholder = repo ? `Search PRs in ${repo}…` : 'Pick a repository first…';
+        }
+        if (prHint) prHint.textContent = '';
+        if (s.repo) loadChatRepoPrs(s.repo);
+        renderChatPrDropdown();
+    }
+    updateChatSelectionPreview();
+};
+
+window.onChatPrStateChange = function () {
+    const state = document.getElementById('chat-pr-state')?.value || 'open';
+    window._chatPicker.prState = state;
+    const s = window._chatPicker.selected;
+    if (window._chatPicker.prSource === 'my') {
+        loadChatMyPrs(); // refresh for the new state
+    } else if (s.repo) {
+        loadChatRepoPrs(s.repo);
     }
 };
 
+// ─── Data loaders (with basic caching) ──────────────────────────────────────
+
+async function loadChatMe() {
+    if (window._chatPicker.me) return;
+    try {
+        const res = await api.get('/api/github/me');
+        window._chatPicker.me = res;
+        renderChatRepoDropdown();
+    } catch { /* token may not have user scope; silently skip */ }
+}
+
+async function loadChatRepos() {
+    const state = window._chatPicker;
+    if (state.repos || state.reposLoading) return;
+    state.reposLoading = true;
+    state.reposError = null;
+    try {
+        const res = await api.get('/api/github/repos');
+        state.repos = res.items || [];
+    } catch (err) {
+        state.reposError = err.message || 'Failed to load repositories';
+        state.repos = [];
+    } finally {
+        state.reposLoading = false;
+        const hint = document.getElementById('chat-repo-hint');
+        if (hint) {
+            if (state.reposError) hint.textContent = state.reposError + ' — you can still type owner/repo manually.';
+            else hint.textContent = `${state.repos.length} repositor${state.repos.length === 1 ? 'y' : 'ies'} available. Start typing to filter, or enter a custom owner/repo.`;
+        }
+        renderChatRepoDropdown();
+    }
+}
+
+async function loadChatRepoBranches(repo) {
+    const state = window._chatPicker;
+    if (state.branches[repo]) return state.branches[repo];
+    const [owner, name] = repo.split('/');
+    if (!owner || !name) return [];
+    try {
+        const res = await api.get(`/api/github/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/branches`);
+        state.branches[repo] = res.items || [];
+    } catch {
+        state.branches[repo] = [];
+    }
+    renderChatBranchDropdown();
+    return state.branches[repo];
+}
+
+async function loadChatRepoPrs(repo) {
+    const state = window._chatPicker;
+    const key = `${repo}:${state.prState}`;
+    if (state.prsByRepo[key]) return state.prsByRepo[key];
+    const [owner, name] = repo.split('/');
+    if (!owner || !name) return [];
+    try {
+        const res = await api.get(`/api/github/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/pulls?state=${encodeURIComponent(state.prState)}`);
+        state.prsByRepo[key] = res.items || [];
+    } catch {
+        state.prsByRepo[key] = [];
+    }
+    renderChatPrDropdown();
+    return state.prsByRepo[key];
+}
+
+async function loadChatMyPrs() {
+    const state = window._chatPicker;
+    const key = state.prState;
+    if (state.myPrs[key]) { renderChatPrDropdown(); return state.myPrs[key]; }
+    try {
+        const res = await api.get(`/api/github/my-prs?state=${encodeURIComponent(key)}`);
+        state.myPrs[key] = res.items || [];
+    } catch {
+        state.myPrs[key] = [];
+    }
+    renderChatPrDropdown();
+    return state.myPrs[key];
+}
+
+// ─── Repo combobox ──────────────────────────────────────────────────────────
+
+window.showChatRepoDropdown = function () {
+    const dd = document.getElementById('chat-repo-dropdown');
+    if (!dd) return;
+    renderChatRepoDropdown();
+    dd.classList.add('open');
+};
+
+window.onChatRepoInput = function () {
+    renderChatRepoDropdown();
+    const dd = document.getElementById('chat-repo-dropdown');
+    if (dd) dd.classList.add('open');
+};
+
+function renderChatRepoDropdown() {
+    const dd = document.getElementById('chat-repo-dropdown');
+    const search = document.getElementById('chat-repo-search');
+    if (!dd || !search) return;
+    const state = window._chatPicker;
+    const query = search.value.toLowerCase().trim();
+    const repos = state.repos || [];
+    const myLogin = state.me?.login?.toLowerCase() || null;
+
+    if (state.reposLoading && repos.length === 0) {
+        dd.innerHTML = '<div class="combobox-empty">Loading repositories…</div>';
+        return;
+    }
+
+    // Group repos: Configured (source=config), Personal (owner = me), each Org, Other.
+    const groups = { configured: [], personal: [], orgs: {}, other: [] };
+    for (const r of repos) {
+        const matches = !query ||
+            r.full_name.toLowerCase().includes(query) ||
+            (r.description || '').toLowerCase().includes(query);
+        if (!matches) continue;
+        if (r.source === 'config') {
+            groups.configured.push(r);
+            continue;
+        }
+        const owner = (r.owner_login || '').toLowerCase();
+        if (r.owner_type === 'Organization') {
+            (groups.orgs[r.owner_login] ||= []).push(r);
+        } else if (myLogin && owner === myLogin) {
+            groups.personal.push(r);
+        } else {
+            groups.other.push(r);
+        }
+    }
+
+    const sections = [];
+    const renderOption = (r) => {
+        const badge = r.source === 'config' ? '<code class="combobox-option-code">configured</code>' :
+            r.private ? '<code class="combobox-option-code">private</code>' : '';
+        const desc = r.description ? esc(r.description) : '';
+        return `<div class="combobox-option" onclick="selectChatRepoFromPicker('${esc(r.full_name)}')">
+            <span class="combobox-option-label">${esc(r.full_name)}</span>
+            <span class="combobox-option-desc">${desc}</span>
+            ${badge}
+        </div>`;
+    };
+    if (groups.configured.length) {
+        sections.push('<div class="combobox-group-label">Configured in Sokuza</div>' + groups.configured.map(renderOption).join(''));
+    }
+    if (groups.personal.length) {
+        sections.push(`<div class="combobox-group-label">Personal${myLogin ? ` (${esc(state.me.login)})` : ''}</div>` + groups.personal.map(renderOption).join(''));
+    }
+    for (const orgName of Object.keys(groups.orgs).sort((a, b) => a.localeCompare(b))) {
+        sections.push(`<div class="combobox-group-label">Org · ${esc(orgName)}</div>` + groups.orgs[orgName].map(renderOption).join(''));
+    }
+    if (groups.other.length) {
+        sections.push('<div class="combobox-group-label">Other</div>' + groups.other.map(renderOption).join(''));
+    }
+
+    // Allow free-form owner/repo entry when query looks like one and isn't already listed.
+    if (query && /^[\w.-]+\/[\w.-]+$/.test(query) && !repos.some((r) => r.full_name.toLowerCase() === query)) {
+        sections.unshift(`<div class="combobox-group-label">Use as typed</div>
+            <div class="combobox-option" onclick="selectChatRepoFromPicker('${esc(query)}')">
+                <span class="combobox-option-label">${esc(query)}</span>
+                <span class="combobox-option-desc">Use this repository as entered</span>
+            </div>`);
+    }
+
+    dd.innerHTML = sections.join('') || `<div class="combobox-empty">${query ? 'No repositories match. Type <code>owner/repo</code> to use a custom one.' : 'No repositories available.'}</div>`;
+}
+
+window.selectChatRepoFromPicker = function (fullName) {
+    const state = window._chatPicker;
+    state.selected.repo = fullName;
+    // Clear dependent selections when repo changes.
+    state.selected.ref = '';
+    state.selected.prNumber = null;
+    state.selected.title = '';
+    state.selected.author = '';
+
+    const search = document.getElementById('chat-repo-search');
+    if (search) search.value = fullName;
+    const dd = document.getElementById('chat-repo-dropdown');
+    if (dd) dd.classList.remove('open');
+
+    // Enable/update dependent pickers based on active scope.
+    const kind = document.querySelector('input[name="chat-scope-kind"]:checked')?.value;
+    if (kind === 'branch') {
+        const bs = document.getElementById('chat-branch-search');
+        if (bs) {
+            bs.disabled = false;
+            bs.value = '';
+            bs.placeholder = `Search branches in ${fullName}…`;
+        }
+        loadChatRepoBranches(fullName);
+    } else if (kind === 'pr' && state.prSource === 'repo') {
+        const ps = document.getElementById('chat-pr-search');
+        if (ps) {
+            ps.disabled = false;
+            ps.value = '';
+            ps.placeholder = `Search PRs in ${fullName}…`;
+        }
+        loadChatRepoPrs(fullName);
+    }
+    updateChatSelectionPreview();
+};
+
+// ─── Branch combobox ────────────────────────────────────────────────────────
+
+window.showChatBranchDropdown = function () {
+    const dd = document.getElementById('chat-branch-dropdown');
+    if (!dd) return;
+    renderChatBranchDropdown();
+    dd.classList.add('open');
+};
+
+window.onChatBranchInput = function () {
+    renderChatBranchDropdown();
+    const dd = document.getElementById('chat-branch-dropdown');
+    if (dd) dd.classList.add('open');
+};
+
+function renderChatBranchDropdown() {
+    const dd = document.getElementById('chat-branch-dropdown');
+    const search = document.getElementById('chat-branch-search');
+    if (!dd || !search) return;
+    const state = window._chatPicker;
+    const repo = state.selected.repo;
+    if (!repo) {
+        dd.innerHTML = '<div class="combobox-empty">Select a repository first.</div>';
+        return;
+    }
+    const branches = state.branches[repo];
+    if (!branches) {
+        dd.innerHTML = '<div class="combobox-empty">Loading branches…</div>';
+        return;
+    }
+    const query = search.value.toLowerCase().trim();
+    const filtered = branches.filter((b) => !query || b.name.toLowerCase().includes(query));
+    let html = '';
+    if (filtered.length) {
+        html += filtered.slice(0, 100).map((b) => `
+            <div class="combobox-option" onclick="selectChatBranchFromPicker('${esc(b.name)}')">
+                <span class="combobox-option-label">${esc(b.name)}</span>
+                <span class="combobox-option-desc">${b.protected ? 'protected' : ''}</span>
+                ${b.sha ? `<code class="combobox-option-code">${esc(b.sha)}</code>` : ''}
+            </div>`).join('');
+    }
+    if (query && !branches.some((b) => b.name.toLowerCase() === query)) {
+        html = `<div class="combobox-group-label">Use as typed</div>
+            <div class="combobox-option" onclick="selectChatBranchFromPicker('${esc(query)}')">
+                <span class="combobox-option-label">${esc(query)}</span>
+                <span class="combobox-option-desc">Use this ref as entered</span>
+            </div>` + html;
+    }
+    dd.innerHTML = html || '<div class="combobox-empty">No branches match.</div>';
+}
+
+window.selectChatBranchFromPicker = function (name) {
+    const state = window._chatPicker;
+    state.selected.ref = name;
+    const search = document.getElementById('chat-branch-search');
+    if (search) search.value = name;
+    const dd = document.getElementById('chat-branch-dropdown');
+    if (dd) dd.classList.remove('open');
+    updateChatSelectionPreview();
+};
+
+// ─── PR combobox ────────────────────────────────────────────────────────────
+
+window.showChatPrDropdown = function () {
+    const dd = document.getElementById('chat-pr-dropdown');
+    if (!dd) return;
+    renderChatPrDropdown();
+    dd.classList.add('open');
+};
+
+window.onChatPrInput = function () {
+    renderChatPrDropdown();
+    const dd = document.getElementById('chat-pr-dropdown');
+    if (dd) dd.classList.add('open');
+};
+
+function renderChatPrDropdown() {
+    const dd = document.getElementById('chat-pr-dropdown');
+    const search = document.getElementById('chat-pr-search');
+    if (!dd || !search) return;
+    const state = window._chatPicker;
+    const query = search.value.toLowerCase().trim();
+
+    let items = [];
+    if (state.prSource === 'my') {
+        items = state.myPrs[state.prState];
+        if (!items) {
+            dd.innerHTML = '<div class="combobox-empty">Loading your PRs…</div>';
+            return;
+        }
+    } else {
+        const repo = state.selected.repo;
+        if (!repo) {
+            dd.innerHTML = '<div class="combobox-empty">Select a repository first.</div>';
+            return;
+        }
+        items = state.prsByRepo[`${repo}:${state.prState}`];
+        if (!items) {
+            dd.innerHTML = '<div class="combobox-empty">Loading PRs…</div>';
+            return;
+        }
+    }
+
+    const filtered = items.filter((pr) => {
+        if (!query) return true;
+        const hay = `#${pr.number} ${pr.title || ''} ${pr.author || ''} ${pr.repo || ''}`.toLowerCase();
+        return hay.includes(query);
+    });
+
+    if (filtered.length === 0) {
+        dd.innerHTML = `<div class="combobox-empty">${items.length === 0 ? 'No PRs found.' : 'No PRs match your search.'}</div>`;
+        return;
+    }
+
+    // When listing my-PRs across repos, group by repo.
+    let html = '';
+    if (state.prSource === 'my') {
+        const byRepo = {};
+        for (const pr of filtered) (byRepo[pr.repo] ||= []).push(pr);
+        for (const repo of Object.keys(byRepo).sort((a, b) => a.localeCompare(b))) {
+            html += `<div class="combobox-group-label">${esc(repo)}</div>`;
+            for (const pr of byRepo[repo]) html += renderChatPrOption(pr, repo);
+        }
+    } else {
+        for (const pr of filtered) html += renderChatPrOption(pr, state.selected.repo);
+    }
+    dd.innerHTML = html;
+}
+
+function renderChatPrOption(pr, repo) {
+    const stateBadge = pr.state === 'closed'
+        ? '<code class="combobox-option-code" style="background:rgba(148,163,184,0.2);color:#94a3b8">closed</code>'
+        : pr.draft
+            ? '<code class="combobox-option-code" style="background:rgba(234,179,8,0.2);color:#eab308">draft</code>'
+            : '<code class="combobox-option-code" style="background:rgba(34,197,94,0.15);color:#22c55e">open</code>';
+    const sub = `${pr.author ? '@' + pr.author : ''}${pr.head?.ref ? ` · ${pr.head.ref}` : ''}`;
+    return `<div class="combobox-option" onclick="selectChatPrFromPicker('${esc(repo)}', ${Number(pr.number)})">
+        <span class="combobox-option-label">#${Number(pr.number)} ${esc(pr.title || '')}</span>
+        <span class="combobox-option-desc">${esc(sub)}</span>
+        ${stateBadge}
+    </div>`;
+}
+
+window.selectChatPrFromPicker = async function (repo, number) {
+    const state = window._chatPicker;
+    state.selected.repo = repo;
+    state.selected.prNumber = number;
+    // Sync the repo picker input too so that switching scope later shows the
+    // correct repo in the combobox.
+    const repoSearch = document.getElementById('chat-repo-search');
+    if (repoSearch) repoSearch.value = repo;
+
+    // Try to find head.ref in already-loaded data; otherwise fetch the PR detail.
+    const fromRepoList = (state.prsByRepo[`${repo}:${state.prState}`] || []).find((p) => p.number === number);
+    let pr = fromRepoList;
+    if (!pr || !pr.head?.ref) {
+        const [owner, name] = repo.split('/');
+        try {
+            const res = await api.get(`/api/github/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/pulls/${number}`);
+            pr = res.pr;
+        } catch { /* fall through with whatever we have */ }
+    }
+    if (pr) {
+        state.selected.ref = pr.head?.ref || '';
+        state.selected.title = pr.title || '';
+        state.selected.author = pr.author || '';
+    }
+
+    const search = document.getElementById('chat-pr-search');
+    if (search) search.value = `#${number} ${pr?.title || ''}`.trim();
+    const dd = document.getElementById('chat-pr-dropdown');
+    if (dd) dd.classList.remove('open');
+    updateChatSelectionPreview();
+};
+
+// ─── URL paste ──────────────────────────────────────────────────────────────
+
+window.onChatUrlPaste = function () {
+    const input = document.getElementById('chat-url-paste');
+    if (!input) return;
+    const raw = input.value.trim();
+    if (!raw) return;
+    // Parse: https://github.com/<owner>/<repo>(/pull/<n>|/tree/<branch>)?
+    const m = raw.match(/^https?:\/\/github\.com\/([^/\s]+)\/([^/\s]+?)(?:\/(?:pull|tree)\/([^/\s?#]+))?(?:[?#/].*)?$/i);
+    if (!m) return;
+    const owner = m[1];
+    const name = m[2];
+    const tail = m[3];
+    const fullName = `${owner}/${name}`;
+    const isPr = /\/pull\//i.test(raw);
+    const isTree = /\/tree\//i.test(raw);
+
+    if (isPr && tail) {
+        const prNum = Number(tail);
+        if (!Number.isFinite(prNum) || prNum <= 0) return;
+        // Switch scope to PR, source to repo (specific repo + number)
+        const prRadio = document.querySelector('input[name="chat-scope-kind"][value="pr"]');
+        if (prRadio) { prRadio.checked = true; onChatScopeChange(); }
+        const repoSrc = document.querySelector('input[name="chat-pr-source"][value="repo"]');
+        if (repoSrc) { repoSrc.checked = true; onChatPrSourceChange(); }
+        selectChatRepoFromPicker(fullName);
+        selectChatPrFromPicker(fullName, prNum);
+    } else if (isTree && tail) {
+        const branchRadio = document.querySelector('input[name="chat-scope-kind"][value="branch"]');
+        if (branchRadio) { branchRadio.checked = true; onChatScopeChange(); }
+        selectChatRepoFromPicker(fullName);
+        selectChatBranchFromPicker(tail);
+    } else {
+        const repoRadio = document.querySelector('input[name="chat-scope-kind"][value="repo"]');
+        if (repoRadio) { repoRadio.checked = true; onChatScopeChange(); }
+        selectChatRepoFromPicker(fullName);
+    }
+};
+
+// ─── Selection preview ──────────────────────────────────────────────────────
+
+function updateChatSelectionPreview() {
+    const preview = document.getElementById('chat-selection-preview');
+    if (!preview) return;
+    const kind = document.querySelector('input[name="chat-scope-kind"]:checked')?.value;
+    const s = window._chatPicker.selected;
+    const parts = [];
+    if (s.repo) parts.push(`<code>${esc(s.repo)}</code>`);
+    if (kind === 'branch' && s.ref) parts.push(`branch <code>${esc(s.ref)}</code>`);
+    if (kind === 'pr' && s.prNumber) {
+        parts.push(`PR <code>#${s.prNumber}</code>`);
+        if (s.ref) parts.push(`head <code>${esc(s.ref)}</code>`);
+        if (s.author) parts.push(`by @${esc(s.author)}`);
+    }
+    if (parts.length === 0) {
+        preview.style.display = 'none';
+        preview.innerHTML = '';
+    } else {
+        preview.style.display = '';
+        preview.innerHTML = `<span class="chat-selection-label">Selected:</span> ${parts.join(' · ')}`;
+    }
+}
+
+// ─── Click-outside to close any open chat-picker dropdown ───────────────────
+document.addEventListener('click', (e) => {
+    for (const id of ['chat-repo-combobox', 'chat-branch-combobox', 'chat-pr-combobox']) {
+        const combo = document.getElementById(id);
+        if (combo && !combo.contains(e.target)) {
+            const dd = combo.querySelector('.combobox-dropdown');
+            if (dd) dd.classList.remove('open');
+        }
+    }
+});
+
+// ─── Submit ─────────────────────────────────────────────────────────────────
+
 window.submitNewChatSession = async function () {
     const kind = document.querySelector('input[name="chat-scope-kind"]:checked')?.value;
-    const repo = document.getElementById('chat-scope-repo')?.value.trim();
-    const ref = document.getElementById('chat-scope-ref')?.value.trim();
-    const prNumber = Number(document.getElementById('chat-scope-pr')?.value);
     const provider = document.getElementById('chat-provider')?.value;
     const title = document.getElementById('chat-title')?.value.trim();
     const errEl = document.getElementById('chat-create-error');
     const btn = document.getElementById('chat-create-btn');
+    const s = window._chatPicker.selected;
 
-    const showErr = (msg) => {
-        if (errEl) { errEl.style.display = 'block'; errEl.textContent = msg; }
-    };
+    const showErr = (msg) => { if (errEl) { errEl.style.display = 'block'; errEl.textContent = msg; } };
     const hideErr = () => { if (errEl) errEl.style.display = 'none'; };
     hideErr();
 
-    if (!repo) return showErr('Repository is required (owner/repo).');
-    if ((kind === 'branch' || kind === 'pr') && !ref) return showErr('Branch/ref is required for this scope.');
-    if (kind === 'pr' && (!Number.isFinite(prNumber) || prNumber <= 0)) return showErr('Valid PR number is required.');
+    // Fall back to typed values in the search inputs when nothing has been "selected" yet.
+    const repoFromSearch = document.getElementById('chat-repo-search')?.value.trim();
+    const branchFromSearch = document.getElementById('chat-branch-search')?.value.trim();
+    const repo = s.repo || repoFromSearch;
+    const ref = s.ref || (kind === 'branch' ? branchFromSearch : '');
+
+    if (!repo) return showErr('Select a repository, or type <owner/repo>.');
+    if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) return showErr('Repository must be in <owner/repo> format.');
+    if (kind === 'branch' && !ref) return showErr('Select or type a branch.');
+    if (kind === 'pr' && (!Number.isFinite(s.prNumber) || s.prNumber <= 0)) return showErr('Select a pull request.');
+    if (kind === 'pr' && !s.ref) return showErr('Unable to resolve PR head ref — try re-selecting the PR.');
 
     const scope = kind === 'repo'
         ? { kind: 'repo', repo }
         : kind === 'branch'
             ? { kind: 'branch', repo, ref }
-            : { kind: 'pr', repo, ref, prNumber };
+            : { kind: 'pr', repo, ref: s.ref, prNumber: s.prNumber, title: s.title || undefined, author: s.author || undefined };
 
     btn.disabled = true;
     btn.textContent = '⏳ Cloning & seeding…';
