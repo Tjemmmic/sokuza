@@ -442,6 +442,7 @@ async function renderPage() {
             case 'my-prs': await renderMyPrs(el); break;
             case 'issues': await renderIssues(el); break;
             case 'workflows': await renderWorkflows(el); break;
+            case 'chat': await renderChat(el); break;
 
             case 'library': await renderLibrary(el); break;
             case 'integrations': await renderIntegrations(el); break;
@@ -5242,6 +5243,475 @@ document.addEventListener('keydown', (e) => {
     }
 });
 
+// ═════════════════════════════════════════════════════════════════════════════
+// CHAT SESSIONS
+// ─────────────────────────────────────────────────────────────────────────────
+// Scoped to a repo, branch, or PR. Each session has a cloned workdir and a
+// persisted message log. The agent can call tools — notably `run_workflow`
+// — from inside the session.
+
+let chatActiveSessionId = null;           // null → show the session list
+let chatThreadInFlight = false;           // true while a turn is streaming
+
+async function renderChat(el) {
+    const [sessionsRes, configRes] = await Promise.all([
+        api.get('/api/chat/sessions').catch(() => ({ sessions: [] })),
+        api.get('/api/config').catch(() => ({ config: {} })),
+    ]);
+    const sessions = sessionsRes.sessions || [];
+    const config = configRes.config || {};
+
+    if (chatActiveSessionId) {
+        const session = sessions.find((s) => s.id === chatActiveSessionId);
+        if (session) {
+            await renderChatThread(el, session);
+            return;
+        }
+        chatActiveSessionId = null;
+    }
+
+    el.innerHTML = `
+        <div class="page-header">
+            <div class="page-header-left">
+                <h1 class="page-title">Chat</h1>
+                <p class="page-subtitle">Ask questions about a repo, branch, or PR. The agent can trigger workflows from inside the chat.</p>
+            </div>
+            <div class="page-header-right">
+                <button class="btn btn-primary btn-sm" onclick="openNewChatSession()">+ New Session</button>
+            </div>
+        </div>
+        ${sessions.length === 0 ? `
+            <div class="empty-state">
+                <div class="empty-icon">💬</div>
+                <p class="empty-text">No chat sessions yet</p>
+                <p style="font-size:12px;color:var(--text-muted);margin-top:6px">Start a conversation scoped to a repo, branch, or PR.</p>
+                <button class="btn btn-primary btn-sm" style="margin-top:12px" onclick="openNewChatSession()">Create a session</button>
+            </div>` : `
+            <div class="card-grid card-grid-3">
+                ${sessions.map((s) => renderChatSessionCard(s)).join('')}
+            </div>`}
+    `;
+
+    // Stash config for the New Session modal
+    window._chatLastConfig = config;
+}
+
+function renderChatSessionCard(session) {
+    const scopeBadge = chatScopeBadge(session.scope);
+    const updated = new Date(session.updatedAt).toLocaleString();
+    return `
+        <div class="card" style="flex-direction:column;align-items:stretch;gap:8px;cursor:pointer" onclick="openChatSession('${esc(session.id)}')">
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+                ${scopeBadge}
+                <strong style="font-size:14px;flex:1">${esc(session.title)}</strong>
+            </div>
+            <div style="font-size:12px;color:var(--text-secondary)">
+                <div>Provider: <code>${esc(session.provider)}</code></div>
+                <div style="margin-top:2px">Updated: ${esc(updated)}</div>
+            </div>
+            <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:4px">
+                <button class="btn btn-ghost btn-sm" onclick="event.stopPropagation(); deleteChatSession('${esc(session.id)}')" style="color:#ef4444">Delete</button>
+            </div>
+        </div>`;
+}
+
+function chatScopeBadge(scope) {
+    if (!scope) return '';
+    if (scope.kind === 'pr') {
+        return `<span class="badge" style="font-size:10px;background:rgba(34,197,94,0.15);color:#22c55e">PR #${esc(String(scope.prNumber))}</span>`;
+    }
+    if (scope.kind === 'branch') {
+        return `<span class="badge" style="font-size:10px;background:rgba(234,179,8,0.15);color:#eab308">branch</span>`;
+    }
+    return `<span class="badge" style="font-size:10px;background:rgba(99,102,241,0.15);color:var(--accent-hover)">repo</span>`;
+}
+
+window.openChatSession = function (id) {
+    chatActiveSessionId = id;
+    renderPage();
+};
+
+window.closeChatSession = function () {
+    chatActiveSessionId = null;
+    renderPage();
+};
+
+window.deleteChatSession = async function (id) {
+    if (!confirm('Delete this chat session and its cloned workdir? This cannot be undone.')) return;
+    try {
+        await api.del('/api/chat/sessions/' + encodeURIComponent(id));
+        if (chatActiveSessionId === id) chatActiveSessionId = null;
+        toast('Session deleted');
+        renderPage();
+    } catch (err) {
+        toast('Failed to delete: ' + (err.message || 'Unknown error'), 'error');
+    }
+};
+
+// ─── New session modal ──────────────────────────────────────────────────────
+
+window.openNewChatSession = function () {
+    const config = window._chatLastConfig || {};
+    const providers = config.ai?.providers || {};
+    // Only anthropic-api providers work for chat in MVP.
+    const chatProviders = Object.entries(providers)
+        .filter(([, p]) => p.kind === 'anthropic-api')
+        .map(([name]) => name);
+    const defaultProvider = config.ai?.default_provider;
+    const preferredProvider = chatProviders.includes(defaultProvider) ? defaultProvider : chatProviders[0];
+
+    if (chatProviders.length === 0) {
+        openModal('Add an AI provider first', `
+            <p>Chat needs an <code>anthropic-api</code>-kind provider configured on the <a href="#integrations" onclick="closeModal()">Integrations page</a>.</p>
+            <p>Quickest route: add the <strong>ZAI GLM (API)</strong> preset with your ZAI API key — it uses ZAI's Anthropic-compatible endpoint and works out of the box.</p>
+        `, `<button class="btn btn-primary" onclick="closeModal()">Got it</button>`);
+        return;
+    }
+
+    const providerOptions = chatProviders.map((p) => `<option value="${esc(p)}" ${p === preferredProvider ? 'selected' : ''}>${esc(p)}</option>`).join('');
+
+    openModal('New Chat Session', `
+        <div class="form-group">
+            <label class="form-label">Scope</label>
+            <div style="display:flex;gap:8px;flex-wrap:wrap">
+                <label style="flex:1;min-width:120px;padding:10px;border:1px solid var(--border-color);border-radius:8px;cursor:pointer;display:flex;align-items:center;gap:8px">
+                    <input type="radio" name="chat-scope-kind" value="repo" onchange="onChatScopeChange()"> Repo
+                </label>
+                <label style="flex:1;min-width:120px;padding:10px;border:1px solid var(--border-color);border-radius:8px;cursor:pointer;display:flex;align-items:center;gap:8px">
+                    <input type="radio" name="chat-scope-kind" value="branch" onchange="onChatScopeChange()"> Branch
+                </label>
+                <label style="flex:1;min-width:120px;padding:10px;border:1px solid var(--border-color);border-radius:8px;cursor:pointer;display:flex;align-items:center;gap:8px">
+                    <input type="radio" name="chat-scope-kind" value="pr" checked onchange="onChatScopeChange()"> Pull Request
+                </label>
+            </div>
+        </div>
+        <div class="form-group">
+            <label class="form-label">Repository</label>
+            <input type="text" class="form-input" id="chat-scope-repo" placeholder="owner/repo">
+        </div>
+        <div class="form-group" id="chat-scope-ref-wrap">
+            <label class="form-label" id="chat-scope-ref-label">Branch (PR head ref)</label>
+            <input type="text" class="form-input" id="chat-scope-ref" placeholder="e.g. feat/new-thing">
+        </div>
+        <div class="form-group" id="chat-scope-pr-wrap">
+            <label class="form-label">PR number</label>
+            <input type="number" class="form-input" id="chat-scope-pr" placeholder="e.g. 42">
+        </div>
+        <div class="form-group">
+            <label class="form-label">Provider</label>
+            <select class="form-input" id="chat-provider">${providerOptions}</select>
+            <div class="form-hint">Only providers of kind <code>anthropic-api</code> can run chat sessions.</div>
+        </div>
+        <div class="form-group">
+            <label class="form-label">Title <span style="color:var(--text-muted);font-weight:400">(optional)</span></label>
+            <input type="text" class="form-input" id="chat-title" placeholder="Auto-derived from scope if blank">
+        </div>
+        <div id="chat-create-error" style="display:none;padding:10px;border-radius:6px;background:rgba(239,68,68,0.1);color:#ef4444;font-size:13px;margin-top:8px"></div>
+    `, `
+        <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
+        <button class="btn btn-primary" id="chat-create-btn" onclick="submitNewChatSession()">Create session</button>
+    `);
+    onChatScopeChange();
+};
+
+window.onChatScopeChange = function () {
+    const kind = document.querySelector('input[name="chat-scope-kind"]:checked')?.value;
+    const refWrap = document.getElementById('chat-scope-ref-wrap');
+    const prWrap = document.getElementById('chat-scope-pr-wrap');
+    const refLabel = document.getElementById('chat-scope-ref-label');
+    if (!refWrap || !prWrap || !refLabel) return;
+    if (kind === 'repo') {
+        refWrap.style.display = 'none';
+        prWrap.style.display = 'none';
+    } else if (kind === 'branch') {
+        refWrap.style.display = '';
+        prWrap.style.display = 'none';
+        refLabel.textContent = 'Branch';
+    } else {
+        refWrap.style.display = '';
+        prWrap.style.display = '';
+        refLabel.textContent = 'Branch (PR head ref)';
+    }
+};
+
+window.submitNewChatSession = async function () {
+    const kind = document.querySelector('input[name="chat-scope-kind"]:checked')?.value;
+    const repo = document.getElementById('chat-scope-repo')?.value.trim();
+    const ref = document.getElementById('chat-scope-ref')?.value.trim();
+    const prNumber = Number(document.getElementById('chat-scope-pr')?.value);
+    const provider = document.getElementById('chat-provider')?.value;
+    const title = document.getElementById('chat-title')?.value.trim();
+    const errEl = document.getElementById('chat-create-error');
+    const btn = document.getElementById('chat-create-btn');
+
+    const showErr = (msg) => {
+        if (errEl) { errEl.style.display = 'block'; errEl.textContent = msg; }
+    };
+    const hideErr = () => { if (errEl) errEl.style.display = 'none'; };
+    hideErr();
+
+    if (!repo) return showErr('Repository is required (owner/repo).');
+    if ((kind === 'branch' || kind === 'pr') && !ref) return showErr('Branch/ref is required for this scope.');
+    if (kind === 'pr' && (!Number.isFinite(prNumber) || prNumber <= 0)) return showErr('Valid PR number is required.');
+
+    const scope = kind === 'repo'
+        ? { kind: 'repo', repo }
+        : kind === 'branch'
+            ? { kind: 'branch', repo, ref }
+            : { kind: 'pr', repo, ref, prNumber };
+
+    btn.disabled = true;
+    btn.textContent = '⏳ Cloning & seeding…';
+    try {
+        const res = await api.post('/api/chat/sessions', { scope, provider, title: title || undefined });
+        if (res.error) { showErr(res.error); return; }
+        chatActiveSessionId = res.session.id;
+        closeModal();
+        toast('Session created');
+        renderPage();
+    } catch (err) {
+        showErr(err.message || 'Failed to create session');
+    } finally {
+        btn.disabled = false;
+        btn.textContent = 'Create session';
+    }
+};
+
+// ─── Thread view ────────────────────────────────────────────────────────────
+
+async function renderChatThread(el, session) {
+    const data = await api.get('/api/chat/sessions/' + encodeURIComponent(session.id));
+    const messages = data.messages || [];
+
+    el.innerHTML = `
+        <div class="page-header">
+            <div class="page-header-left" style="display:flex;align-items:center;gap:12px">
+                <button class="btn btn-ghost btn-sm" onclick="closeChatSession()">← Sessions</button>
+                <div>
+                    <h1 class="page-title" style="margin:0">${esc(session.title)}</h1>
+                    <p class="page-subtitle" style="margin:4px 0 0">${chatScopeSummary(session.scope)} · <code>${esc(session.provider)}</code></p>
+                </div>
+            </div>
+        </div>
+        <div id="chat-thread" style="border:1px solid var(--border-color);border-radius:12px;padding:16px;max-height:60vh;overflow-y:auto;margin-bottom:16px;background:var(--bg-secondary)">
+            ${messages.map((m) => renderChatMessage(m)).join('') || '<p style="color:var(--text-muted);font-size:13px">No messages yet. Ask the agent something about this ' + session.scope.kind + '.</p>'}
+        </div>
+        <div style="display:flex;gap:8px;align-items:flex-end">
+            <textarea id="chat-input" class="form-input" rows="3" style="flex:1;resize:vertical" placeholder="Ask anything about this ${session.scope.kind}… (Ctrl+Enter to send)"></textarea>
+            <button class="btn btn-primary" id="chat-send-btn" onclick="sendChatMessage('${esc(session.id)}')">Send</button>
+        </div>
+    `;
+
+    // Scroll to bottom
+    const thread = document.getElementById('chat-thread');
+    if (thread) thread.scrollTop = thread.scrollHeight;
+
+    // Ctrl+Enter or Cmd+Enter to send
+    const input = document.getElementById('chat-input');
+    if (input) {
+        input.addEventListener('keydown', (e) => {
+            if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+                e.preventDefault();
+                window.sendChatMessage(session.id);
+            }
+        });
+        input.focus();
+    }
+}
+
+function chatScopeSummary(scope) {
+    if (scope.kind === 'repo') return `repo · ${esc(scope.repo)}${scope.ref ? ` @ ${esc(scope.ref)}` : ''}`;
+    if (scope.kind === 'branch') return `branch · ${esc(scope.repo)} @ ${esc(scope.ref)}`;
+    return `PR #${esc(String(scope.prNumber))} · ${esc(scope.repo)} (${esc(scope.ref)})`;
+}
+
+function renderChatMessage(m) {
+    if (m.role === 'system') {
+        // Don't render system messages in the thread — they're context for
+        // the model, not for the user. The tool_cache ones in particular
+        // would be huge.
+        return '';
+    }
+    if (m.role === 'user') {
+        return `<div class="chat-bubble chat-bubble-user"><div class="chat-bubble-content">${renderInlineText(m.content)}</div></div>`;
+    }
+    if (m.role === 'assistant') {
+        if (m.toolCall) {
+            const inputStr = JSON.stringify(m.toolCall.input, null, 2);
+            return `
+                <div class="chat-tool-card">
+                    <details>
+                        <summary>🔧 <strong>${esc(m.toolCall.name)}</strong> <span style="color:var(--text-muted);font-weight:400">${esc(summarizeToolInput(m.toolCall.input))}</span></summary>
+                        <pre style="margin-top:8px;font-size:11px;overflow-x:auto">${esc(inputStr)}</pre>
+                    </details>
+                </div>`;
+        }
+        return `<div class="chat-bubble chat-bubble-assistant"><div class="chat-bubble-content">${renderAssistantText(m.content)}</div></div>`;
+    }
+    if (m.role === 'tool') {
+        const isError = m.toolResult?.isError;
+        const body = m.content || m.toolResult?.output || '';
+        return `
+            <div class="chat-tool-result ${isError ? 'chat-tool-result-error' : ''}">
+                <details>
+                    <summary>↩️ tool result${isError ? ' <span style="color:#ef4444">(error)</span>' : ''} <span style="color:var(--text-muted);font-weight:400;font-size:11px">(${body.length} chars)</span></summary>
+                    <pre style="margin-top:8px;font-size:11px;max-height:240px;overflow:auto">${esc(body)}</pre>
+                </details>
+            </div>`;
+    }
+    return '';
+}
+
+function summarizeToolInput(input) {
+    if (!input || typeof input !== 'object') return '';
+    const keys = Object.keys(input);
+    if (keys.length === 0) return '';
+    // Show the first 2 keys with abbreviated values
+    return keys.slice(0, 2).map((k) => {
+        const v = input[k];
+        const s = typeof v === 'string' ? v : JSON.stringify(v);
+        return `${k}=${s.length > 40 ? s.slice(0, 40) + '…' : s}`;
+    }).join(', ');
+}
+
+/**
+ * Lightweight markdown-ish renderer for assistant text — handles fenced
+ * code blocks, inline `code`, **bold**, and paragraph breaks. Not full
+ * CommonMark; deliberate MVP subset. HTML is escaped first so model
+ * output can't inject arbitrary markup.
+ */
+function renderAssistantText(text) {
+    if (!text) return '';
+    // Escape HTML first.
+    let safe = esc(text);
+    // Fenced code blocks: ```lang\n ... \n```
+    safe = safe.replace(/```([a-zA-Z0-9_-]*)\n([\s\S]*?)```/g, (_m, _lang, code) => {
+        return `<pre class="chat-code">${code}</pre>`;
+    });
+    // Inline code: `...` (after block extraction so it doesn't mangle them)
+    safe = safe.replace(/`([^`]+)`/g, '<code>$1</code>');
+    // Bold: **...**
+    safe = safe.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+    // Paragraphs: split on blank lines
+    return safe.split(/\n{2,}/).map((p) => `<p>${p.replace(/\n/g, '<br>')}</p>`).join('');
+}
+
+function renderInlineText(text) {
+    return `<p>${esc(text).replace(/\n/g, '<br>')}</p>`;
+}
+
+window.sendChatMessage = async function (sessionId) {
+    if (chatThreadInFlight) {
+        toast('A response is still streaming — wait for it to finish.', 'error');
+        return;
+    }
+    const input = document.getElementById('chat-input');
+    const btn = document.getElementById('chat-send-btn');
+    const thread = document.getElementById('chat-thread');
+    if (!input || !thread) return;
+
+    const message = input.value.trim();
+    if (!message) return;
+
+    chatThreadInFlight = true;
+    input.value = '';
+    input.disabled = true;
+    btn.disabled = true;
+    btn.textContent = '⏳';
+
+    // Optimistically render the user bubble.
+    thread.insertAdjacentHTML('beforeend', renderChatMessage({
+        id: 'optimistic-' + Date.now(),
+        role: 'user',
+        content: message,
+        createdAt: new Date().toISOString(),
+    }));
+    const pending = document.createElement('div');
+    pending.className = 'chat-pending';
+    pending.innerHTML = '<span class="spinner"></span> Thinking…';
+    thread.appendChild(pending);
+    thread.scrollTop = thread.scrollHeight;
+
+    try {
+        await streamChatResponse(sessionId, message, thread, pending);
+    } catch (err) {
+        pending.innerHTML = `<span style="color:#ef4444">Error: ${esc(err.message || 'unknown')}</span>`;
+    } finally {
+        chatThreadInFlight = false;
+        input.disabled = false;
+        btn.disabled = false;
+        btn.textContent = 'Send';
+        input.focus();
+    }
+};
+
+/**
+ * Stream the SSE response for one turn. Appends one message bubble per
+ * event; drops the "Thinking…" placeholder once the first event arrives.
+ *
+ * Uses `fetch` with a ReadableStream because EventSource doesn't support
+ * POST bodies (and we need one here — the user message is the body).
+ */
+async function streamChatResponse(sessionId, message, thread, pending) {
+    const resp = await fetch('/api/chat/sessions/' + encodeURIComponent(sessionId) + '/messages', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Authorization': 'Bearer ' + dashboardToken,
+        },
+        body: JSON.stringify({ message }),
+    });
+
+    if (!resp.ok || !resp.body) {
+        const body = await resp.text().catch(() => '');
+        throw new Error(body || `HTTP ${resp.status}`);
+    }
+
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let firstEventReceived = false;
+
+    while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        // Parse SSE: `data: <json>\n\n`. Events are separated by blank lines.
+        let idx;
+        while ((idx = buffer.indexOf('\n\n')) >= 0) {
+            const raw = buffer.slice(0, idx);
+            buffer = buffer.slice(idx + 2);
+            const line = raw.split('\n').find((l) => l.startsWith('data:'));
+            if (!line) continue;
+            const jsonText = line.slice(5).trim();
+            if (!jsonText) continue;
+            let event;
+            try { event = JSON.parse(jsonText); } catch { continue; }
+
+            if (!firstEventReceived) {
+                firstEventReceived = true;
+                if (pending && pending.parentNode) pending.parentNode.removeChild(pending);
+            }
+
+            handleChatStreamEvent(event, thread);
+            thread.scrollTop = thread.scrollHeight;
+        }
+    }
+}
+
+function handleChatStreamEvent(event, thread) {
+    if (event.type === 'assistant_text' || event.type === 'tool_call' || event.type === 'tool_result') {
+        thread.insertAdjacentHTML('beforeend', renderChatMessage(event.message));
+        return;
+    }
+    if (event.type === 'error') {
+        thread.insertAdjacentHTML('beforeend',
+            `<div class="chat-tool-result chat-tool-result-error"><strong>Error:</strong> ${esc(event.error || 'unknown')}</div>`);
+    }
+    // 'done' requires no rendering.
+}
+
 // ─── Init ───────────────────────────────────────────────────────────────────
 $('#modal-close').addEventListener('click', closeModal);
 $('#modal-overlay').addEventListener('click', (e) => { if (e.target === $('#modal-overlay')) closeModal(); });
@@ -5250,7 +5720,7 @@ $$('.nav-link').forEach((link) => link.addEventListener('click', (e) => { e.prev
 window.navigate = navigate;
 
 // Hash routing: restore page from URL hash
-const validPages = ['dashboard', 'my-prs', 'issues', 'workflows', 'library', 'integrations', 'events', 'queue', 'logs', 'system', 'settings'];
+const validPages = ['dashboard', 'my-prs', 'issues', 'workflows', 'chat', 'library', 'integrations', 'events', 'queue', 'logs', 'system', 'settings'];
 const hashPage = window.location.hash.replace('#', '');
 if (validPages.includes(hashPage)) currentPage = hashPage;
 window.addEventListener('hashchange', () => {

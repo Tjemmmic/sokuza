@@ -200,6 +200,17 @@ function shouldSkip(step: WorkflowStepDefinition, ctx: ActionContext): boolean {
  * sequentially. Step-level and workflow-level AI config is resolved and
  * injected into action params.
  */
+/**
+ * Execute a workflow. Returns the accumulated step results keyed by index
+ * and by step id, which chat tools and the dashboard run-history use to
+ * surface the actual workflow output (not just success/failure). Existing
+ * callers that ignore the return value are unaffected.
+ */
+export interface WorkflowExecutionResult {
+    results: Record<number, unknown>;
+    steps: Record<string, unknown>;
+}
+
 export async function executeWorkflow(
     workflow: WorkflowDefinition,
     event: EventPayload,
@@ -209,7 +220,7 @@ export async function executeWorkflow(
     ai?: AIProviderRegistry,
     _signal?: AbortSignal,
     recordWebhookDelivery?: import('./types.js').ActionContext['recordWebhookDelivery'],
-): Promise<void> {
+): Promise<WorkflowExecutionResult> {
     const results: Record<number, unknown> = {};
     const steps: Record<string, unknown> = {};
     const tempPaths: string[] = [];
@@ -275,6 +286,7 @@ export async function executeWorkflow(
         }
 
         logger.info({ workflow: workflow.name }, 'Workflow completed');
+        return { results, steps };
     } finally {
         await cleanupTempDirs(tempPaths, logger);
     }

@@ -242,14 +242,17 @@ export class WorkflowQueue {
         this.timers.clear();
     }
 
-    executeNow(
+    async executeNow(
         workflow: WorkflowDefinition,
         event: EventPayload,
         integrationConfigs: Record<string, IntegrationConfig>,
         ai: AIProviderRegistry | undefined,
         _signal?: AbortSignal,
     ): Promise<void> {
-        return executeWorkflow(workflow, event, new Map(), this.logger, integrationConfigs, ai, _signal, undefined);
+        // Output is discarded here — this entry point is only used by
+        // legacy code paths that ignore step results. The queued-execution
+        // path (createJobExecutor) captures output via job.output.
+        await executeWorkflow(workflow, event, new Map(), this.logger, integrationConfigs, ai, _signal, undefined);
     }
 
     // ─── Internal: tick-based drain ──────────────────────────────────────

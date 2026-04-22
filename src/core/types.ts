@@ -285,6 +285,13 @@ export interface QueueJob {
     attempts: number;
     /** Hash of the config file at enqueue time for versioning. */
     configHash?: string;
+    /** Step results accumulated while executing. Populated by the executor on success. */
+    output?: {
+        /** Results keyed by step index (0-based). */
+        results: Record<number, unknown>;
+        /** Results keyed by step id (for steps that set an `id`). */
+        steps: Record<string, unknown>;
+    };
 }
 
 export const JOB_PRIORITY_ORDER: Record<JobPriority, number> = {
@@ -293,3 +300,66 @@ export const JOB_PRIORITY_ORDER: Record<JobPriority, number> = {
     normal: 2,
     low: 3,
 };
+
+// ─── Chat sessions ───────────────────────────────────────────────────────────
+
+/**
+ * A chat session is scoped to one of three GitHub targets. The scope
+ * determines what context is gathered at creation (clone depth, whether
+ * a PR diff is fetched, which metadata is seeded into the system prompt).
+ */
+export type SessionScope =
+    | { kind: 'repo'; repo: string; ref?: string }
+    | { kind: 'branch'; repo: string; ref: string }
+    | { kind: 'pr'; repo: string; ref: string; prNumber: number; title?: string; author?: string };
+
+export interface ChatSession {
+    id: string;
+    scope: SessionScope;
+    /** Absolute path to the cloned git workdir for this session. */
+    workdir: string;
+    /** Name of the AI provider used for this session (from the registry). */
+    provider: string;
+    /** Display title — auto-derived from scope, user-editable. */
+    title: string;
+    createdAt: string;
+    updatedAt: string;
+    status: 'active' | 'archived';
+}
+
+/**
+ * One append-only entry in a session's `messages.jsonl` log. Four roles:
+ *
+ *  - `system`  — seeded at creation (scope context, diff, instructions).
+ *                Never produced by a user action.
+ *  - `user`    — free-text from the human.
+ *  - `assistant` — the model's turn. May contain `text` (final content)
+ *                  OR `toolCall` (model wants to invoke a tool and will
+ *                  continue in a follow-up `assistant` turn).
+ *  - `tool`    — result of a dispatched tool, keyed back to a `toolCall.id`.
+ */
+export type ChatMessageRole = 'system' | 'user' | 'assistant' | 'tool';
+
+export interface ChatToolCall {
+    id: string;
+    name: string;
+    input: Record<string, unknown>;
+}
+
+export interface ChatToolResult {
+    callId: string;
+    output: string;
+    isError?: boolean;
+}
+
+export interface ChatMessage {
+    id: string;
+    role: ChatMessageRole;
+    /** Text content. For `tool` role: the raw output string. Empty when the turn is solely a toolCall. */
+    content: string;
+    /** When an `assistant` turn invokes a tool, the call details live here. */
+    toolCall?: ChatToolCall;
+    /** When a `tool` turn reports a result, it references the originating call id. */
+    toolResult?: ChatToolResult;
+    createdAt: string;
+}

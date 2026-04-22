@@ -32,6 +32,7 @@ import { ConfigStore } from './config-store.js';
 import { executeWorkflow } from './workflow.js';
 import { resetTemplateCache } from './templates.js';
 import { LogStore } from './log-store.js';
+import { ChatStore } from './chat-store.js';
 import pretty from 'pino-pretty';
 
 const MAX_RECENT_EVENTS = 100;
@@ -66,6 +67,7 @@ export class SokuzaEngine {
     private lastConfigHash: string = '';
     private runIdCounter = 0;
     private logStore: LogStore;
+    private chatStore: ChatStore;
 
     constructor(config: SokuzaConfig, configPath?: string) {
         this.config = config;
@@ -88,6 +90,15 @@ export class SokuzaEngine {
             recordWebhookDelivery: (d) => this.recordWebhookDelivery(d),
         });
         this.configStore = new ConfigStore(this.configPath, this.logger);
+        // One chat store instance per process — sessions live under
+        // ~/.sokuza/chat-sessions/. Shared by every /api/chat/* handler
+        // and by the chat agent itself (passed into runChatTurn).
+        this.chatStore = new ChatStore(this.logger);
+    }
+
+    /** Accessor for the shared chat store (API handlers, chat-agent). */
+    getChatStore(): ChatStore {
+        return this.chatStore;
     }
 
     /** Register an integration plugin and its actions */
@@ -179,7 +190,7 @@ export class SokuzaEngine {
     async runWorkflowByName(
         workflowName: string,
         inputs: Record<string, unknown> = {},
-    ): Promise<{ ok: boolean; error?: string; runId?: string }> {
+    ): Promise<{ ok: boolean; error?: string; runId?: string; output?: QueueJob['output'] }> {
         await this.reloadConfig();
 
         const workflow = this.config.workflows.find((wf) => wf.name === workflowName);
@@ -296,7 +307,7 @@ export class SokuzaEngine {
             runRecord.error = err.message ?? 'Workflow execution failed';
             return { ok: false, error: runRecord.error, runId };
         }
-        return { ok: true, runId };
+        return { ok: true, runId, output: job.output };
     }
 
     /** Reload config from disk — workflows, AI, queue, integrations.
@@ -480,6 +491,8 @@ export class SokuzaEngine {
             previewEvent: (event) => this.previewEvent(event),
             getWebhookDeliveries: (name?) => this.getWebhookDeliveries(name),
             reloadConfig: () => this.reloadConfig(),
+            getEngine: () => this,
+            getChatStore: () => this.chatStore,
         });
 
         for (const integration of this.integrations.values()) {
@@ -551,10 +564,13 @@ export class SokuzaEngine {
         const logger = this.logger;
         return async (job, integrationConfigs, ai, recordWebhookDelivery) => {
             try {
-                await executeWorkflow(
+                const output = await executeWorkflow(
                     job.workflow, job.event, actions, logger,
                     integrationConfigs, ai, undefined, recordWebhookDelivery,
                 );
+                // Attach step results so chat tools and run-history UI can
+                // surface the workflow's actual output — not just success/fail.
+                job.output = output;
                 if (job.status === 'running') {
                     job.status = 'completed';
                 }

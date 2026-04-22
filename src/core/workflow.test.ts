@@ -852,8 +852,7 @@ describe('AI config resolution', () => {
             steps: [{ action: 'fast-action', params: {} }],
         });
 
-        await expect(
-            executeWorkflow(wf, makeEvent(), registry, noopLogger),
-        ).resolves.toBeUndefined();
+        const result = await executeWorkflow(wf, makeEvent(), registry, noopLogger);
+        expect(result.results[0]).toBe('done');
     });
 });

@@ -31,11 +31,149 @@ interface ApiDeps {
     getWebhookDeliveries: (workflowName?: string) => WebhookDelivery[];
     /** Force the engine to re-read the config from disk (workflows + AI + queue + integrations). */
     reloadConfig: () => Promise<void>;
+    /** Handle to the running engine — used by chat tools to call `runWorkflowByName`. */
+    getEngine: () => import('../core/engine.js').SokuzaEngine;
+    /** Chat session store — shared by all /api/chat/* handlers. */
+    getChatStore: () => import('../core/chat-store.js').ChatStore;
 }
 
 function sanitizeFileName(name: string): string {
     return name.replace(/[^a-zA-Z0-9_-]/g, '-');
 }
+
+// ─── Chat session helpers ───────────────────────────────────────────────────
+//
+// `parseSessionScope` validates the body of POST /api/chat/sessions, and
+// `gatherSessionContext` runs the same github-clone-repo + github-fetch-diff
+// pipeline a PR review would, so a fresh session has a real workdir and
+// (for PR scopes) a diff cached for `get_diff` tool calls.
+
+import type { SessionScope, ChatSession, ChatMessage } from '../core/types.js';
+
+function parseSessionScope(raw: unknown): SessionScope | Error {
+    if (!raw || typeof raw !== 'object') {
+        return new Error('scope is required (one of: {kind:"repo", repo}, {kind:"branch", repo, ref}, {kind:"pr", repo, ref, prNumber})');
+    }
+    const s = raw as Record<string, unknown>;
+    const kind = s.kind;
+    const repo = s.repo;
+    if (typeof repo !== 'string' || !/^[^/\s]+\/[^/\s]+$/.test(repo)) {
+        return new Error('scope.repo must be "owner/name"');
+    }
+
+    if (kind === 'repo') {
+        const ref = typeof s.ref === 'string' && s.ref ? s.ref : undefined;
+        return { kind: 'repo', repo, ref };
+    }
+    if (kind === 'branch') {
+        const ref = typeof s.ref === 'string' ? s.ref : '';
+        if (!ref) return new Error('scope.ref is required for branch scopes');
+        return { kind: 'branch', repo, ref };
+    }
+    if (kind === 'pr') {
+        const ref = typeof s.ref === 'string' ? s.ref : '';
+        const prNumber = typeof s.prNumber === 'number' ? s.prNumber : Number(s.prNumber);
+        if (!ref) return new Error('scope.ref is required for PR scopes (the PR head branch)');
+        if (!Number.isFinite(prNumber) || prNumber <= 0) return new Error('scope.prNumber must be a positive integer');
+        return {
+            kind: 'pr',
+            repo,
+            ref,
+            prNumber,
+            title: typeof s.title === 'string' ? s.title : undefined,
+            author: typeof s.author === 'string' ? s.author : undefined,
+        };
+    }
+    return new Error(`scope.kind must be "repo" | "branch" | "pr" (got "${kind}")`);
+}
+
+async function gatherSessionContext(
+    session: ChatSession,
+    scope: SessionScope,
+    deps: ApiDeps,
+    log: import('pino').Logger,
+): Promise<void> {
+    // Reuse the existing actions — we don't want a parallel clone path.
+    const { githubCloneRepoAction } = await import('../integrations/github/actions/clone-repo.js');
+
+    // Clone into the session's workdir (not /tmp). For plain repo scopes
+    // we don't have a ref; githubCloneRepoAction falls back to main.
+    const cloneParams: Record<string, unknown> = {
+        repo: scope.repo,
+        destDir: session.workdir,
+    };
+    if (scope.kind !== 'repo') cloneParams.ref = scope.ref;
+    if (scope.kind === 'repo') cloneParams.depth = 1;
+    else if (scope.kind === 'branch') cloneParams.depth = 50;
+
+    const cloneCtx = {
+        event: {
+            source: 'chat' as const,
+            event: 'chat.session.create',
+            timestamp: new Date().toISOString(),
+            payload: {},
+            metadata: {
+                repo: scope.repo,
+                ...(scope.kind === 'pr' ? { prNumber: scope.prNumber } : {}),
+            },
+        },
+        results: {},
+        steps: {},
+        integrationConfigs: deps.getConfig().integrations,
+        ai: deps.getConfig().ai!,
+        logger: log,
+    };
+    await githubCloneRepoAction(cloneParams, cloneCtx as never);
+    log.info({ sessionId: session.id, workdir: session.workdir }, 'Chat session workdir cloned');
+
+    const store = deps.getChatStore();
+
+    // Seed the session with a system message describing the scope.
+    const scopeBlurb = describeScope(scope);
+    await store.appendMessage(session.id, { role: 'system', content: scopeBlurb });
+
+    // For PR-scoped sessions, cache the diff as a system message so
+    // `get_diff` can return it without a GitHub round-trip later.
+    if (scope.kind === 'pr') {
+        const { githubFetchDiffAction } = await import('../integrations/github/actions/fetch-diff.js');
+        const fetchCtx = {
+            ...cloneCtx,
+            event: {
+                ...cloneCtx.event,
+                payload: {
+                    pull_request: { number: scope.prNumber, head: { ref: scope.ref }, base: {} },
+                },
+                metadata: { ...cloneCtx.event.metadata, prNumber: scope.prNumber },
+            },
+        };
+        try {
+            const diffResult = await githubFetchDiffAction({ repo: scope.repo, pr_number: scope.prNumber }, fetchCtx as never);
+            const diff = (diffResult as { diff?: string })?.diff;
+            if (diff) {
+                const { formatDiffCache } = await import('../core/chat-tools.js');
+                await store.appendMessage(session.id, {
+                    role: 'system',
+                    content: formatDiffCache(diff),
+                });
+                log.info({ sessionId: session.id, diffLength: diff.length }, 'Cached PR diff for chat session');
+            }
+        } catch (err: any) {
+            // Diff fetching is best-effort — a session without a cached diff
+            // still works; get_diff will return an error the model can
+            // relay to the user.
+            log.warn({ sessionId: session.id, err: err?.message }, 'Failed to cache PR diff');
+        }
+    }
+}
+
+function describeScope(scope: SessionScope): string {
+    if (scope.kind === 'repo') return `Session scoped to repo: ${scope.repo}${scope.ref ? ` @ ${scope.ref}` : ''}`;
+    if (scope.kind === 'branch') return `Session scoped to branch: ${scope.ref} of ${scope.repo}`;
+    return `Session scoped to PR #${scope.prNumber} of ${scope.repo} (branch ${scope.ref})${scope.title ? ` — "${scope.title}"` : ''}`;
+}
+
+// `ChatMessage` is re-exported for use in the API surface (e.g. GET session).
+export type { ChatMessage };
 
 export interface EventEntry {
     event: { source: string; event: string; action?: string; metadata: Record<string, unknown> };
@@ -1005,6 +1143,165 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
         const { listModelSuggestions } = await import('../core/ai-providers.js');
         const result = await listModelSuggestions({ kind, command, base_url: baseUrl, api_key: apiKey, env });
         return result;
+    });
+
+    // ─── Chat sessions ──────────────────────────────────────────────────
+    //
+    // Six endpoints: list, create, get, patch (rename/archive), delete,
+    // and the SSE message-send. Sessions live on disk under
+    // ~/.sokuza/chat-sessions/ via ChatStore; the message-send endpoint
+    // streams agent events back to the browser as they happen.
+
+    server.get('/api/chat/sessions', async () => {
+        const store = deps.getChatStore();
+        const sessions = await store.listSessions();
+        return { sessions };
+    });
+
+    server.post('/api/chat/sessions', async (request, reply) => {
+        const body = (request.body ?? {}) as {
+            scope?: unknown;
+            provider?: string;
+            title?: string;
+        };
+
+        // ─── Validate scope ─────────────────────────────────────────
+        const scope = parseSessionScope(body.scope);
+        if (scope instanceof Error) {
+            return reply.status(400).send({ error: scope.message });
+        }
+
+        // ─── Resolve provider (must be anthropic-api kind for MVP) ──
+        const config = deps.getConfig();
+        const registry = config.ai;
+        if (!registry) {
+            return reply.status(503).send({ error: 'AI provider registry not configured' });
+        }
+        const requestedProvider = body.provider?.trim() || registry.defaultProvider;
+        const provider = registry.providers.get(requestedProvider);
+        if (!provider) {
+            return reply.status(400).send({
+                error: `Unknown provider "${requestedProvider}". Known: ${[...registry.providers.keys()].join(', ')}`,
+            });
+        }
+        if (provider.kind !== 'anthropic-api') {
+            return reply.status(400).send({
+                error: `Chat requires an anthropic-api provider; "${requestedProvider}" is kind="${provider.kind}". Pick or add an Anthropic-compatible provider (e.g. zai-glm) in the Integrations page.`,
+            });
+        }
+        if (!provider.apiKey) {
+            return reply.status(400).send({
+                error: `Provider "${requestedProvider}" has no api_key. Configure it on the Integrations page.`,
+            });
+        }
+
+        // ─── Create session record ──────────────────────────────────
+        const store = deps.getChatStore();
+        const session = await store.createSession({
+            scope,
+            provider: requestedProvider,
+            title: body.title,
+        });
+
+        // ─── Gather context (clone repo, fetch diff) ────────────────
+        // We run this inline so failures surface cleanly on the POST —
+        // a session with no workdir is broken in ways the user can't
+        // fix from the UI. If cloning fails we delete the session
+        // record and return the error.
+        try {
+            await gatherSessionContext(session, scope, deps, logger);
+            return reply.status(201).send({ session });
+        } catch (err: any) {
+            logger.error({ sessionId: session.id, err: err?.message }, 'Chat session context gathering failed');
+            await deps.getChatStore().deleteSession(session.id).catch(() => undefined);
+            return reply.status(500).send({
+                error: `Failed to set up session: ${err?.message ?? 'unknown error'}`,
+            });
+        }
+    });
+
+    server.get('/api/chat/sessions/:id', async (request, reply) => {
+        const { id } = request.params as { id: string };
+        const store = deps.getChatStore();
+        const session = await store.getSession(id);
+        if (!session) return reply.status(404).send({ error: 'Session not found' });
+        const messages = await store.getMessages(id);
+        return { session, messages };
+    });
+
+    server.patch('/api/chat/sessions/:id', async (request, reply) => {
+        const { id } = request.params as { id: string };
+        const body = (request.body ?? {}) as { title?: string; status?: string };
+        const patch: { title?: string; status?: 'active' | 'archived' } = {};
+        if (typeof body.title === 'string' && body.title.trim()) patch.title = body.title.trim();
+        if (body.status === 'active' || body.status === 'archived') patch.status = body.status;
+        if (Object.keys(patch).length === 0) {
+            return reply.status(400).send({ error: 'Nothing to update (send { title? } or { status? })' });
+        }
+        const updated = await deps.getChatStore().updateSession(id, patch);
+        if (!updated) return reply.status(404).send({ error: 'Session not found' });
+        return { session: updated };
+    });
+
+    server.delete('/api/chat/sessions/:id', async (request, reply) => {
+        const { id } = request.params as { id: string };
+        const ok = await deps.getChatStore().deleteSession(id);
+        if (!ok) return reply.status(404).send({ error: 'Session not found' });
+        return { ok: true };
+    });
+
+    /**
+     * Send a user message and stream the agent's response as SSE.
+     *
+     * Response is `text/event-stream`; each event is a JSON object with
+     * `type: 'assistant_text' | 'tool_call' | 'tool_result' | 'error' | 'done'`
+     * plus whatever payload fits. The connection closes after `done`.
+     */
+    server.post('/api/chat/sessions/:id/messages', async (request, reply) => {
+        const { id } = request.params as { id: string };
+        const body = (request.body ?? {}) as { message?: string };
+        const message = typeof body.message === 'string' ? body.message : '';
+        if (!message.trim()) {
+            return reply.status(400).send({ error: 'message is required' });
+        }
+
+        const store = deps.getChatStore();
+        const session = await store.getSession(id);
+        if (!session) return reply.status(404).send({ error: 'Session not found' });
+
+        // Hijack for SSE — same pattern the events/logs streams use.
+        reply.raw.setHeader('Content-Type', 'text/event-stream');
+        reply.raw.setHeader('Cache-Control', 'no-cache, no-transform');
+        reply.raw.setHeader('Connection', 'keep-alive');
+        reply.raw.setHeader('X-Accel-Buffering', 'no');
+        reply.raw.flushHeaders();
+        reply.hijack();
+
+        const write = (event: Record<string, unknown>) => {
+            try {
+                reply.raw.write(`data: ${JSON.stringify(event)}\n\n`);
+            } catch {
+                // Client disconnected mid-stream; the runChatTurn loop
+                // will keep running (we want the DB writes) but further
+                // writes will no-op.
+            }
+        };
+
+        const { runChatTurn } = await import('../core/chat-agent.js');
+        await runChatTurn({
+            session,
+            userMessage: message,
+            engine: deps.getEngine(),
+            logger,
+            store,
+            emit: (ev) => write(ev as unknown as Record<string, unknown>),
+        }).catch((err) => {
+            logger.error({ sessionId: id, err: err?.message }, 'Unhandled chat agent error');
+            write({ type: 'error', error: err?.message ?? String(err) });
+            write({ type: 'done' });
+        });
+
+        try { reply.raw.end(); } catch { /* already closed */ }
     });
 
     // ─── Queue ──────────────────────────────────────────────────────────

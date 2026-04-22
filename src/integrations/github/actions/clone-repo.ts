@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
-import { mkdtemp } from 'node:fs/promises';
+import { mkdtemp, mkdir } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { ActionHandler } from '../../../core/types.js';
@@ -31,7 +32,20 @@ export const githubCloneRepoAction: ActionHandler = async (params, context) => {
 
     const effectiveRef = ref || 'main';
 
-    const tempDir = await mkdtemp(join(tmpdir(), 'sokuza-repo-'));
+    // `destDir`, when provided, clones into a caller-owned path (e.g. a
+    // chat session's persistent workdir) instead of a new `/tmp` dir.
+    // The caller is then responsible for cleanup; workflow step teardown
+    // skips dirs it didn't create.
+    const destDir = params.destDir as string | undefined;
+    let tempDir: string;
+    if (destDir) {
+        if (!existsSync(destDir)) {
+            await mkdir(destDir, { recursive: true });
+        }
+        tempDir = destDir;
+    } else {
+        tempDir = await mkdtemp(join(tmpdir(), 'sokuza-repo-'));
+    }
 
     context.logger.info(
         { repo, ref: effectiveRef, depth, path: tempDir },
