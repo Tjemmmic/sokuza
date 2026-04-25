@@ -1,0 +1,43 @@
+# Auto-fix address-review trigger
+#
+# Triggers when an AI review comment lands on a PR (identified by the
+# `<!-- sokuza:run-id=... -->` marker the review action embeds). Runs
+# the address-review action which:
+#
+#   - Reads the structured review record from ~/.sokuza/runs/ai-review/
+#   - Acquires the persistent workdir for this PR
+#   - Runs the /address-review skill via ai-agent
+#   - In `suggest` mode: posts a single GitHub review with line suggestions
+#   - In `push` mode: commits + pushes fixes to the PR head branch
+#
+# Loop guards halt automatically on:
+#   - iteration cap reached
+#   - merge-ready heuristic satisfied (no P1 issues, ≤N P2, etc.)
+#   - identical issue fingerprint as the previous iteration
+#   - PR has the `sokuza-no-auto-fix` label
+#   - PR closed
+#
+# Usage:
+#   - name: my-auto-fix-address
+#     template: auto-fix-address-review
+#     trigger:
+#       repo: "my-org/my-repo"
+#     params:
+#       mode: suggest
+#       max_iterations: 5
+
+trigger:
+  source: github
+  event: issue_comment.created
+  filters:
+    # Only trigger on AI review comments — the marker is embedded by
+    # github-create-review in suggest/COMMENT mode reviews.
+    "payload.comment.body": "*<!-- sokuza:run-id=*"
+
+steps:
+  - id: address
+    action: address-review
+    params:
+      mode: suggest
+      max_iterations: 5
+      # review_run_id auto-resolves from the comment marker

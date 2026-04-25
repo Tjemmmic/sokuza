@@ -97,11 +97,65 @@ describe('GitHubApiClient', () => {
             new Response(JSON.stringify(mockReview), { status: 200 }),
         );
 
-        const result = await client.createReview('owner', 'repo', 1, 'Looks good', 'COMMENT');
+        const result = await client.createReview('owner', 'repo', 1, { body: 'Looks good', event: 'COMMENT' });
         expect(result.id).toBe(456);
 
         const fetchCall = vi.mocked(fetch).mock.calls[0];
         expect(fetchCall[0]).toBe('https://api.github.com/repos/owner/repo/pulls/1/reviews');
+    });
+
+    it('should create a review with inline comments', async () => {
+        vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+            new Response(JSON.stringify({ id: 789 }), { status: 200 }),
+        );
+
+        await client.createReview('owner', 'repo', 1, {
+            body: 'See inline',
+            event: 'REQUEST_CHANGES',
+            comments: [
+                { path: 'src/foo.ts', line: 42, side: 'RIGHT', body: 'nit' },
+                { path: 'src/bar.ts', line: 10, start_line: 8, side: 'RIGHT', body: 'multi-line' },
+            ],
+        });
+
+        const fetchCall = vi.mocked(fetch).mock.calls[0];
+        const body = JSON.parse(fetchCall[1]?.body as string);
+        expect(body.event).toBe('REQUEST_CHANGES');
+        expect(body.comments).toHaveLength(2);
+        expect(body.comments[0]).toMatchObject({ path: 'src/foo.ts', line: 42 });
+    });
+
+    it('should add labels', async () => {
+        vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+            new Response('[]', { status: 200 }),
+        );
+        await client.addLabels('owner', 'repo', 5, ['bug', 'urgent']);
+        const call = vi.mocked(fetch).mock.calls[0];
+        expect(call[0]).toBe('https://api.github.com/repos/owner/repo/issues/5/labels');
+        expect(JSON.parse(call[1]?.body as string)).toEqual({ labels: ['bug', 'urgent'] });
+    });
+
+    it('addLabels is a no-op for empty array', async () => {
+        const spy = vi.spyOn(globalThis, 'fetch');
+        await client.addLabels('owner', 'repo', 5, []);
+        expect(spy).not.toHaveBeenCalled();
+    });
+
+    it('should remove a label and treat 404 as success', async () => {
+        vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+            new Response('not found', { status: 404, statusText: 'Not Found' }),
+        );
+        await expect(
+            client.removeLabel('owner', 'repo', 5, 'wontfix'),
+        ).resolves.toBeUndefined();
+    });
+
+    it('should list labels', async () => {
+        vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+            new Response(JSON.stringify([{ name: 'bug' }, { name: 'help wanted' }]), { status: 200 }),
+        );
+        const labels = await client.listLabels('owner', 'repo', 5);
+        expect(labels).toEqual(['bug', 'help wanted']);
     });
 
     it('should throw on API error', async () => {

@@ -1,0 +1,52 @@
+# AI PR Review with auto-fix loop
+#
+# Two cooperating workflows:
+#   1. `auto-fix-pr-review` — runs ai-review on PR open/update, posts as
+#      a real GitHub Review (not a plain comment), embeds the run-id
+#      marker so the next workflow can detect it.
+#   2. `auto-fix-address-review` — fires when the AI review's comment
+#      lands; reads the structured record from ~/.sokuza/runs/ai-review/
+#      and runs the address-review action.
+#
+# Usage:
+#   - name: my-auto-fix
+#     template: auto-fix-pr-review
+#     trigger:
+#       repo: "my-org/my-repo"
+#     params:
+#       mode: suggest        # 'suggest' (post inline-suggestion review) or 'push'
+#       max_iterations: 5
+#       max_p2: 1            # tolerate up to 1 P2 issue at merge-ready
+#
+# Global defaults can live in ~/.sokuza/config.yaml under `auto_fix:`:
+#
+#   auto_fix:
+#     mode: suggest
+#     max_iterations: 5
+#     merge_ready: { max_p1: 0, max_p2: 1, max_p3: -1 }
+#     cooldown_seconds: 30
+
+trigger:
+  source: github
+  event: pull_request.opened
+
+steps:
+  - id: clone
+    action: github-clone-repo
+    params: {}
+
+  - id: fetch_diff
+    action: github-fetch-diff
+    params: {}
+
+  - id: review
+    action: ai-review
+    params:
+      workdir: "{{steps.clone.path}}"
+
+  # Post as a real GitHub Review (not a plain issue comment) so the
+  # marker is preserved and reviewers see proper inline anchors.
+  - action: github-create-review
+    params:
+      structured: "{{steps.review.parsed}}"
+      run_id: "{{steps.review.id}}"

@@ -107,10 +107,27 @@ function matchesFilter(
     // Standard dot-path resolution
     const actual = resolvePath(event, filterKey);
     if (actual === undefined || actual === null) return false;
-    if (CASE_INSENSITIVE_PATHS.has(filterKey)) {
-        return String(actual).toLowerCase() === expected.toLowerCase();
+    const actualStr = CASE_INSENSITIVE_PATHS.has(filterKey)
+        ? String(actual).toLowerCase()
+        : String(actual);
+    const expectedStr = CASE_INSENSITIVE_PATHS.has(filterKey)
+        ? expected.toLowerCase()
+        : expected;
+
+    // Glob support: `*` matches any run of characters. Anchored at both
+    // ends unless the pattern itself uses `*` there. Required for body
+    // filters like "*<!-- sokuza:run-id=*" or "*/sokuza fix*".
+    if (expectedStr.includes('*')) {
+        return globMatch(expectedStr, actualStr);
     }
-    return String(actual) === expected;
+    return actualStr === expectedStr;
+}
+
+function globMatch(pattern: string, value: string): boolean {
+    // Escape regex specials except `*`, then convert `*` to `.*`. Dotall
+    // flag because comment bodies routinely span multiple lines.
+    const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
+    return new RegExp(`^${escaped}$`, 's').test(value);
 }
 
 type StepGroup = {
@@ -174,6 +191,11 @@ function applyAIConfigToParams(
     return merged;
 }
 
+interface MakeContextExtras {
+    workdirManager?: import('./types.js').ActionContext['workdirManager'];
+    getConfig?: import('./types.js').ActionContext['getConfig'];
+}
+
 function makeContext(
     event: EventPayload,
     results: Record<number, unknown>,
@@ -183,8 +205,14 @@ function makeContext(
     logger: Logger,
     workflowName?: string,
     recordWebhookDelivery?: import('./types.js').ActionContext['recordWebhookDelivery'],
+    extras?: MakeContextExtras,
 ): ActionContext {
-    return { event, results, steps, integrationConfigs, ai, logger, workflowName, recordWebhookDelivery };
+    return {
+        event, results, steps, integrationConfigs, ai, logger, workflowName,
+        recordWebhookDelivery,
+        workdirManager: extras?.workdirManager,
+        getConfig: extras?.getConfig,
+    };
 }
 
 function shouldSkip(step: WorkflowStepDefinition, ctx: ActionContext): boolean {
@@ -220,6 +248,7 @@ export async function executeWorkflow(
     ai?: AIProviderRegistry,
     _signal?: AbortSignal,
     recordWebhookDelivery?: import('./types.js').ActionContext['recordWebhookDelivery'],
+    extras?: MakeContextExtras,
 ): Promise<WorkflowExecutionResult> {
     const results: Record<number, unknown> = {};
     const steps: Record<string, unknown> = {};
@@ -235,7 +264,7 @@ export async function executeWorkflow(
         for (const group of groups) {
             if (group.kind === 'sequential') {
                 const { index, step } = group.steps[0];
-                const ctx = makeContext(event, results, steps, integrationConfigs, aiRegistry, logger, workflow.name, recordWebhookDelivery);
+                const ctx = makeContext(event, results, steps, integrationConfigs, aiRegistry, logger, workflow.name, recordWebhookDelivery, extras);
 
                 if (shouldSkip(step, ctx)) {
                     logger.info(
@@ -277,7 +306,7 @@ export async function executeWorkflow(
                 const parallelResults = await runParallelGroup(
                     workflow, group.steps, event, results, steps,
                     actionRegistry, integrationConfigs, aiRegistry, logger,
-                    recordWebhookDelivery,
+                    recordWebhookDelivery, extras,
                 );
                 for (const pr of parallelResults) {
                     if (pr) collectTempPath(pr.result, tempPaths);
@@ -309,10 +338,11 @@ async function runParallelGroup(
     aiRegistry: AIProviderRegistry,
     logger: Logger,
     recordWebhookDelivery?: import('./types.js').ActionContext['recordWebhookDelivery'],
+    extras?: MakeContextExtras,
 ): Promise<ParallelStepResult[]> {
     const settled = await Promise.allSettled(
         groupSteps.map(async ({ index, step }): Promise<ParallelStepResult | undefined> => {
-            const ctx = makeContext(event, results, steps, integrationConfigs, aiRegistry, logger, workflow.name, recordWebhookDelivery);
+            const ctx = makeContext(event, results, steps, integrationConfigs, aiRegistry, logger, workflow.name, recordWebhookDelivery, extras);
 
             if (shouldSkip(step, ctx)) {
                 logger.info(

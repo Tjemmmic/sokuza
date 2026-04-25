@@ -177,6 +177,14 @@ export interface ActionContext {
     workflowName?: string;
     /** Record an outbound webhook delivery for the delivery log */
     recordWebhookDelivery?: (delivery: Omit<WebhookDelivery, 'id' | 'timestamp'>) => void;
+    /** Persistent per-PR workdir manager for the address-review action.
+     *  Engine populates this; actions that don't need it ignore it. */
+    workdirManager?: import('./workdir-store.js').WorkdirManager;
+    /** Snapshot of the resolved global config. Used by actions that
+     *  cascade defaults from `~/.sokuza/config.yaml` (e.g.
+     *  `address-review` reads `auto_fix:`). Always read via accessor;
+     *  the underlying config object may be reloaded between calls. */
+    getConfig?: () => SokuzaConfig;
 }
 
 export type ActionHandler = (

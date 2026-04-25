@@ -83,13 +83,113 @@ export interface AiReviewRunRecord {
         parseSucceeded: boolean;
         decision?: string;
         issueCount?: number;
-        issues?: Array<{ priority: string; title: string; file: string }>;
+        issues?: Array<{
+            priority: string;
+            title: string;
+            file: string;
+            path?: string;
+            lineStart?: number;
+            lineEnd?: number;
+            problem?: string;
+            fix?: string;
+        }>;
         reviewChars: number;
     };
     /** Set when the action threw before completing. */
     error?: string;
     /** Operator-supplied verdict on whether this review was useful. */
     label?: AiReviewLabel;
+}
+
+export type AddressReviewMode = 'suggest' | 'push';
+export type AddressReviewHaltReason =
+    | 'iteration-cap'
+    | 'merge-ready'
+    | 'fingerprint-repeat'
+    | 'human-pushed'
+    | 'tests-failed'
+    | 'pr-closed'
+    | 'skip-label'
+    | 'cooldown'
+    | 'workdir-locked';
+
+/** Records the work performed by one address-review iteration on a PR. */
+export interface AddressReviewRunRecord {
+    id: string;
+    action: 'address-review';
+    createdAt: string;
+    durationMs: number;
+    workflowName?: string;
+
+    pr: {
+        repo: string;
+        prNumber: number;
+        baseSha?: string;
+        headSha?: string;
+        branch?: string;
+    };
+    /** 1-indexed iteration number for this PR's auto-fix loop. */
+    iteration: number;
+    iterationCap: number;
+
+    sourceReviewRunId: string;
+    mode: AddressReviewMode;
+
+    provider: string;
+    model: string;
+    usage?: { input_tokens?: number; output_tokens?: number };
+
+    issues: {
+        addressed: AddressedIssue[];
+        rejected: AddressedIssue[];
+        deferred: AddressedIssue[];
+    };
+
+    workdir: { path: string; reused: boolean; sizeBytes?: number };
+
+    tests?: {
+        ranTests: boolean;
+        command?: string;
+        passed?: boolean;
+        durationMs?: number;
+        output?: string;
+    };
+
+    push?: { commitSha: string; pushedAt: string; ref: string };
+    suggest?: { reviewId: number | string; commentCount: number; htmlUrl?: string };
+
+    /** Hash of the issue set the agent acted on. Used to detect "same review
+     *  twice in a row" as a fingerprint-repeat halt condition. */
+    issueFingerprint: string;
+
+    haltReason?: AddressReviewHaltReason;
+    error?: string;
+    label?: AiReviewLabel;
+}
+
+export interface AddressedIssue {
+    priority: string;
+    title: string;
+    file?: string;
+    reasoning?: string;
+}
+
+export type AnyRunRecord = AiReviewRunRecord | AddressReviewRunRecord;
+export type AnyRunSummary = AiReviewRunSummary | AddressReviewRunSummary;
+
+export type AddressReviewRunSummary = Omit<AddressReviewRunRecord, 'issues' | 'workdir' | 'tests'> & {
+    issues: { addressed: number; rejected: number; deferred: number };
+    workdir: Omit<AddressReviewRunRecord['workdir'], 'sizeBytes'> & { sizeBytes?: number };
+    tests?: Omit<NonNullable<AddressReviewRunRecord['tests']>, 'output'>;
+};
+
+/** Stable hash of an issue set, used for fingerprint-repeat detection. */
+export function issueFingerprint(issues: Array<{ priority: string; title: string; file?: string }>): string {
+    const norm = issues
+        .map((i) => `${i.priority}|${i.title}|${i.file ?? ''}`)
+        .sort()
+        .join('\n');
+    return createHash('sha256').update(norm).digest('hex').slice(0, 16);
 }
 
 export function generateRunId(): string {
@@ -134,6 +234,109 @@ export async function recordAiReviewRun(
     await writeRecord(record, logger, baseDir);
 }
 
+export async function recordAddressReviewRun(
+    record: AddressReviewRunRecord,
+    logger: Logger,
+    baseDir?: string,
+): Promise<void> {
+    await writeRecord(record, logger, baseDir);
+}
+
+export async function getAddressReviewRunById(
+    id: string,
+    baseDir?: string,
+): Promise<AddressReviewRunRecord | null> {
+    const root = join(baseDir ?? defaultRunsDir(), 'address-review');
+    if (!existsSync(root)) return null;
+
+    const expectedDate = dateFromRunId(id);
+    if (expectedDate) {
+        const fast = join(root, expectedDate, `${id}.json`);
+        if (existsSync(fast)) return readRunFile(fast) as Promise<AddressReviewRunRecord | null>;
+    }
+    const dirs = (await readdir(root, { withFileTypes: true }))
+        .filter((d) => d.isDirectory())
+        .map((d) => d.name)
+        .sort()
+        .reverse();
+    for (const d of dirs) {
+        if (d === expectedDate) continue;
+        const file = join(root, d, `${id}.json`);
+        if (existsSync(file)) return readRunFile(file) as Promise<AddressReviewRunRecord | null>;
+    }
+    return null;
+}
+
+export interface ListAddressReviewRunsOptions {
+    limit?: number;
+    since?: string;
+    until?: string;
+    repo?: string;
+    prNumber?: number;
+    mode?: AddressReviewMode;
+    workflowName?: string;
+    baseDir?: string;
+}
+
+/** Enumerate address-review runs newest-first. Mirrors `listAiReviewRuns`. */
+export async function listAddressReviewRuns(
+    opts: ListAddressReviewRunsOptions = {},
+): Promise<AddressReviewRunSummary[]> {
+    const root = join(opts.baseDir ?? defaultRunsDir(), 'address-review');
+    if (!existsSync(root)) return [];
+    const limit = Math.min(opts.limit ?? 100, 1000);
+
+    const dateDirs = (await readdir(root, { withFileTypes: true }))
+        .filter((d) => d.isDirectory())
+        .map((d) => d.name)
+        .sort()
+        .reverse();
+
+    const out: AddressReviewRunSummary[] = [];
+    for (const dateDir of dateDirs) {
+        if (opts.since && dateDir < opts.since.slice(0, 10)) break;
+        if (opts.until && dateDir > opts.until.slice(0, 10)) continue;
+        const dirPath = join(root, dateDir);
+        const files = (await readdir(dirPath)).filter((f) => f.endsWith('.json'));
+        const records: AddressReviewRunRecord[] = [];
+        for (const file of files) {
+            const record = await readRunFile(join(dirPath, file)) as AddressReviewRunRecord | null;
+            if (record && record.action === 'address-review') records.push(record);
+        }
+        records.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+        for (const record of records) {
+            if (opts.since && record.createdAt < opts.since) continue;
+            if (opts.until && record.createdAt > opts.until) continue;
+            if (opts.repo && record.pr.repo !== opts.repo) continue;
+            if (opts.prNumber && record.pr.prNumber !== opts.prNumber) continue;
+            if (opts.mode && record.mode !== opts.mode) continue;
+            if (opts.workflowName && record.workflowName !== opts.workflowName) continue;
+            out.push(toAddressSummary(record));
+            if (out.length >= limit) return out;
+        }
+    }
+    return out;
+}
+
+function toAddressSummary(record: AddressReviewRunRecord): AddressReviewRunSummary {
+    const { issues, workdir, tests, ...rest } = record;
+    return {
+        ...rest,
+        issues: {
+            addressed: issues.addressed.length,
+            rejected: issues.rejected.length,
+            deferred: issues.deferred.length,
+        },
+        workdir: { path: workdir.path, reused: workdir.reused, sizeBytes: workdir.sizeBytes },
+        tests: tests ? {
+            ranTests: tests.ranTests,
+            command: tests.command,
+            passed: tests.passed,
+            durationMs: tests.durationMs,
+        } : undefined,
+    };
+}
+
 /** Apply a label to an existing record. Read-modify-write under the
  *  assumption that records are never updated concurrently from multiple
  *  callers (label edits are user-driven and rare). Returns the updated
@@ -167,12 +370,12 @@ export async function clearAiReviewLabel(
     return record;
 }
 
-/** Single writer for both the initial record and label edits. Emits
- *  `ai-review-run` on success so SSE subscribers refresh consistently
- *  for either origin. Disk failures log and swallow — observability is
- *  best-effort and must never fail an action. */
+/** Single writer for both record kinds and for label edits. Emits a
+ *  per-action SSE event on success so the dashboard refreshes
+ *  consistently regardless of origin. Disk failures log and swallow —
+ *  observability is best-effort and must never fail an action. */
 async function writeRecord(
-    record: AiReviewRunRecord,
+    record: AnyRunRecord,
     logger: Logger,
     baseDir?: string,
 ): Promise<void> {
@@ -184,9 +387,13 @@ async function writeRecord(
         await mkdir(dir, { recursive: true });
         await writeFile(file, JSON.stringify(record, null, 2), 'utf-8');
         await chmod(file, 0o600).catch(() => undefined);
-        runStoreEvents.emit('ai-review-run', toSummary(record));
+        if (record.action === 'ai-review') {
+            runStoreEvents.emit('ai-review-run', toSummary(record));
+        } else {
+            runStoreEvents.emit('address-review-run', toAddressSummary(record));
+        }
     } catch (err) {
-        logger.warn({ err, file }, 'Failed to persist ai-review run record; continuing');
+        logger.warn({ err, file, action: record.action }, 'Failed to persist run record; continuing');
     }
 }
 
@@ -227,20 +434,25 @@ export async function listAiReviewRuns(
         .sort()
         .reverse(); // newest day first
 
+    // Read every record in each day's bucket up front so we can sort
+    // by `createdAt` rather than filename. Filename sort works for
+    // production-style timestamp-prefixed ids but breaks for ad-hoc
+    // names (tests, manual seeds). Per-day batches keep memory bounded.
     const results: AiReviewRunSummary[] = [];
     for (const dateDir of dateDirs) {
         if (opts.since && dateDir < opts.since.slice(0, 10)) break;
         if (opts.until && dateDir > opts.until.slice(0, 10)) continue;
 
         const dirPath = join(root, dateDir);
-        const files = (await readdir(dirPath))
-            .filter((f) => f.endsWith('.json'))
-            .sort()
-            .reverse(); // newest run first within the day
-
+        const files = (await readdir(dirPath)).filter((f) => f.endsWith('.json'));
+        const records: AiReviewRunRecord[] = [];
         for (const file of files) {
             const record = await readRunFile(join(dirPath, file));
-            if (!record) continue;
+            if (record) records.push(record);
+        }
+        records.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+
+        for (const record of records) {
             if (!matchesFilters(record, opts)) continue;
             results.push(toSummary(record));
             if (results.length >= limit) return results;

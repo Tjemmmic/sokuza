@@ -1,0 +1,51 @@
+# Sokuza slash commands
+#
+# Three workflows reviewers can trigger by commenting on a PR:
+#
+#   /sokuza fix [mode=suggest|push]   trigger an address-review run.
+#                                     `mode=` overrides the workflow's
+#                                     configured mode for this invocation.
+#   /sokuza skip                       add the `sokuza-no-auto-fix` label,
+#                                     halting auto-fix permanently.
+#   /sokuza unskip                     remove the skip label.
+#
+# Add as separate workflows from this template, or copy the steps you
+# want into your existing workflow set.
+
+# ─── /sokuza fix ──────────────────────────────────────────────────────
+- name: sokuza-fix-command
+  trigger:
+    source: github
+    event: issue_comment.created
+    filters:
+      "payload.comment.body": "*/sokuza fix*"
+  steps:
+    - id: fix
+      action: address-review
+      params:
+        review_run_id: latest
+        # mode resolves to slash-command arg (`mode=push`) > params > global config
+
+# ─── /sokuza skip ─────────────────────────────────────────────────────
+- name: sokuza-skip-command
+  trigger:
+    source: github
+    event: issue_comment.created
+    filters:
+      "payload.comment.body": "*/sokuza skip*"
+  steps:
+    - action: github-add-label
+      params:
+        label: sokuza-no-auto-fix
+
+# ─── /sokuza unskip ───────────────────────────────────────────────────
+- name: sokuza-unskip-command
+  trigger:
+    source: github
+    event: issue_comment.created
+    filters:
+      "payload.comment.body": "*/sokuza unskip*"
+  steps:
+    - action: github-remove-label
+      params:
+        label: sokuza-no-auto-fix

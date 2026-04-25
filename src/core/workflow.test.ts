@@ -250,6 +250,68 @@ describe('matchesTrigger', () => {
             expect(matchesTrigger(wf, event)).toBe(false);
         });
 
+        describe('glob filters', () => {
+            it('matches a substring with leading and trailing *', () => {
+                const wf = makeWorkflow({
+                    trigger: {
+                        source: 'github',
+                        event: 'issue_comment.created',
+                        filters: { 'payload.comment.body': '*sokuza:run-id=*' },
+                    },
+                });
+                const event = makeEvent({
+                    event: 'issue_comment.created',
+                    payload: { comment: { body: 'Header\n<!-- sokuza:run-id=abc-123 -->\nBody' } },
+                });
+                expect(matchesTrigger(wf, event)).toBe(true);
+            });
+
+            it('does not match when the substring is absent', () => {
+                const wf = makeWorkflow({
+                    trigger: {
+                        source: 'github',
+                        event: 'issue_comment.created',
+                        filters: { 'payload.comment.body': '*/sokuza fix*' },
+                    },
+                });
+                const event = makeEvent({
+                    event: 'issue_comment.created',
+                    payload: { comment: { body: 'lgtm' } },
+                });
+                expect(matchesTrigger(wf, event)).toBe(false);
+            });
+
+            it('matches a prefix with trailing *', () => {
+                const wf = makeWorkflow({
+                    trigger: {
+                        source: 'github',
+                        event: 'issue_comment.created',
+                        filters: { 'payload.comment.body': '/sokuza fix*' },
+                    },
+                });
+                expect(matchesTrigger(wf, makeEvent({
+                    event: 'issue_comment.created',
+                    payload: { comment: { body: '/sokuza fix mode=suggest' } },
+                }))).toBe(true);
+                expect(matchesTrigger(wf, makeEvent({
+                    event: 'issue_comment.created',
+                    payload: { comment: { body: 'please /sokuza fix this' } },
+                }))).toBe(false);
+            });
+
+            it('treats non-glob expected as exact match (existing behavior)', () => {
+                const wf = makeWorkflow({
+                    trigger: {
+                        source: 'github',
+                        event: 'pull_request.opened',
+                        filters: { 'metadata.repo': 'org/repo' },
+                    },
+                });
+                expect(matchesTrigger(wf, makeEvent({ metadata: { repo: 'org/repo' } }))).toBe(true);
+                expect(matchesTrigger(wf, makeEvent({ metadata: { repo: 'other/repo' } }))).toBe(false);
+            });
+        });
+
         it('skips filters for manual triggers', () => {
             const wf = makeWorkflow({
                 trigger: {

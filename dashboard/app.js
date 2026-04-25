@@ -448,6 +448,7 @@ async function renderPage() {
             case 'integrations': await renderIntegrations(el); break;
             case 'events': await renderEvents(el); break;
             case 'queue': await renderQueue(el); break;
+            case 'auto-fix': await renderAutoFix(el); break;
             case 'ai-reviews': await renderAiReviews(el); break;
             case 'logs': await renderLogs(el); break;
             case 'system': await renderSystem(el); break;
@@ -4628,6 +4629,16 @@ function connectSSE() {
                 }
                 return;
             }
+            if (data.type === 'address-review-run') {
+                if (currentPage === 'auto-fix') {
+                    if (autoFixRefreshTimer) clearTimeout(autoFixRefreshTimer);
+                    autoFixRefreshTimer = setTimeout(() => {
+                        loadAutoFixAddressRuns();
+                        loadAutoFixWorkdirs();
+                    }, 400);
+                }
+                return;
+            }
             events.unshift(data);
             if (events.length > 500) events.pop();
 
@@ -4931,12 +4942,386 @@ function renderLogLine(e) {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
+// AUTO-FIX — host page for the address-review action: persistent workdirs,
+// per-PR convergence timelines (later phase), address run records (later
+// phase). Phase A surface is the Workdirs panel only.
+// ═════════════════════════════════════════════════════════════════════════════
+async function renderAutoFix(el) {
+    el.innerHTML = `
+        <div class="page-header">
+            <div class="page-header-left">
+                <h1 class="page-title">Auto-Fix</h1>
+                <p class="page-subtitle">Address-review runs, persistent workdirs, and PR convergence telemetry</p>
+            </div>
+            <div class="btn-group">
+                <button class="btn btn-ghost btn-sm" onclick="renderAutoFix($('#content'))">↻ Refresh</button>
+            </div>
+        </div>
+
+        <h3 style="font-size:13px;color:var(--text-secondary);margin:18px 0 10px;letter-spacing:0.5px">ADDRESS RUNS</h3>
+        <div id="auto-fix-address-runs"></div>
+
+        <h3 style="font-size:13px;color:var(--text-secondary);margin:24px 0 10px;letter-spacing:0.5px">WORKDIRS</h3>
+        <div id="auto-fix-workdirs"></div>
+    `;
+    await loadPricing();
+    await Promise.all([loadAutoFixAddressRuns(), loadAutoFixWorkdirs()]);
+}
+
+async function loadAutoFixAddressRuns() {
+    const target = $('#auto-fix-address-runs');
+    if (!target) return;
+    target.innerHTML = '<div class="skeleton skeleton-card"></div>';
+    let data;
+    try {
+        data = await api.get('/api/auto-fix/address-runs?limit=200');
+    } catch (err) {
+        target.innerHTML = `<div class="empty-state"><div class="empty-icon">⚠️</div><p class="empty-text">Failed to load address runs: ${esc(err.message)}</p></div>`;
+        return;
+    }
+    const runs = data.runs || [];
+    if (runs.length === 0) {
+        target.innerHTML = `
+            <div class="empty-state">
+                <div class="empty-icon">🔧</div>
+                <p class="empty-text">No address-review runs yet. Trigger one from an AI Review record (look for the "Address this review" button) or via the <code>/sokuza fix</code> slash command on a PR.</p>
+            </div>
+        `;
+        return;
+    }
+    target.innerHTML = `
+        <div class="table-wrap" style="overflow-x:auto">
+            <table style="min-width:960px">
+                <thead><tr>
+                    <th>Time</th>
+                    <th>PR</th>
+                    <th>Mode</th>
+                    <th>Iter</th>
+                    <th>Issues</th>
+                    <th>Tests</th>
+                    <th style="text-align:right">Cost</th>
+                    <th>Outcome</th>
+                </tr></thead>
+                <tbody>${runs.map(renderAddressRunRow).join('')}</tbody>
+            </table>
+        </div>
+    `;
+}
+
+function renderAddressRunRow(r) {
+    const repoCell = r.pr?.repo ? `<a onclick="event.stopPropagation();openPrTimeline('${esc(r.pr.repo)}',${r.pr.prNumber})" style="cursor:pointer;color:var(--accent-hover)">${esc(r.pr.repo)} <span style="color:var(--text-muted)">#${r.pr.prNumber}</span></a>` : '—';
+    const cost = estimateCostFromUsage(r.provider, r.model, r.usage);
+    const costCell = cost == null
+        ? `<span style="color:var(--text-muted)">—</span>`
+        : `<span style="font-family:var(--mono);color:var(--text-muted)">${esc(fmtCost(cost))}</span>`;
+    const modeBadge = r.mode === 'push'
+        ? `<span class="badge" style="background:#f59e0b22;color:#f59e0b">push</span>`
+        : `<span class="badge" style="background:#22c55e22;color:#22c55e">suggest</span>`;
+    const issueSummary = r.issues
+        ? `${r.issues.addressed}✓ · ${r.issues.rejected}✗ · ${r.issues.deferred}⏸`
+        : '—';
+    const testsCell = r.tests
+        ? (r.tests.ranTests
+            ? (r.tests.passed
+                ? `<span style="color:#22c55e">✓ ${esc(r.tests.command || '')}</span>`
+                : `<span style="color:#ef4444">✗ ${esc(r.tests.command || '')}</span>`)
+            : `<span style="color:var(--text-muted)">none</span>`)
+        : '<span style="color:var(--text-muted)">—</span>';
+
+    let outcome, outcomeColor;
+    if (r.error) { outcome = 'error'; outcomeColor = '#ef4444'; }
+    else if (r.haltReason) { outcome = `halted: ${r.haltReason}`; outcomeColor = '#f59e0b'; }
+    else if (r.push?.commitSha) { outcome = `pushed ${r.push.commitSha.slice(0, 8)}`; outcomeColor = '#22c55e'; }
+    else if (r.suggest?.reviewId) { outcome = `review ${r.suggest.commentCount} comments`; outcomeColor = '#22c55e'; }
+    else { outcome = 'ok'; outcomeColor = '#22c55e'; }
+
+    return `
+        <tr style="cursor:pointer" onclick="openAddressRunDetail('${esc(r.id)}')">
+            <td style="font-family:var(--mono);font-size:12px;color:var(--text-muted);white-space:nowrap">${esc(fmtDateTime(r.createdAt))}</td>
+            <td style="font-size:12px;white-space:nowrap">${repoCell}</td>
+            <td>${modeBadge}</td>
+            <td style="font-size:12px;text-align:center">${r.iteration}/${r.iterationCap}</td>
+            <td style="font-family:var(--mono);font-size:11px;white-space:nowrap">${issueSummary}</td>
+            <td style="font-size:12px;white-space:nowrap">${testsCell}</td>
+            <td style="text-align:right">${costCell}</td>
+            <td style="font-size:12px;white-space:nowrap"><span class="badge" style="background:${outcomeColor}22;color:${outcomeColor}">${esc(outcome)}</span></td>
+        </tr>
+    `;
+}
+
+window.openPrTimeline = async function (repoFull, prNumber) {
+    const [owner, repo] = repoFull.split('/');
+    if (!owner || !repo) return;
+    openModal(`Convergence: ${repoFull} #${prNumber}`, '<div class="skeleton skeleton-card"></div>');
+    let data;
+    try {
+        data = await api.get(`/api/auto-fix/pr/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/${prNumber}/timeline`);
+    } catch (err) {
+        $('#modal-body').innerHTML = `<p style="color:#ef4444">Failed to load timeline: ${esc(err.message)}</p>`;
+        return;
+    }
+    $('#modal-body').innerHTML = renderPrTimelineBody(data);
+};
+
+function renderPrTimelineBody(data) {
+    const entries = [];
+    for (const r of data.reviews) entries.push({ kind: 'review', record: r, at: r.createdAt });
+    for (const r of data.addressRuns) entries.push({ kind: 'address', record: r, at: r.createdAt });
+    entries.sort((a, b) => a.at.localeCompare(b.at));
+
+    if (entries.length === 0) {
+        return '<p style="color:var(--text-muted);font-size:12px">No records yet for this PR.</p>';
+    }
+
+    let totalCost = 0;
+    let costed = false;
+    for (const e of entries) {
+        const c = estimateCostFromUsage(e.record.provider, e.record.model, e.record.usage);
+        if (c != null) { totalCost += c; costed = true; }
+    }
+
+    const summary = `${data.reviews.length} reviews · ${data.addressRuns.length} address runs${costed ? ` · est. cost ${fmtCost(totalCost)}` : ''}`;
+    const parts = [];
+    parts.push(`<p style="font-size:12px;color:var(--text-muted);margin-bottom:14px">${summary}</p>`);
+    parts.push('<div style="display:flex;flex-direction:column;gap:10px">');
+
+    for (const e of entries) {
+        const cost = estimateCostFromUsage(e.record.provider, e.record.model, e.record.usage);
+        const costSpan = cost == null ? '' : ` <span style="color:var(--text-muted);font-size:11px">${esc(fmtCost(cost))}</span>`;
+        if (e.kind === 'review') {
+            const decision = e.record.output?.decision || '?';
+            const issueCount = e.record.output?.issueCount ?? 0;
+            const dotColor = decision === 'APPROVE' ? '#22c55e' : decision === 'CHANGES_REQUESTED' ? '#f59e0b' : '#6b7280';
+            parts.push(`
+                <div style="display:flex;gap:10px;padding:10px;border-left:3px solid ${dotColor};background:var(--bg-secondary,#161614);border-radius:4px;cursor:pointer" onclick="closeModal();currentPage='ai-reviews';renderPage();setTimeout(()=>openAiReviewDetail('${esc(e.record.id)}'),300)">
+                    <div style="flex:1">
+                        <div style="font-weight:600;font-size:12px">📋 AI Review · <code style="color:${dotColor}">${esc(decision)}</code> · ${issueCount} issue${issueCount === 1 ? '' : 's'}${costSpan}</div>
+                        <div style="font-family:var(--mono);font-size:11px;color:var(--text-muted)">${esc(e.record.id)} · ${esc(fmtDateTime(e.record.createdAt))}</div>
+                    </div>
+                </div>
+            `);
+        } else {
+            const r = e.record;
+            const outcome = r.error ? 'error' : r.haltReason ? `halted: ${r.haltReason}` : r.push?.commitSha ? `pushed ${r.push.commitSha.slice(0, 8)}` : r.suggest?.reviewId ? `review #${r.suggest.reviewId}` : 'ok';
+            const dotColor = r.error || r.haltReason ? '#f59e0b' : '#22c55e';
+            const a = r.issues?.addressed ?? 0;
+            const rj = r.issues?.rejected ?? 0;
+            const df = r.issues?.deferred ?? 0;
+            parts.push(`
+                <div style="display:flex;gap:10px;padding:10px;border-left:3px solid ${dotColor};background:var(--bg-secondary,#161614);border-radius:4px;cursor:pointer" onclick="closeModal();setTimeout(()=>openAddressRunDetail('${esc(r.id)}'),300)">
+                    <div style="flex:1">
+                        <div style="font-weight:600;font-size:12px">🔧 Address (${esc(r.mode)}) · iter ${r.iteration}/${r.iterationCap} · ${a}✓ · ${rj}✗ · ${df}⏸ · <code>${esc(outcome)}</code>${costSpan}</div>
+                        <div style="font-family:var(--mono);font-size:11px;color:var(--text-muted)">${esc(r.id)} · ${esc(fmtDateTime(r.createdAt))}</div>
+                    </div>
+                </div>
+            `);
+        }
+    }
+
+    parts.push('</div>');
+
+    const lastReview = data.reviews[0];
+    if (lastReview && lastReview.output?.decision === 'APPROVE') {
+        parts.push(`<div style="margin-top:14px;padding:10px;background:#22c55e22;border-left:3px solid #22c55e;font-size:12px">Latest review approved — loop converged.</div>`);
+    } else if (data.addressRuns[0]?.haltReason === 'iteration-cap') {
+        parts.push(`<div style="margin-top:14px;padding:10px;background:#f59e0b22;border-left:3px solid #f59e0b;font-size:12px">Iteration cap reached — human attention required.</div>`);
+    } else if (data.addressRuns[0]?.haltReason === 'merge-ready') {
+        parts.push(`<div style="margin-top:14px;padding:10px;background:#22c55e22;border-left:3px solid #22c55e;font-size:12px">Merge-ready threshold satisfied — loop halted gracefully.</div>`);
+    }
+
+    return parts.join('');
+}
+
+window.openAddressRunDetail = async function (id) {
+    openModal(`Address run: ${id}`, '<div class="skeleton skeleton-card"></div>');
+    let record;
+    try {
+        record = await api.get(`/api/auto-fix/address-runs/${encodeURIComponent(id)}`);
+    } catch (err) {
+        $('#modal-body').innerHTML = `<p style="color:#ef4444">Failed to load: ${esc(err.message)}</p>`;
+        return;
+    }
+    $('#modal-body').innerHTML = renderAddressRunBody(record);
+};
+
+function renderAddressRunBody(r) {
+    const decisions = (label, list, color) => {
+        if (!list || list.length === 0) return '';
+        return `<div style="margin-bottom:14px">
+            <h4 style="margin:0 0 6px;font-size:13px;color:${color}">${label}</h4>
+            <ul style="font-size:12px;padding-left:18px">
+                ${list.map((i) => `<li><strong>${esc(i.priority)}</strong>${i.file ? ` · <code>${esc(i.file)}</code>` : ''} — ${esc(i.title)}${i.reasoning ? `<br><span style="color:var(--text-muted)">${esc(i.reasoning)}</span>` : ''}</li>`).join('')}
+            </ul>
+        </div>`;
+    };
+    const t = r.tests;
+    const testsBlock = t
+        ? `<div><strong>Tests:</strong> ${t.ranTests ? `<code>${esc(t.command || '?')}</code> ${t.passed ? '<span style="color:#22c55e">✓ passed</span>' : '<span style="color:#ef4444">✗ failed</span>'}${t.durationMs ? ` <span style="color:var(--text-muted)">(${t.durationMs}ms)</span>` : ''}` : '<span style="color:var(--text-muted)">no validation discovered</span>'}</div>${t.output ? `<pre style="margin-top:6px;padding:8px;background:var(--bg-primary);border:1px solid var(--border);font-size:11px;max-height:240px;overflow:auto">${esc(t.output)}</pre>` : ''}`
+        : '';
+    const haltLine = r.haltReason
+        ? `<div style="margin:14px 0;padding:10px;background:#f59e0b22;border-left:3px solid #f59e0b;font-size:12px">Halted: <strong>${esc(r.haltReason)}</strong>${r.error ? ` — ${esc(r.error)}` : ''}</div>`
+        : '';
+    const pushLine = r.push?.commitSha
+        ? `<div><strong>Push:</strong> <code>${esc(r.push.commitSha.slice(0, 8))}</code> → <code>${esc(r.push.ref)}</code> at ${esc(fmtDateTime(r.push.pushedAt))}</div>`
+        : '';
+    const suggestLine = r.suggest?.reviewId
+        ? `<div><strong>Suggest:</strong> review #${esc(r.suggest.reviewId)} with ${r.suggest.commentCount} inline comments${r.suggest.htmlUrl ? ` — <a href="${esc(r.suggest.htmlUrl)}" target="_blank">view PR</a>` : ''}</div>`
+        : '';
+
+    return `
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:18px;font-size:13px">
+            <div><div style="color:var(--text-muted);font-size:11px;text-transform:uppercase;margin-bottom:4px">PR</div><div>${esc(r.pr?.repo || '—')} #${r.pr?.prNumber || '?'}${r.pr?.branch ? ` <span style="color:var(--text-muted)">(${esc(r.pr.branch)})</span>` : ''}</div></div>
+            <div><div style="color:var(--text-muted);font-size:11px;text-transform:uppercase;margin-bottom:4px">Iteration</div><div>${r.iteration}/${r.iterationCap} · mode <code>${esc(r.mode)}</code></div></div>
+            <div><div style="color:var(--text-muted);font-size:11px;text-transform:uppercase;margin-bottom:4px">Created</div><div style="font-family:var(--mono);font-size:12px">${esc(r.createdAt)} · ${r.durationMs}ms</div></div>
+            <div><div style="color:var(--text-muted);font-size:11px;text-transform:uppercase;margin-bottom:4px">Source review</div><div style="font-family:var(--mono);font-size:11px"><code>${esc(r.sourceReviewRunId)}</code></div></div>
+        </div>
+
+        ${haltLine}
+
+        ${decisions('Addressed', r.issues?.addressed, '#22c55e')}
+        ${decisions('Rejected', r.issues?.rejected, '#ef4444')}
+        ${decisions('Deferred', r.issues?.deferred, '#f59e0b')}
+
+        <div style="font-size:13px;line-height:1.6">
+            ${pushLine}
+            ${suggestLine}
+            ${testsBlock}
+        </div>
+    `;
+}
+
+async function loadAutoFixWorkdirs() {
+    const target = $('#auto-fix-workdirs');
+    if (!target) return;
+    target.innerHTML = '<div class="skeleton skeleton-card"></div>';
+
+    let data;
+    try {
+        data = await api.get('/api/auto-fix/workdirs');
+    } catch (err) {
+        target.innerHTML = `<div class="empty-state"><div class="empty-icon">⚠️</div><p class="empty-text">Failed to load workdirs: ${esc(err.message)}</p></div>`;
+        return;
+    }
+
+    const workdirs = data.workdirs || [];
+    const totalBytes = data.totalBytes || 0;
+
+    if (workdirs.length === 0) {
+        target.innerHTML = `
+            <div class="card-grid" style="margin-bottom:14px">
+                <div class="card card-stat"><div class="stat-value">0</div><div class="stat-label">Cached workdirs</div></div>
+                <div class="card card-stat"><div class="stat-value">0 B</div><div class="stat-label">Total disk</div></div>
+            </div>
+            <div class="empty-state">
+                <div class="empty-icon">📁</div>
+                <p class="empty-text">No PR workdirs cached yet. The first <code>address-review</code> run on any PR will clone its repo here, and reuse the clone on subsequent iterations.</p>
+            </div>
+        `;
+        return;
+    }
+
+    target.innerHTML = `
+        <div class="card-grid" style="margin-bottom:14px">
+            <div class="card card-stat"><div class="stat-value">${workdirs.length}</div><div class="stat-label">Cached workdirs</div></div>
+            <div class="card card-stat"><div class="stat-value">${fmtBytes(totalBytes)}</div><div class="stat-label">Total disk</div></div>
+        </div>
+
+        <div class="table-wrap" style="overflow-x:auto">
+            <table style="min-width:780px">
+                <thead><tr>
+                    <th>Repo</th>
+                    <th>PR</th>
+                    <th>Branch</th>
+                    <th style="text-align:right">Size</th>
+                    <th>Cloned</th>
+                    <th>Last sync</th>
+                    <th>Status</th>
+                    <th></th>
+                </tr></thead>
+                <tbody>${workdirs.map(renderWorkdirRow).join('')}</tbody>
+            </table>
+        </div>
+    `;
+}
+
+function renderWorkdirRow(w) {
+    const lockBadge = w.locked
+        ? `<span title="Locked by pid ${w.lockHolder?.pid}" class="badge" style="background:#f59e0b22;color:#f59e0b">locked</span>`
+        : `<span class="badge" style="background:#22c55e22;color:#22c55e">idle</span>`;
+    const evictBtn = w.locked
+        ? `<button class="btn btn-sm btn-ghost" onclick="evictWorkdir('${esc(w.owner)}','${esc(w.repo)}',${w.prNumber}, true)" title="Force-evict (lock will be ignored)">Force evict</button>`
+        : `<button class="btn btn-sm btn-ghost" onclick="evictWorkdir('${esc(w.owner)}','${esc(w.repo)}',${w.prNumber}, false)">Evict</button>`;
+    return `
+        <tr>
+            <td style="font-size:12px"><code>${esc(w.owner)}/${esc(w.repo)}</code></td>
+            <td style="font-size:12px">#${w.prNumber}</td>
+            <td style="font-size:12px;color:var(--text-muted)"><code>${esc(w.headRef || '')}</code></td>
+            <td style="text-align:right;font-family:var(--mono);font-size:12px">${fmtBytes(w.sizeBytes)}</td>
+            <td style="font-family:var(--mono);font-size:11px;color:var(--text-muted)">${esc(fmtDateTime(w.clonedAt))}</td>
+            <td style="font-family:var(--mono);font-size:11px;color:var(--text-muted)">${esc(fmtDateTime(w.lastSyncAt))}</td>
+            <td>${lockBadge}</td>
+            <td style="text-align:right">${evictBtn}</td>
+        </tr>
+    `;
+}
+
+window.evictWorkdir = async function (owner, repo, pr, force) {
+    if (!confirm(`Evict workdir for ${owner}/${repo}#${pr}?${force ? '\n\nThe lock holder may be mid-run; force-eviction can corrupt that run.' : ''}`)) return;
+    try {
+        await api.del(`/api/auto-fix/workdirs/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/${pr}${force ? '?force=true' : ''}`);
+        await loadAutoFixWorkdirs();
+    } catch (err) {
+        if (err.message.includes('409')) {
+            if (confirm('Workdir is locked by an active run. Force-evict anyway?')) {
+                await window.evictWorkdir(owner, repo, pr, true);
+            }
+            return;
+        }
+        toast?.(`Failed to evict: ${err.message}`);
+    }
+};
+
+function fmtBytes(n) {
+    if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(1)} GB`;
+    if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)} MB`;
+    if (n >= 1000) return `${(n / 1000).toFixed(1)} KB`;
+    return `${n} B`;
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
 // AI REVIEWS — browse the run log written by the ai-review action
 // (~/.sokuza/runs/ai-review/) so we can evaluate whether truncation is
 // dropping review-relevant signal.
 // ═════════════════════════════════════════════════════════════════════════════
 let aiReviewFilters = { truncated: false, errored: false, parseFailed: false };
 let aiReviewsRefreshTimer = null;
+let autoFixRefreshTimer = null;
+let pricingCache = null;
+
+async function loadPricing() {
+    if (pricingCache) return pricingCache;
+    try {
+        pricingCache = await api.get('/api/auto-fix/pricing');
+    } catch {
+        pricingCache = { models: {} };
+    }
+    return pricingCache;
+}
+
+function estimateCostFromUsage(provider, model, usage) {
+    if (!usage || !pricingCache) return null;
+    const price = pricingCache.models?.[`${provider}/${model}`];
+    if (!price) return null;
+    const inTok = (usage.input_tokens ?? 0) / 1_000_000;
+    const outTok = (usage.output_tokens ?? 0) / 1_000_000;
+    return inTok * price.input_per_mtok + outTok * price.output_per_mtok;
+}
+
+function fmtCost(usd) {
+    if (usd == null) return '—';
+    if (usd < 0.005) return `<$0.01`;
+    return `$${usd.toFixed(2)}`;
+}
 
 async function renderAiReviews(el) {
     el.innerHTML = `
@@ -5170,6 +5555,20 @@ function renderAiReviewDetailBody(r) {
 
         ${r.error ? `<div style="margin-top:14px;padding:10px;background:#ef444422;border-left:3px solid #ef4444;font-size:12px;font-family:var(--mono);white-space:pre-wrap">${esc(r.error)}</div>` : ''}
 
+        ${r.event?.repo && r.event?.prNumber ? `
+        <div style="margin-top:18px;padding-top:14px;border-top:1px solid var(--border)">
+            <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px">
+                <h4 style="margin:0;font-size:13px">Auto-Fix this review</h4>
+                <span style="font-size:11px;color:var(--text-muted)">runs <code>address-review</code> against ${esc(r.event.repo)} #${r.event.prNumber}</span>
+            </div>
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+                <button class="btn btn-sm btn-primary" onclick="triggerAddressRun('${esc(r.event.repo)}', ${r.event.prNumber}, '${esc(r.id)}', 'suggest')">👀 Suggest fixes</button>
+                <button class="btn btn-sm btn-ghost" onclick="triggerAddressRun('${esc(r.event.repo)}', ${r.event.prNumber}, '${esc(r.id)}', 'push')" title="Push directly to the PR branch — only run this if you trust the bot to commit fixes">⚡ Push fixes</button>
+                <span style="color:var(--text-muted);font-size:11px">opens a new GitHub review or commit on this PR</span>
+            </div>
+        </div>
+        ` : ''}
+
         <div style="margin-top:18px;padding-top:14px;border-top:1px solid var(--border)">
             <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px">
                 <h4 style="margin:0;font-size:13px">Label this run</h4>
@@ -5189,6 +5588,31 @@ function renderAiReviewDetailBody(r) {
         </div>
     `;
 }
+
+window.triggerAddressRun = async function (repoFull, prNumber, reviewRunId, mode) {
+    const [owner, repo] = repoFull.split('/');
+    if (!owner || !repo) {
+        toast?.('Invalid repo identifier');
+        return;
+    }
+    if (mode === 'push' && !confirm(`Push mode commits and pushes fixes directly to PR #${prNumber}.\n\nContinue?`)) return;
+    const btn = event?.target;
+    if (btn) { btn.disabled = true; btn.textContent = '⏳ Running…'; }
+    try {
+        await api.post('/api/auto-fix/address-runs', {
+            owner, repo, pr_number: prNumber,
+            review_run_id: reviewRunId, mode,
+        });
+        toast?.(`Address-review (${mode}) submitted. Check the Auto-Fix page for results.`);
+        if (btn) {
+            btn.disabled = false;
+            btn.textContent = mode === 'suggest' ? '👀 Suggest fixes' : '⚡ Push fixes';
+        }
+    } catch (err) {
+        toast?.(`Failed: ${err.message}`);
+        if (btn) { btn.disabled = false; }
+    }
+};
 
 window.setAiReviewLabel = async function (id, verdict) {
     const note = ($('#ai-review-note-input')?.value || '').trim() || undefined;

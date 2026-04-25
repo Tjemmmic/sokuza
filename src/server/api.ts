@@ -39,6 +39,8 @@ interface ApiDeps {
     getEngine: () => import('../core/engine.js').SokuzaEngine;
     /** Chat session store — shared by all /api/chat/* handlers. */
     getChatStore: () => import('../core/chat-store.js').ChatStore;
+    /** Persistent per-PR git workdir manager for the address-review action. */
+    getWorkdirManager: () => import('../core/workdir-store.js').WorkdirManager;
 }
 
 function sanitizeFileName(name: string): string {
@@ -197,6 +199,9 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
     void import('../core/run-store.js').then(({ runStoreEvents }) => {
         runStoreEvents.on('ai-review-run', (summary) => {
             deps.broadcastEvent({ type: 'ai-review-run', summary });
+        });
+        runStoreEvents.on('address-review-run', (summary) => {
+            deps.broadcastEvent({ type: 'address-review-run', summary });
         });
     });
 
@@ -1216,6 +1221,184 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
         } catch (err: any) {
             logger.error({ err, id }, 'Failed to clear label');
             return reply.status(500).send({ error: err.message ?? 'failed to clear label' });
+        }
+    });
+
+    // ─── Auto-fix workdirs ──────────────────────────────────────────────
+    //
+    // List, inspect, and evict the persistent per-PR git workdirs that
+    // back the address-review action (see src/core/workdir-store.ts).
+    // The `id` regex ensures path segments can't escape the workdir root.
+
+    const ID_RE = /^[A-Za-z0-9_.-]{1,128}$/;
+
+    server.get('/api/auto-fix/workdirs', async (_request, reply) => {
+        try {
+            const list = await deps.getWorkdirManager().list();
+            const totalBytes = list.reduce((s, w) => s + w.sizeBytes, 0);
+            return { workdirs: list, totalBytes };
+        } catch (err: any) {
+            logger.error({ err }, 'Failed to list workdirs');
+            return reply.status(500).send({ error: err.message ?? 'failed to list workdirs' });
+        }
+    });
+
+    server.get('/api/auto-fix/pricing', async (_request, reply) => {
+        const { loadPricing } = await import('../core/pricing.js');
+        try {
+            return await loadPricing();
+        } catch (err: any) {
+            logger.error({ err }, 'Failed to load pricing');
+            return reply.status(500).send({ error: err.message ?? 'failed to load pricing' });
+        }
+    });
+
+    server.get('/api/auto-fix/pr/:owner/:repo/:pr/timeline', async (request, reply) => {
+        const { listAiReviewRuns, listAddressReviewRuns } = await import('../core/run-store.js');
+        const { owner, repo, pr } = request.params as { owner: string; repo: string; pr: string };
+        const ID = /^[A-Za-z0-9_.-]{1,128}$/;
+        if (!ID.test(owner) || !ID.test(repo) || !/^\d{1,8}$/.test(pr)) {
+            return reply.status(400).send({ error: 'invalid owner/repo/pr' });
+        }
+        const repoFull = `${owner}/${repo}`;
+        const prNumber = parseInt(pr, 10);
+        try {
+            const [reviews, addressRuns] = await Promise.all([
+                listAiReviewRuns({ limit: 200 }),
+                listAddressReviewRuns({ limit: 200, repo: repoFull, prNumber }),
+            ]);
+            // ai-review records aren't filterable by PR in the existing
+            // signature; trim to this PR here. Cheap on a 200-record cap.
+            const prReviews = reviews.filter((r) => r.event.repo === repoFull && r.event.prNumber === prNumber);
+            return { repo: repoFull, prNumber, reviews: prReviews, addressRuns };
+        } catch (err: any) {
+            logger.error({ err, repoFull, prNumber }, 'Failed to load PR timeline');
+            return reply.status(500).send({ error: err.message ?? 'failed to load timeline' });
+        }
+    });
+
+    server.get('/api/auto-fix/address-runs', async (request, reply) => {
+        const { listAddressReviewRuns } = await import('../core/run-store.js');
+        const q = (request.query ?? {}) as {
+            limit?: string; since?: string; until?: string;
+            repo?: string; pr?: string; mode?: string;
+        };
+        try {
+            const runs = await listAddressReviewRuns({
+                limit: q.limit ? parseInt(q.limit, 10) : undefined,
+                since: q.since,
+                until: q.until,
+                repo: q.repo,
+                prNumber: q.pr ? parseInt(q.pr, 10) : undefined,
+                mode: (q.mode === 'suggest' || q.mode === 'push') ? q.mode : undefined,
+            });
+            return { runs };
+        } catch (err: any) {
+            logger.error({ err }, 'Failed to list address-review runs');
+            return reply.status(500).send({ error: err.message ?? 'failed to list address runs' });
+        }
+    });
+
+    server.get('/api/auto-fix/address-runs/:id', async (request, reply) => {
+        const { getAddressReviewRunById } = await import('../core/run-store.js');
+        const { id } = request.params as { id: string };
+        if (!/^[a-z0-9-]{1,128}$/.test(id)) {
+            return reply.status(400).send({ error: 'invalid run id' });
+        }
+        try {
+            const record = await getAddressReviewRunById(id);
+            if (!record) return reply.status(404).send({ error: 'run not found' });
+            return record;
+        } catch (err: any) {
+            logger.error({ err, id }, 'Failed to read address-review run');
+            return reply.status(500).send({ error: err.message ?? 'failed to read run' });
+        }
+    });
+
+    /**
+     * Manually trigger an address-review run.
+     *
+     * The server enqueues a `manual` workflow that wraps the
+     * `address-review` action with the user's chosen mode. The
+     * `review_run_id` (or "latest") flows through params; the engine
+     * resolves the source review record and the rest of the loop guard
+     * stack runs as it would for an auto-trigger.
+     */
+    server.post('/api/auto-fix/address-runs', async (request, reply) => {
+        const body = (request.body ?? {}) as {
+            owner?: string;
+            repo?: string;
+            pr_number?: number;
+            review_run_id?: string;
+            mode?: 'suggest' | 'push';
+            max_iterations?: number;
+        };
+        if (!body.owner || !body.repo || typeof body.pr_number !== 'number') {
+            return reply.status(400).send({ error: 'owner, repo, pr_number required' });
+        }
+        const mode = body.mode ?? 'suggest';
+        if (mode !== 'suggest' && mode !== 'push') {
+            return reply.status(400).send({ error: 'mode must be "suggest" or "push"' });
+        }
+
+        const engine = deps.getEngine();
+        const event = {
+            source: 'manual' as const,
+            event: 'manual',
+            timestamp: new Date().toISOString(),
+            payload: {},
+            metadata: {
+                repo: `${body.owner}/${body.repo}`,
+                owner: body.owner,
+                repoName: body.repo,
+                prNumber: body.pr_number,
+            },
+        };
+        try {
+            await engine['actions'].get('address-review')?.(
+                {
+                    mode,
+                    review_run_id: body.review_run_id ?? 'latest',
+                    max_iterations: body.max_iterations,
+                    owner: body.owner,
+                    repo_name: body.repo,
+                    pr_number: body.pr_number,
+                },
+                {
+                    event,
+                    results: {},
+                    steps: {},
+                    integrationConfigs: deps.getConfig().integrations,
+                    ai: deps.getConfig().ai!,
+                    logger,
+                    workdirManager: deps.getWorkdirManager(),
+                },
+            );
+            return { ok: true };
+        } catch (err: any) {
+            logger.error({ err, body }, 'Manual address-review failed');
+            return reply.status(500).send({ error: err.message ?? 'address-review failed' });
+        }
+    });
+
+    server.delete('/api/auto-fix/workdirs/:owner/:repo/:pr', async (request, reply) => {
+        const { owner, repo, pr } = request.params as { owner: string; repo: string; pr: string };
+        const { force } = (request.query ?? {}) as { force?: string };
+        if (!ID_RE.test(owner) || !ID_RE.test(repo) || !/^\d{1,8}$/.test(pr)) {
+            return reply.status(400).send({ error: 'invalid owner/repo/pr' });
+        }
+        try {
+            const evicted = await deps.getWorkdirManager().evict(
+                owner, repo, parseInt(pr, 10), { force: force === 'true' },
+            );
+            return { evicted };
+        } catch (err: any) {
+            // Lock conflicts come back as 409 so the client can offer "force".
+            if (/locked/.test(err.message ?? '')) {
+                return reply.status(409).send({ error: err.message });
+            }
+            logger.error({ err, owner, repo, pr }, 'Failed to evict workdir');
+            return reply.status(500).send({ error: err.message ?? 'failed to evict' });
         }
     });
 

@@ -18,6 +18,7 @@ import { logAction } from '../actions/log.js';
 import { webhookAction } from '../actions/webhook.js';
 import { aiReviewAction } from '../actions/ai-review.js';
 import { aiAgentAction } from '../actions/ai-agent.js';
+import { addressReviewAction } from '../actions/address-review.js';
 
 import { locateBundledFile } from './bundled-files.js';
 
@@ -94,6 +95,7 @@ export async function runStart(opts: StartOptions): Promise<void> {
     engine.registerAction('webhook', webhookAction);
     engine.registerAction('ai-review', aiReviewAction);
     engine.registerAction('ai-agent', aiAgentAction);
+    engine.registerAction('address-review', addressReviewAction);
 
     await engine.start();
 

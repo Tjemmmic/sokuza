@@ -25,6 +25,7 @@ import { githubCloneRepoAction } from './actions/clone-repo.js';
 import { githubCreatePrAction } from './actions/create-pr.js';
 import { githubFetchReviewsAction } from './actions/github-fetch-reviews.js';
 import { githubCreateReviewAction } from './actions/create-review.js';
+import { githubAddLabelAction, githubRemoveLabelAction } from './actions/labels.js';
 
 interface GitHubConfig {
     webhookSecret: string;
@@ -42,6 +43,8 @@ export class GitHubIntegration implements Integration {
         'github-create-pr': githubCreatePrAction,
         'github-fetch-reviews': githubFetchReviewsAction,
         'github-create-review': githubCreateReviewAction,
+        'github-add-label': githubAddLabelAction,
+        'github-remove-label': githubRemoveLabelAction,
     };
 
     private config: GitHubConfig = { webhookSecret: '' };

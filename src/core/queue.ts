@@ -19,6 +19,8 @@ export type JobExecutor = (
     integrationConfigs: Record<string, IntegrationConfig>,
     ai: AIProviderRegistry | undefined,
     recordWebhookDelivery?: ActionContext['recordWebhookDelivery'],
+    workdirManager?: ActionContext['workdirManager'],
+    getConfig?: ActionContext['getConfig'],
 ) => Promise<void>;
 
 export class WorkflowQueue {
@@ -47,6 +49,8 @@ export class WorkflowQueue {
         integrationConfigs: Record<string, IntegrationConfig>;
         ai: AIProviderRegistry | undefined;
         recordWebhookDelivery?: ActionContext['recordWebhookDelivery'];
+        workdirManager?: ActionContext['workdirManager'];
+        getConfig?: ActionContext['getConfig'];
     } | null = null;
 
     private tickScheduled = false;
@@ -71,6 +75,8 @@ export class WorkflowQueue {
         integrationConfigs: Record<string, IntegrationConfig>;
         ai: AIProviderRegistry | undefined;
         recordWebhookDelivery?: ActionContext['recordWebhookDelivery'];
+        workdirManager?: ActionContext['workdirManager'];
+        getConfig?: ActionContext['getConfig'];
     }): void {
         this.executor = executor;
         this.executorContext = context;
@@ -283,8 +289,8 @@ export class WorkflowQueue {
             this.queue.splice(i, 1);
             this.startJob(job);
 
-            const { integrationConfigs, ai, recordWebhookDelivery } = this.executorContext;
-            this.executor(job, integrationConfigs, ai, recordWebhookDelivery)
+            const { integrationConfigs, ai, recordWebhookDelivery, workdirManager, getConfig } = this.executorContext;
+            this.executor(job, integrationConfigs, ai, recordWebhookDelivery, workdirManager, getConfig)
                 .catch((err) => {
                     if (job.status === 'running') {
                         job.status = 'failed';

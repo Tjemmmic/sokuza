@@ -188,14 +188,36 @@ export class GitHubApiClient {
         owner: string,
         repo: string,
         prNumber: number,
-        body: string,
-        event: 'APPROVE' | 'REQUEST_CHANGES' | 'COMMENT' = 'COMMENT',
+        opts: {
+            body: string;
+            event?: 'APPROVE' | 'REQUEST_CHANGES' | 'COMMENT';
+            /** Inline review comments anchored to file+line. The reviewed
+             *  PR's diff is what `line` references. Lines that aren't in
+             *  the diff cause GitHub to reject the review entirely, so
+             *  callers should drop unanchorable issues into `body`. */
+            comments?: Array<{
+                path: string;
+                line: number;
+                side?: 'RIGHT' | 'LEFT';
+                start_line?: number;
+                start_side?: 'RIGHT' | 'LEFT';
+                body: string;
+            }>;
+            commit_id?: string;
+        },
     ): Promise<Record<string, unknown>> {
         const url = `${this.baseUrl}/repos/${owner}/${repo}/pulls/${prNumber}/reviews`;
+        const payload: Record<string, unknown> = {
+            body: opts.body,
+            event: opts.event ?? 'COMMENT',
+        };
+        if (opts.commit_id) payload.commit_id = opts.commit_id;
+        if (opts.comments && opts.comments.length > 0) payload.comments = opts.comments;
+
         const res = await fetchWithTimeout(url, {
             method: 'POST',
             headers: this.headers(),
-            body: JSON.stringify({ body, event }),
+            body: JSON.stringify(payload),
         });
 
         if (!res.ok) {
@@ -206,6 +228,58 @@ export class GitHubApiClient {
         }
 
         return (await res.json()) as Record<string, unknown>;
+    }
+
+    async addLabels(
+        owner: string,
+        repo: string,
+        issueNumber: number,
+        labels: string[],
+    ): Promise<void> {
+        if (labels.length === 0) return;
+        const url = `${this.baseUrl}/repos/${owner}/${repo}/issues/${issueNumber}/labels`;
+        const res = await fetchWithTimeout(url, {
+            method: 'POST',
+            headers: this.headers(),
+            body: JSON.stringify({ labels }),
+        });
+        if (!res.ok) {
+            const body = await res.text();
+            throw new Error(`GitHub API error adding labels: ${res.status} — ${body}`);
+        }
+    }
+
+    async removeLabel(
+        owner: string,
+        repo: string,
+        issueNumber: number,
+        label: string,
+    ): Promise<void> {
+        const url = `${this.baseUrl}/repos/${owner}/${repo}/issues/${issueNumber}/labels/${encodeURIComponent(label)}`;
+        const res = await fetchWithTimeout(url, {
+            method: 'DELETE',
+            headers: this.headers(),
+        });
+        // 404 means "label wasn't on the issue" — same desired end state.
+        if (!res.ok && res.status !== 404) {
+            const body = await res.text();
+            throw new Error(`GitHub API error removing label: ${res.status} — ${body}`);
+        }
+    }
+
+    async listLabels(
+        owner: string,
+        repo: string,
+        issueNumber: number,
+    ): Promise<string[]> {
+        const url = `${this.baseUrl}/repos/${owner}/${repo}/issues/${issueNumber}/labels`;
+        const res = await fetchWithTimeout(url, { headers: this.headers() });
+        if (!res.ok) {
+            const body = await res.text();
+            throw new Error(`GitHub API error listing labels: ${res.status} — ${body}`);
+        }
+        const json = (await res.json()) as Array<{ name: string }>;
+        return json.map((l) => l.name);
     }
 
     async createPullRequest(

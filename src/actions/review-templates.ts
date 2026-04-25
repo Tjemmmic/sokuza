@@ -258,12 +258,37 @@ export interface StructuredReview {
     issues: Array<{
         priority: ReviewPriority;
         title: string;
+        /** Original `file` string from the model — kept verbatim for UI
+         *  display and run-store records. Often of the form
+         *  `path/to/file.ts:L42-L50`. */
         file: string;
+        /** Filename portion only, parsed out of `file`. Empty when the
+         *  model omitted it or used an unrecognized format. */
+        path: string;
+        /** First line of the issue range, parsed from `file`. */
+        lineStart?: number;
+        /** Last line of the issue range. Equals `lineStart` for single-line. */
+        lineEnd?: number;
         problem: string;
         fix: string;
     }>;
     decision: 'APPROVE' | 'CHANGES_REQUESTED';
     justification: string;
+}
+
+/** Split a `file` string like `src/foo.ts:L42-L50` into `{path, lineStart, lineEnd}`.
+ *  Returns `{path: input, lineStart: undefined, lineEnd: undefined}` if no
+ *  recognizable line range is present. Accepts `:42`, `:L42`, `:L42-L50`,
+ *  `:L42-50`, `#L42`, `#L42-L50`. */
+export function parseFileLocation(raw: string): { path: string; lineStart?: number; lineEnd?: number } {
+    if (!raw) return { path: '' };
+    // Match path[:#]L?N[-L?N]?  at end of string.
+    const m = raw.match(/^(.+?)(?:[:#]L?(\d+)(?:-L?(\d+))?)?$/);
+    if (!m) return { path: raw };
+    const path = m[1] ?? raw;
+    const lineStart = m[2] ? parseInt(m[2], 10) : undefined;
+    const lineEnd = m[3] ? parseInt(m[3], 10) : lineStart;
+    return { path, lineStart, lineEnd };
 }
 
 /**
@@ -318,10 +343,15 @@ function validateStructuredReview(raw: unknown): StructuredReview | null {
         const i = rawIssue as Record<string, unknown>;
         const priority = i.priority;
         if (priority !== 'P1' && priority !== 'P2' && priority !== 'P3') continue;
+        const file = typeof i.file === 'string' ? i.file : '';
+        const loc = parseFileLocation(file);
         issues.push({
             priority: priority as ReviewPriority,
             title: typeof i.title === 'string' ? i.title : '(no title)',
-            file: typeof i.file === 'string' ? i.file : '',
+            file,
+            path: loc.path,
+            lineStart: loc.lineStart,
+            lineEnd: loc.lineEnd,
             problem: typeof i.problem === 'string' ? i.problem : '',
             fix: typeof i.fix === 'string' ? i.fix : '',
         });
@@ -390,4 +420,103 @@ export function renderReviewMarkdown(review: StructuredReview): string {
     }
 
     return lines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+
+export interface ReviewApiPayload {
+    /** Top-level body text. Includes summary, decision, and any issues
+     *  that couldn't be anchored to specific lines. */
+    body: string;
+    /** Inline review comments anchored to file+line. */
+    comments: Array<{
+        path: string;
+        line: number;
+        side: 'RIGHT';
+        start_line?: number;
+        body: string;
+    }>;
+    /** GitHub review state derived from `decision`. */
+    event: 'APPROVE' | 'REQUEST_CHANGES' | 'COMMENT';
+}
+
+/**
+ * Render a structured review for posting via the PR Reviews API.
+ *
+ * Issues with a parseable file path AND line number become inline
+ * comments anchored to the diff. Issues without anchoring info land in
+ * the body so reviewers still see them. The body always carries summary
+ * + decision + justification at minimum.
+ *
+ * `markerRunId`, when present, is embedded as `<!-- sokuza:run-id=ID -->`
+ * at the top of the body so trigger filters can identify AI reviews
+ * without relying on the comment author.
+ */
+export function renderReviewForApi(
+    review: StructuredReview,
+    markerRunId?: string,
+): ReviewApiPayload {
+    const event = review.decision === 'CHANGES_REQUESTED' ? 'REQUEST_CHANGES' : 'COMMENT';
+    const comments: ReviewApiPayload['comments'] = [];
+    const orphans: typeof review.issues = [];
+
+    for (const issue of review.issues) {
+        if (issue.path && typeof issue.lineStart === 'number' && issue.lineStart > 0) {
+            const body = formatIssueBody(issue);
+            const comment: ReviewApiPayload['comments'][number] = {
+                path: issue.path,
+                line: issue.lineEnd ?? issue.lineStart,
+                side: 'RIGHT',
+                body,
+            };
+            if (issue.lineEnd && issue.lineEnd !== issue.lineStart) {
+                comment.start_line = issue.lineStart;
+            }
+            comments.push(comment);
+        } else {
+            orphans.push(issue);
+        }
+    }
+
+    const bodyLines: string[] = [];
+    if (markerRunId) bodyLines.push(`<!-- sokuza:run-id=${markerRunId} -->`);
+    if (review.summary) bodyLines.push(review.summary, '');
+
+    const counts = { P1: 0, P2: 0, P3: 0 };
+    for (const issue of review.issues) counts[issue.priority]++;
+    if (review.issues.length > 0) {
+        bodyLines.push(
+            `**${review.issues.length} issues** — ${counts.P1} P1 · ${counts.P2} P2 · ${counts.P3} P3` +
+            (comments.length > 0 ? ` · ${comments.length} commented inline below` : ''),
+            '',
+        );
+    }
+
+    if (orphans.length > 0) {
+        bodyLines.push('### Issues without diff anchor', '');
+        for (const issue of orphans) {
+            const emoji = PRIORITY_LEVELS[issue.priority].emoji;
+            bodyLines.push(`**${emoji} ${issue.priority} — ${issue.title}**`);
+            if (issue.file) bodyLines.push(`File: \`${issue.file}\``);
+            if (issue.problem) bodyLines.push(`Problem: ${issue.problem}`);
+            if (issue.fix) bodyLines.push(`Fix: ${issue.fix}`);
+            bodyLines.push('');
+        }
+    }
+
+    if (review.justification) {
+        bodyLines.push('### Decision', review.justification, '');
+    }
+
+    return {
+        body: bodyLines.join('\n').replace(/\n{3,}/g, '\n\n').trim(),
+        comments,
+        event,
+    };
+}
+
+function formatIssueBody(issue: StructuredReview['issues'][number]): string {
+    const emoji = PRIORITY_LEVELS[issue.priority].emoji;
+    const lines = [`**${emoji} ${issue.priority} — ${issue.title}**`];
+    if (issue.problem) lines.push('', issue.problem);
+    if (issue.fix) lines.push('', `**Fix:** ${issue.fix}`);
+    return lines.join('\n');
 }

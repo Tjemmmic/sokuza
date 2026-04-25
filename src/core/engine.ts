@@ -33,6 +33,7 @@ import { executeWorkflow } from './workflow.js';
 import { resetTemplateCache } from './templates.js';
 import { LogStore } from './log-store.js';
 import { ChatStore } from './chat-store.js';
+import { WorkdirManager } from './workdir-store.js';
 import pretty from 'pino-pretty';
 
 const MAX_RECENT_EVENTS = 100;
@@ -68,6 +69,7 @@ export class SokuzaEngine {
     private runIdCounter = 0;
     private logStore: LogStore;
     private chatStore: ChatStore;
+    private workdirManager: WorkdirManager;
 
     constructor(config: SokuzaConfig, configPath?: string) {
         this.config = config;
@@ -84,21 +86,32 @@ export class SokuzaEngine {
 
         this.queue = new WorkflowQueue(this.logger);
         this.queue.setOnJobUpdate((job) => this.broadcastJobUpdate(job));
-        this.queue.setExecutor(this.createJobExecutor(), {
-            integrationConfigs: config.integrations,
-            ai: config.ai,
-            recordWebhookDelivery: (d) => this.recordWebhookDelivery(d),
-        });
         this.configStore = new ConfigStore(this.configPath, this.logger);
         // One chat store instance per process — sessions live under
         // ~/.sokuza/chat-sessions/. Shared by every /api/chat/* handler
         // and by the chat agent itself (passed into runChatTurn).
         this.chatStore = new ChatStore(this.logger);
+        // Persistent per-PR git workdirs for the auto address-review
+        // action. Default root ~/.sokuza/auto-fix-workdirs/, configurable
+        // via SOKUZA_WORKDIR_ROOT. Constructed before setExecutor so the
+        // address-review action receives a live manager via ActionContext.
+        this.workdirManager = new WorkdirManager(this.logger);
+        this.queue.setExecutor(this.createJobExecutor(), {
+            integrationConfigs: config.integrations,
+            ai: config.ai,
+            recordWebhookDelivery: (d) => this.recordWebhookDelivery(d),
+            workdirManager: this.workdirManager,
+        });
     }
 
     /** Accessor for the shared chat store (API handlers, chat-agent). */
     getChatStore(): ChatStore {
         return this.chatStore;
+    }
+
+    /** Accessor for the workdir manager (API handlers, address-review action). */
+    getWorkdirManager(): WorkdirManager {
+        return this.workdirManager;
     }
 
     /** Register an integration plugin and its actions */
@@ -115,6 +128,25 @@ export class SokuzaEngine {
             { integration: integration.name, events: integration.supportedEvents },
             'Registered integration',
         );
+    }
+
+    private async evictWorkdirOnPrClose(event: EventPayload): Promise<void> {
+        const meta = event.metadata ?? {};
+        const repoStr = meta.repo as string | undefined;
+        const prNumber = (meta.prNumber ?? (event.payload?.pull_request as Record<string, unknown> | undefined)?.number) as number | undefined;
+        if (!repoStr || typeof prNumber !== 'number') return;
+        const [owner, repo] = repoStr.split('/');
+        if (!owner || !repo) return;
+        try {
+            const evicted = await this.workdirManager.evict(owner, repo, prNumber);
+            if (evicted) {
+                this.logger.info({ owner, repo, prNumber }, 'Evicted workdir on PR close');
+            }
+        } catch (err) {
+            // Live-locked: an address-review run is in flight. Let it finish;
+            // future eviction can come from the idle sweep.
+            this.logger.debug({ err, owner, repo, prNumber }, 'Skipping workdir eviction (locked)');
+        }
     }
 
     /** Register a workflow action handler */
@@ -148,6 +180,16 @@ export class SokuzaEngine {
             { source: event.source, event: event.event, action: event.action },
             'Received event',
         );
+
+        // Engine-level housekeeping: a closed/merged PR has no future
+        // address-review iterations, so the cached workdir is dead weight.
+        // Done before workflow matching so the cleanup happens regardless
+        // of whether any user workflow listens for this event.
+        if (event.event === 'pull_request' && (event.action === 'closed' || event.action === 'merged')) {
+            this.evictWorkdirOnPrClose(event).catch((err) =>
+                this.logger.warn({ err }, 'Workdir eviction on PR close failed'),
+            );
+        }
 
         const matchedWorkflows = this.config.workflows.filter((wf) =>
             matchesTrigger(wf, event),
@@ -327,6 +369,8 @@ export class SokuzaEngine {
                 integrationConfigs: this.config.integrations,
                 ai: this.config.ai,
                 recordWebhookDelivery: (d) => this.recordWebhookDelivery(d),
+                workdirManager: this.workdirManager,
+                getConfig: () => this.config,
             });
         } catch {
             // Keep existing config on read failure
@@ -496,6 +540,7 @@ export class SokuzaEngine {
             reloadConfig: () => this.reloadConfig(),
             getEngine: () => this,
             getChatStore: () => this.chatStore,
+            getWorkdirManager: () => this.workdirManager,
         });
 
         for (const integration of this.integrations.values()) {
@@ -514,6 +559,19 @@ export class SokuzaEngine {
         // Clean up state files left by previous processes that crashed.
         // Never load-bearing — it's housekeeping, failures are non-fatal.
         await pruneStaleRuntimeStates(this.logger).catch(() => 0);
+
+        // Reclaim any auto-fix workdir locks left by crashed prior runs.
+        // Inline rather than background: the cost is bounded by the number
+        // of cached workdirs (typically <100); a wedged workdir would
+        // otherwise block the next address-review run for that PR.
+        try {
+            const reclaimed = await this.workdirManager.recoverStaleLocks();
+            if (reclaimed > 0) {
+                this.logger.info({ reclaimed }, 'Recovered stale workdir locks');
+            }
+        } catch (err) {
+            this.logger.warn({ err }, 'Workdir lock recovery failed; continuing');
+        }
 
         // State persistence is best-effort: a read-only home dir should not
         // prevent the server from running, only from being auto-discoverable.
@@ -565,11 +623,12 @@ export class SokuzaEngine {
     private createJobExecutor(): JobExecutor {
         const actions = this.actions;
         const logger = this.logger;
-        return async (job, integrationConfigs, ai, recordWebhookDelivery) => {
+        return async (job, integrationConfigs, ai, recordWebhookDelivery, workdirManager, getConfig) => {
             try {
                 const output = await executeWorkflow(
                     job.workflow, job.event, actions, logger,
                     integrationConfigs, ai, undefined, recordWebhookDelivery,
+                    { workdirManager, getConfig },
                 );
                 // Attach step results so chat tools and run-history UI can
                 // surface the workflow's actual output — not just success/fail.

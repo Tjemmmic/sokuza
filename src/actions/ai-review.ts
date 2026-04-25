@@ -258,6 +258,11 @@ export const aiReviewAction: ActionHandler = async (params, context) => {
                         priority: i.priority,
                         title: i.title,
                         file: i.file,
+                        path: i.path,
+                        lineStart: i.lineStart,
+                        lineEnd: i.lineEnd,
+                        problem: i.problem,
+                        fix: i.fix,
                     })),
                     reviewChars: review.length,
                 }
@@ -270,6 +275,11 @@ export const aiReviewAction: ActionHandler = async (params, context) => {
     );
 
     return {
+        // The run-id is exposed so downstream steps (notably
+        // github-create-review) can stamp the comment marker
+        // `<!-- sokuza:run-id=... -->` and so the auto address-review
+        // workflow can later look up the structured record.
+        id: runId,
         review,
         model: completion.model,
         provider: completion.provider,
