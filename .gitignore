@@ -9,3 +9,4 @@ coverage/
 # Local user config — may contain AI provider API keys entered via the dashboard.
 # The committable template is sokuza.config.example.yaml.
 sokuza.config.yaml
+.playwright-mcp
