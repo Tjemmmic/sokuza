@@ -7,6 +7,22 @@
  * and skips auto-generated or binary diffs.
  */
 
+export type FileOutcomeStatus = 'included' | 'truncated' | 'skipped';
+export type FileSkipReason = 'pattern' | 'budget';
+
+/** Per-file outcome of a truncation pass. Populated in both the fast-path
+ *  (everything fits) and the truncation path so downstream consumers can
+ *  answer "what did we drop?" without re-parsing the diff. */
+export interface TruncatedDiffFile {
+    filename: string;
+    originalBytes: number;
+    /** Bytes kept in the final diff. 0 for skipped files. */
+    finalBytes: number;
+    status: FileOutcomeStatus;
+    /** Present only when status === 'skipped'. */
+    skipReason?: FileSkipReason;
+}
+
 export interface TruncatedDiff {
     /** The truncated diff text, ready for the AI */
     diff: string;
@@ -24,6 +40,10 @@ export interface TruncatedDiff {
     originalChars: number;
     /** Final character count */
     finalChars: number;
+    /** Per-file outcome. Fast path preserves input order; truncation path
+     *  emits pattern-skipped files first, then reviewable files in the
+     *  size-sorted order used for budget allocation. */
+    files: TruncatedDiffFile[];
 }
 
 interface FilePatch {
@@ -74,16 +94,26 @@ export function truncateDiff(
 
     // If it fits, return as-is
     if (originalChars <= maxChars) {
-        const files = splitIntoPatchesFast(rawDiff);
+        const patches = splitIntoPatches(rawDiff);
+        const files: TruncatedDiffFile[] = patches.map((p) => {
+            const bytes = patchBytes(p);
+            return {
+                filename: p.filename,
+                originalBytes: bytes,
+                finalBytes: bytes,
+                status: 'included',
+            };
+        });
         return {
             diff: rawDiff,
-            summary: `${files.length} files changed (${originalChars.toLocaleString()} chars)`,
-            totalFiles: files.length,
-            fullyIncludedFiles: files.length,
+            summary: `${patches.length} files changed (${originalChars.toLocaleString()} chars)`,
+            totalFiles: patches.length,
+            fullyIncludedFiles: patches.length,
             truncatedFiles: 0,
             skippedFiles: 0,
             originalChars,
             finalChars: originalChars,
+            files,
         };
     }
 
@@ -112,28 +142,58 @@ export function truncateDiff(
     const perFileBudget = Math.floor(remainingBudget / Math.max(reviewable.length, 1));
 
     const outputParts: string[] = [];
+    const files: TruncatedDiffFile[] = [];
     let fullyIncluded = 0;
     let truncatedCount = 0;
 
+    // Record pattern-skipped files up front; they never get a budget chance.
+    for (const patch of skippable) {
+        files.push({
+            filename: patch.filename,
+            originalBytes: patchBytes(patch),
+            finalBytes: 0,
+            status: 'skipped',
+            skipReason: 'pattern',
+        });
+    }
+
     for (const patch of reviewable) {
         const patchText = `${patch.header}\n${patch.content}`;
+        const originalBytes = patchText.length;
 
         if (patchText.length <= perFileBudget || patchText.length <= remainingBudget) {
-            // Fits within budget — include fully
             outputParts.push(patchText);
             remainingBudget -= patchText.length;
             fullyIncluded++;
+            files.push({
+                filename: patch.filename,
+                originalBytes,
+                finalBytes: patchText.length,
+                status: 'included',
+            });
         } else if (remainingBudget > 500) {
-            // Truncate this patch
             const truncated = truncatePatch(patch, Math.min(remainingBudget, perFileBudget));
             outputParts.push(truncated);
             remainingBudget -= truncated.length;
             truncatedCount++;
+            files.push({
+                filename: patch.filename,
+                originalBytes,
+                finalBytes: truncated.length,
+                status: 'truncated',
+            });
+        } else {
+            files.push({
+                filename: patch.filename,
+                originalBytes,
+                finalBytes: 0,
+                status: 'skipped',
+                skipReason: 'budget',
+            });
         }
-        // else: skip entirely — no budget left
     }
 
-    const skippedCount = skippable.length + (totalFiles - skippable.length - fullyIncluded - truncatedCount);
+    const skippedCount = files.filter((f) => f.status === 'skipped').length;
     const diff = outputParts.join('\n');
 
     const summaryParts = [
@@ -153,7 +213,13 @@ export function truncateDiff(
         skippedFiles: skippedCount,
         originalChars,
         finalChars: diff.length,
+        files,
     };
+}
+
+function patchBytes(patch: FilePatch): number {
+    // Matches the concatenation used when emitting `${header}\n${content}`.
+    return patch.header.length + 1 + patch.content.length;
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -194,11 +260,6 @@ function splitIntoPatches(rawDiff: string): FilePatch[] {
     }
 
     return patches;
-}
-
-/** Quick count of files without full parsing */
-function splitIntoPatchesFast(rawDiff: string): string[] {
-    return rawDiff.split(/(?=^diff --git )/m).filter(p => p.trim().startsWith('diff --git'));
 }
 
 /** Check if a file should be skipped based on its path */

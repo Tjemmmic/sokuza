@@ -6,6 +6,12 @@ import {
     renderReviewMarkdown,
 } from './review-templates.js';
 import { runCompletionWithFallback } from '../core/ai-providers.js';
+import {
+    recordAiReviewRun,
+    generateRunId,
+    sha1,
+    type AiReviewRunRecord,
+} from '../core/run-store.js';
 
 const DEFAULT_MAX_TOKENS = 4096;
 
@@ -42,6 +48,10 @@ const DEFAULT_SYSTEM_PROMPT = generateCodeReviewPrompt();
  * Returns: { review, model, provider, usage?, truncation? }
  */
 export const aiReviewAction: ActionHandler = async (params, context) => {
+    const runId = generateRunId();
+    const startedAt = Date.now();
+    const createdAt = new Date(startedAt).toISOString();
+
     // ─── Resolve the diff ───────────────────────────────────────────────
     let diff = params.diff as string | undefined;
 
@@ -149,14 +159,58 @@ export const aiReviewAction: ActionHandler = async (params, context) => {
         'Sending diff to AI for review',
     );
 
-    const completion = await runCompletionWithFallback(context.ai, params.provider as string | undefined, {
-        systemPrompt,
-        userMessage,
-        model: params.model as string | undefined,
-        maxTokens: (params.max_tokens as number) ?? DEFAULT_MAX_TOKENS,
-        workdir: params.workdir as string | undefined,
-        logger: context.logger,
-    });
+    // Fields shared between the success record and the fallback error
+    // record — computed once so the two terminal paths diverge only in
+    // the completion-derived fields.
+    const recordStub = {
+        id: runId,
+        action: 'ai-review' as const,
+        createdAt,
+        workflowName: context.workflowName,
+        event: extractEventInfo(context.event),
+        strategy: 'truncate' as const,
+        input: {
+            diffSource,
+            diffBytes: diff.length,
+            diffSha1: sha1(diff),
+            incompleteFiles,
+        },
+        truncation: {
+            triggered: truncation.originalChars !== truncation.finalChars,
+            originalChars: truncation.originalChars,
+            finalChars: truncation.finalChars,
+            totalFiles: truncation.totalFiles,
+            fullyIncludedFiles: truncation.fullyIncludedFiles,
+            truncatedFiles: truncation.truncatedFiles,
+            skippedFiles: truncation.skippedFiles,
+            files: truncation.files,
+        },
+    };
+
+    let completion: Awaited<ReturnType<typeof runCompletionWithFallback>>;
+    try {
+        completion = await runCompletionWithFallback(context.ai, params.provider as string | undefined, {
+            systemPrompt,
+            userMessage,
+            model: params.model as string | undefined,
+            maxTokens: (params.max_tokens as number) ?? DEFAULT_MAX_TOKENS,
+            workdir: params.workdir as string | undefined,
+            logger: context.logger,
+        });
+    } catch (err) {
+        await recordAiReviewRun(
+            {
+                ...recordStub,
+                durationMs: Date.now() - startedAt,
+                provider: (params.provider as string | undefined) || '(unresolved)',
+                model: (params.model as string | undefined) ?? '',
+                output: { parseSucceeded: false, reviewChars: 0 },
+                error: err instanceof Error ? err.message : String(err),
+            },
+            context.logger,
+        );
+        throw err;
+    }
 
     // The model is instructed to emit structured JSON; we render it into
     // markdown here so the posted comment has consistent formatting
@@ -188,6 +242,33 @@ export const aiReviewAction: ActionHandler = async (params, context) => {
         );
     }
 
+    await recordAiReviewRun(
+        {
+            ...recordStub,
+            durationMs: Date.now() - startedAt,
+            provider: completion.provider,
+            model: completion.model,
+            usage: completion.usage,
+            output: parsed
+                ? {
+                    parseSucceeded: true,
+                    decision: parsed.decision,
+                    issueCount: parsed.issues.length,
+                    issues: parsed.issues.map((i) => ({
+                        priority: i.priority,
+                        title: i.title,
+                        file: i.file,
+                    })),
+                    reviewChars: review.length,
+                }
+                : {
+                    parseSucceeded: false,
+                    reviewChars: review.length,
+                },
+        },
+        context.logger,
+    );
+
     return {
         review,
         model: completion.model,
@@ -203,6 +284,22 @@ export const aiReviewAction: ActionHandler = async (params, context) => {
             : undefined,
     };
 };
+
+function extractEventInfo(event: { source: string; event: string; payload?: Record<string, unknown>; metadata?: Record<string, unknown> }): AiReviewRunRecord['event'] {
+    const meta = event.metadata ?? {};
+    const pr = event.payload?.pull_request as Record<string, unknown> | undefined;
+    const info: AiReviewRunRecord['event'] = {
+        source: event.source,
+        event: event.event,
+    };
+    const repo = meta.repo as string | undefined;
+    if (repo) info.repo = repo;
+    const prNumber = (meta.prNumber ?? pr?.number) as number | undefined;
+    if (typeof prNumber === 'number') info.prNumber = prNumber;
+    const branch = (pr?.head as Record<string, unknown> | undefined)?.ref as string | undefined;
+    if (branch) info.branch = branch;
+    return info;
+}
 
 function resolveDiffSource(context: { steps: Record<string, unknown>; results: Record<string | number, unknown> }): string | undefined {
     for (const result of Object.values(context.steps)) {

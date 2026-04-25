@@ -481,6 +481,9 @@ export class SokuzaEngine {
                 this.eventSubscribers.add(cb);
                 return () => this.eventSubscribers.delete(cb);
             },
+            broadcastEvent: (payload) => {
+                for (const cb of this.eventSubscribers) cb(payload);
+            },
             getRegisteredActions: () => [...this.actions.keys()],
             runWorkflow: (name, inputs) => this.runWorkflowByName(name, inputs),
             rerunWorkflow: (runId) => this.rerunWorkflow(runId),

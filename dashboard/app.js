@@ -448,6 +448,7 @@ async function renderPage() {
             case 'integrations': await renderIntegrations(el); break;
             case 'events': await renderEvents(el); break;
             case 'queue': await renderQueue(el); break;
+            case 'ai-reviews': await renderAiReviews(el); break;
             case 'logs': await renderLogs(el); break;
             case 'system': await renderSystem(el); break;
             case 'settings': await renderSettings(el); break;
@@ -4615,6 +4616,18 @@ function connectSSE() {
                 if (txt) txt.textContent = 'Connected';
                 return;
             }
+            if (data.type === 'ai-review-run') {
+                if (currentPage === 'ai-reviews') {
+                    // Coalesce bursts (e.g. label edits emit too) so we
+                    // don't refetch on every keystroke.
+                    if (aiReviewsRefreshTimer) clearTimeout(aiReviewsRefreshTimer);
+                    aiReviewsRefreshTimer = setTimeout(() => {
+                        loadAiReviewsStats();
+                        loadAiReviewsTable();
+                    }, 400);
+                }
+                return;
+            }
             events.unshift(data);
             if (events.length > 500) events.pop();
 
@@ -4915,6 +4928,304 @@ function renderLogLine(e) {
     const ts = e.time ? new Date(e.time).toLocaleTimeString() : '';
     const extras = Object.entries(e).filter(([k]) => !['level','time','msg','levelName'].includes(k)).map(([k,v]) => `${k}=${typeof v === 'string' ? v : JSON.stringify(v)}`).join(' ');
     return `<div style="border-bottom:1px solid var(--border);padding:3px 0"><span style="color:var(--text-muted)">${esc(ts)}</span> <span style="color:${c};font-weight:600">${name}</span> <span style="color:var(--text-primary)">${esc(e.msg || '')}</span>${extras ? `<span style="color:var(--text-muted);margin-left:8px">${esc(extras)}</span>` : ''}</div>`;
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// AI REVIEWS — browse the run log written by the ai-review action
+// (~/.sokuza/runs/ai-review/) so we can evaluate whether truncation is
+// dropping review-relevant signal.
+// ═════════════════════════════════════════════════════════════════════════════
+let aiReviewFilters = { truncated: false, errored: false, parseFailed: false };
+let aiReviewsRefreshTimer = null;
+
+async function renderAiReviews(el) {
+    el.innerHTML = `
+        <div class="page-header">
+            <div class="page-header-left">
+                <h1 class="page-title">AI Reviews</h1>
+                <p class="page-subtitle">Run log of every <code>ai-review</code> action — outcomes, truncation, errors</p>
+            </div>
+            <div class="btn-group">
+                <button class="btn btn-ghost btn-sm" onclick="reloadAiReviewsPage()">↻ Refresh</button>
+            </div>
+        </div>
+
+        <div id="ai-reviews-stats" style="margin-bottom:18px"></div>
+
+        <div class="filter-bar" id="ai-reviews-filters" style="margin-bottom:10px"></div>
+
+        <div id="ai-reviews-table"></div>
+    `;
+    renderAiReviewFilters();
+    await Promise.all([loadAiReviewsStats(), loadAiReviewsTable()]);
+}
+
+function renderAiReviewFilters() {
+    const bar = $('#ai-reviews-filters');
+    if (!bar) return;
+    const isAll = !aiReviewFilters.truncated && !aiReviewFilters.errored && !aiReviewFilters.parseFailed;
+    bar.innerHTML = `
+        <button class="btn ${isAll ? 'btn-primary' : 'btn-ghost'} btn-sm" onclick="setAiReviewFilter('all')">All</button>
+        <button class="btn ${aiReviewFilters.truncated ? 'btn-primary' : 'btn-ghost'} btn-sm" onclick="setAiReviewFilter('truncated')">Truncated only</button>
+        <button class="btn ${aiReviewFilters.parseFailed ? 'btn-primary' : 'btn-ghost'} btn-sm" onclick="setAiReviewFilter('parseFailed')">Parse failures</button>
+        <button class="btn ${aiReviewFilters.errored ? 'btn-primary' : 'btn-ghost'} btn-sm" onclick="setAiReviewFilter('errored')">Errors</button>
+    `;
+}
+
+async function loadAiReviewsStats() {
+    const target = $('#ai-reviews-stats');
+    if (!target) return;
+    let stats;
+    try {
+        stats = await api.get('/api/ai/runs/stats');
+    } catch {
+        target.innerHTML = '';
+        return;
+    }
+    if (stats.total === 0) {
+        target.innerHTML = '';
+        return;
+    }
+    const pct = (n) => `${Math.round(n * 100)}%`;
+    const fmtBytes = (n) => n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${(n / 1000).toFixed(1)}K` : `${n}`;
+    const dropTotal = stats.droppedBytes.pattern + stats.droppedBytes.budget;
+    target.innerHTML = `
+        <div class="card-grid" style="margin-bottom:10px">
+            <div class="card card-stat"><div class="stat-value">${stats.total}</div><div class="stat-label">Reviews (30d)</div></div>
+            <div class="card card-stat"><div class="stat-value" style="color:${stats.truncatedRate > 0.25 ? '#f59e0b' : 'var(--text-primary)'}">${pct(stats.truncatedRate)}</div><div class="stat-label">Truncated</div></div>
+            <div class="card card-stat"><div class="stat-value" style="color:${stats.parseFailed > 0 ? '#f59e0b' : 'var(--text-primary)'}">${stats.parseFailed}</div><div class="stat-label">Parse failures</div></div>
+            <div class="card card-stat"><div class="stat-value" style="color:${stats.errored > 0 ? '#ef4444' : 'var(--text-primary)'}">${stats.errored}</div><div class="stat-label">Errors</div></div>
+        </div>
+        ${stats.topDroppedPaths.length > 0 ? `
+        <details style="background:var(--bg-secondary,#161614);border:1px solid var(--border);border-radius:6px;padding:10px 14px">
+            <summary style="cursor:pointer;font-size:12px;color:var(--text-secondary)">Top dropped paths · ${fmtBytes(dropTotal)} total dropped (${fmtBytes(stats.droppedBytes.pattern)} pattern, ${fmtBytes(stats.droppedBytes.budget)} budget)</summary>
+            <table style="width:100%;margin-top:10px;font-size:12px;font-family:var(--mono)">
+                <thead><tr><th style="text-align:left">File</th><th style="text-align:right">Bytes dropped</th><th style="text-align:right">Hits</th><th>Reasons</th></tr></thead>
+                <tbody>${stats.topDroppedPaths.map((p) => `<tr>
+                    <td style="word-break:break-all">${esc(p.filename)}</td>
+                    <td style="text-align:right">${p.bytes.toLocaleString()}</td>
+                    <td style="text-align:right;color:var(--text-muted)">${p.count}</td>
+                    <td style="font-size:11px">${p.reasons.pattern ? `<span style="color:var(--text-muted)">pattern×${p.reasons.pattern}</span>` : ''}${p.reasons.pattern && p.reasons.budget ? ' · ' : ''}${p.reasons.budget ? `<span style="color:#f59e0b">budget×${p.reasons.budget}</span>` : ''}</td>
+                </tr>`).join('')}</tbody>
+            </table>
+        </details>` : ''}
+    `;
+}
+
+window.reloadAiReviewsPage = function () {
+    Promise.all([loadAiReviewsStats(), loadAiReviewsTable()]);
+};
+
+async function loadAiReviewsTable() {
+    const target = $('#ai-reviews-table');
+    if (!target) return;
+    target.innerHTML = '<div class="skeleton skeleton-card"></div>';
+
+    const params = new URLSearchParams({ limit: '200' });
+    if (aiReviewFilters.truncated) params.set('truncated', 'true');
+    if (aiReviewFilters.errored) params.set('errored', 'true');
+    if (aiReviewFilters.parseFailed) params.set('parse_failed', 'true');
+
+    let runs = [];
+    try {
+        const data = await api.get(`/api/ai/runs?${params}`);
+        runs = data.runs || [];
+    } catch (err) {
+        target.innerHTML = `<div class="empty-state"><div class="empty-icon">⚠️</div><p class="empty-text">Failed to load runs: ${esc(err.message)}</p></div>`;
+        return;
+    }
+
+    if (runs.length === 0) {
+        target.innerHTML = `<div class="empty-state"><div class="empty-icon">🔍</div><p class="empty-text">No runs match the current filter${aiReviewFilters.truncated || aiReviewFilters.errored || aiReviewFilters.parseFailed ? '. Try "All" to see everything.' : ' yet — once an <code>ai-review</code> action runs, it will appear here.'}</p></div>`;
+        return;
+    }
+
+    target.innerHTML = `
+        <div class="table-wrap" style="overflow-x:auto">
+            <table style="min-width:880px">
+                <thead><tr>
+                    <th>Time</th>
+                    <th>Workflow</th>
+                    <th>Repo / PR</th>
+                    <th>Provider</th>
+                    <th>Truncation</th>
+                    <th>Outcome</th>
+                    <th style="width:40px">Label</th>
+                </tr></thead>
+                <tbody>
+                    ${runs.map(renderAiReviewRow).join('')}
+                </tbody>
+            </table>
+        </div>
+    `;
+}
+
+function renderAiReviewRow(r) {
+    const repo = r.event?.repo ?? '—';
+    const prCell = r.event?.prNumber ? `${esc(repo)} <span style="color:var(--text-muted)">#${r.event.prNumber}</span>` : esc(repo);
+    const truncCell = r.truncation?.triggered
+        ? `<span style="color:var(--accent-hover);font-weight:600">${r.truncation.totalFiles}f → ${r.truncation.fullyIncludedFiles}+${r.truncation.truncatedFiles}t/${r.truncation.skippedFiles}s</span>`
+        : `<span style="color:var(--text-muted)">none</span>`;
+
+    let outcomeBadge, outcomeColor;
+    if (r.error) { outcomeBadge = 'error'; outcomeColor = '#ef4444'; }
+    else if (!r.output?.parseSucceeded) { outcomeBadge = 'parse-fail'; outcomeColor = '#f59e0b'; }
+    else { outcomeBadge = r.output?.decision || 'ok'; outcomeColor = r.output?.decision === 'CHANGES_REQUESTED' ? '#f59e0b' : '#22c55e'; }
+    const issueSuffix = typeof r.output?.issueCount === 'number' && r.output.issueCount > 0
+        ? ` <span style="color:var(--text-muted);font-size:11px">· ${r.output.issueCount} issue${r.output.issueCount === 1 ? '' : 's'}</span>`
+        : '';
+
+    let labelCell = '<span style="color:var(--text-muted)">—</span>';
+    if (r.label?.verdict === 'good') labelCell = '<span title="Marked good" style="color:#22c55e;font-size:14px">✓</span>';
+    else if (r.label?.verdict === 'bad') labelCell = '<span title="Marked bad" style="color:#ef4444;font-size:14px">✗</span>';
+
+    return `
+        <tr style="cursor:pointer" onclick="openAiReviewDetail('${esc(r.id)}')">
+            <td style="font-family:var(--mono);font-size:12px;color:var(--text-muted);white-space:nowrap">${esc(fmtDateTime(r.createdAt))}</td>
+            <td>${r.workflowName ? `<span class="badge badge-action">${esc(r.workflowName)}</span>` : '<span style="color:var(--text-muted)">—</span>'}</td>
+            <td style="font-size:12px;white-space:nowrap">${prCell}</td>
+            <td style="font-size:12px;white-space:nowrap"><code>${esc(r.provider)}</code> <span style="color:var(--text-muted);font-size:11px">${esc(r.model || '')}</span></td>
+            <td style="font-family:var(--mono);font-size:11px;white-space:nowrap">${truncCell}</td>
+            <td style="font-size:12px;white-space:nowrap"><span class="badge" style="background:${outcomeColor}22;color:${outcomeColor}">${esc(outcomeBadge)}</span>${issueSuffix}</td>
+            <td style="text-align:center">${labelCell}</td>
+        </tr>
+    `;
+}
+
+window.setAiReviewFilter = function (which) {
+    aiReviewFilters = { truncated: false, errored: false, parseFailed: false };
+    if (which !== 'all') aiReviewFilters[which] = true;
+    renderAiReviewFilters();
+    loadAiReviewsTable();
+};
+
+window.openAiReviewDetail = async function (id) {
+    openModal(`Run: ${id}`, '<div class="skeleton skeleton-card"></div>');
+    let record;
+    try {
+        record = await api.get(`/api/ai/runs/${encodeURIComponent(id)}`);
+    } catch (err) {
+        $('#modal-body').innerHTML = `<p style="color:#ef4444">Failed to load run: ${esc(err.message)}</p>`;
+        return;
+    }
+    $('#modal-body').innerHTML = renderAiReviewDetailBody(record);
+};
+
+function renderAiReviewDetailBody(r) {
+    const event = r.event || {};
+    const t = r.truncation || {};
+    const o = r.output || {};
+    const usage = r.usage || {};
+
+    const filesTable = (t.files && t.files.length)
+        ? `<table style="width:100%;font-size:12px;font-family:var(--mono)"><thead><tr><th style="text-align:left">File</th><th style="text-align:right">Original</th><th style="text-align:right">Final</th><th>Status</th></tr></thead><tbody>${
+            t.files.map(f => `<tr>
+                <td style="word-break:break-all">${esc(f.filename)}</td>
+                <td style="text-align:right;color:var(--text-muted)">${f.originalBytes.toLocaleString()}</td>
+                <td style="text-align:right">${f.finalBytes.toLocaleString()}</td>
+                <td>${renderFileStatus(f)}</td>
+            </tr>`).join('')
+        }</tbody></table>`
+        : '<p style="color:var(--text-muted);font-size:12px">No per-file detail recorded.</p>';
+
+    const issuesList = (o.issues && o.issues.length)
+        ? `<ul style="font-size:12px;padding-left:18px">${o.issues.map(i => `<li><strong>${esc(i.priority)}</strong> · <code>${esc(i.file || '')}</code> — ${esc(i.title || '')}</li>`).join('')}</ul>`
+        : '<p style="color:var(--text-muted);font-size:12px">No issues flagged.</p>';
+
+    return `
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:18px;font-size:13px">
+            <div>
+                <div style="color:var(--text-muted);font-size:11px;text-transform:uppercase;margin-bottom:4px">Workflow</div>
+                <div>${r.workflowName ? esc(r.workflowName) : '—'}</div>
+            </div>
+            <div>
+                <div style="color:var(--text-muted);font-size:11px;text-transform:uppercase;margin-bottom:4px">Created</div>
+                <div style="font-family:var(--mono);font-size:12px">${esc(r.createdAt)} · ${r.durationMs}ms</div>
+            </div>
+            <div>
+                <div style="color:var(--text-muted);font-size:11px;text-transform:uppercase;margin-bottom:4px">Event</div>
+                <div>${sourceBadge(event.source)} <code style="font-size:11px">${esc(event.event || '')}</code>${event.repo ? ` · ${esc(event.repo)}` : ''}${event.prNumber ? ` #${event.prNumber}` : ''}${event.branch ? ` (${esc(event.branch)})` : ''}</div>
+            </div>
+            <div>
+                <div style="color:var(--text-muted);font-size:11px;text-transform:uppercase;margin-bottom:4px">Provider · Model</div>
+                <div><code>${esc(r.provider)}</code> · <code>${esc(r.model || '')}</code>${usage.input_tokens || usage.output_tokens ? ` · <span style="color:var(--text-muted);font-size:11px">${usage.input_tokens || 0}/${usage.output_tokens || 0} tok</span>` : ''}</div>
+            </div>
+        </div>
+
+        <div style="margin-bottom:18px">
+            <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px">
+                <h4 style="margin:0;font-size:13px">Truncation</h4>
+                <span style="font-size:11px;color:var(--text-muted);font-family:var(--mono)">strategy=${esc(r.strategy)} · ${t.originalChars?.toLocaleString() || 0} → ${t.finalChars?.toLocaleString() || 0} chars · ${t.totalFiles || 0}f total · ${t.fullyIncludedFiles || 0} included · ${t.truncatedFiles || 0} truncated · ${t.skippedFiles || 0} skipped</span>
+            </div>
+            ${filesTable}
+        </div>
+
+        <div style="margin-bottom:8px">
+            <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px">
+                <h4 style="margin:0;font-size:13px">Output</h4>
+                <span style="font-size:11px;color:var(--text-muted)">${o.parseSucceeded ? `parsed · decision: ${esc(o.decision || '?')}` : 'parse failed'}${typeof o.reviewChars === 'number' ? ` · ${o.reviewChars} chars` : ''}</span>
+            </div>
+            ${issuesList}
+        </div>
+
+        ${r.error ? `<div style="margin-top:14px;padding:10px;background:#ef444422;border-left:3px solid #ef4444;font-size:12px;font-family:var(--mono);white-space:pre-wrap">${esc(r.error)}</div>` : ''}
+
+        <div style="margin-top:18px;padding-top:14px;border-top:1px solid var(--border)">
+            <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px">
+                <h4 style="margin:0;font-size:13px">Label this run</h4>
+                <span style="font-size:11px;color:var(--text-muted)">${r.label ? `marked ${esc(r.label.verdict)} · ${esc(fmtDateTime(r.label.labeledAt))}` : 'helps decide if truncation is dropping signal'}</span>
+            </div>
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+                <button class="btn btn-sm ${r.label?.verdict === 'good' ? 'btn-primary' : 'btn-ghost'}" onclick="setAiReviewLabel('${esc(r.id)}','good')">👍 Good</button>
+                <button class="btn btn-sm ${r.label?.verdict === 'bad' ? 'btn-primary' : 'btn-ghost'}" onclick="setAiReviewLabel('${esc(r.id)}','bad')">👎 Bad</button>
+                ${r.label ? `<button class="btn btn-sm btn-ghost" onclick="clearAiReviewLabel('${esc(r.id)}')">Clear</button>` : ''}
+                <input id="ai-review-note-input" type="text" placeholder="Optional note (e.g. 'missed a real bug in dropped file')"
+                       value="${esc(r.label?.note || '')}"
+                       data-verdict="${esc(r.label?.verdict || '')}"
+                       data-saved-note="${esc(r.label?.note || '')}"
+                       style="flex:1;min-width:240px;padding:6px 10px;background:var(--bg-primary);border:1px solid var(--border);color:var(--text-primary);font-size:12px;border-radius:4px"
+                       onkeydown="if(event.key==='Enter'){saveAiReviewNote('${esc(r.id)}')}" onblur="saveAiReviewNote('${esc(r.id)}')" />
+            </div>
+        </div>
+    `;
+}
+
+window.setAiReviewLabel = async function (id, verdict) {
+    const note = ($('#ai-review-note-input')?.value || '').trim() || undefined;
+    try {
+        const record = await api.put(`/api/ai/runs/${encodeURIComponent(id)}/label`, { verdict, note });
+        $('#modal-body').innerHTML = renderAiReviewDetailBody(record);
+    } catch (err) {
+        toast?.(`Failed to label: ${err.message}`);
+    }
+};
+
+window.clearAiReviewLabel = async function (id) {
+    try {
+        const record = await api.del(`/api/ai/runs/${encodeURIComponent(id)}/label`);
+        $('#modal-body').innerHTML = renderAiReviewDetailBody(record);
+    } catch (err) {
+        toast?.(`Failed to clear: ${err.message}`);
+    }
+};
+
+/** Persist note edits. Only fires when a verdict already exists (a note
+ *  without a thumbs is meaningless). The verdict is read from the input's
+ *  data attribute, set by the renderer. */
+window.saveAiReviewNote = async function (id) {
+    const input = $('#ai-review-note-input');
+    const verdict = input?.dataset.verdict;
+    if (!input || !verdict) return;
+    if (input.dataset.savedNote === input.value) return;
+    input.dataset.savedNote = input.value;
+    await window.setAiReviewLabel(id, verdict);
+};
+
+function renderFileStatus(f) {
+    if (f.status === 'included') return '<span style="color:#22c55e">included</span>';
+    if (f.status === 'truncated') return '<span style="color:#f59e0b">truncated</span>';
+    if (f.status === 'skipped') return `<span style="color:#ef4444">skipped (${esc(f.skipReason || '')})</span>`;
+    return esc(f.status);
 }
 
 window.toggleLogPause = function () {

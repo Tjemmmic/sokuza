@@ -175,6 +175,56 @@ Binary files /dev/null and b/image.png differ`;
         expect(result.fullyIncludedFiles).toBe(1);
     });
 
+    it('should populate per-file outcomes in the fast path', () => {
+        const diff = makeMultiDiff([
+            { name: 'src/a.ts', lines: 3 },
+            { name: 'src/b.ts', lines: 4 },
+        ]);
+        const result = truncateDiff(diff, DEFAULT_MAX_CHARS);
+
+        expect(result.files).toHaveLength(2);
+        expect(result.files.every((f) => f.status === 'included')).toBe(true);
+        expect(result.files.every((f) => f.originalBytes === f.finalBytes)).toBe(true);
+        expect(result.files.map((f) => f.filename).sort()).toEqual(['src/a.ts', 'src/b.ts']);
+    });
+
+    it('should tag pattern-skipped files with reason=pattern', () => {
+        const diff = makeMultiDiff([
+            { name: 'src/app.ts', lines: 5 },
+            { name: 'package-lock.json', lines: 5000 },
+        ]);
+        const result = truncateDiff(diff, 2000);
+
+        const lock = result.files.find((f) => f.filename === 'package-lock.json');
+        expect(lock).toMatchObject({ status: 'skipped', skipReason: 'pattern', finalBytes: 0 });
+        expect(lock!.originalBytes).toBeGreaterThan(0);
+
+        const app = result.files.find((f) => f.filename === 'src/app.ts');
+        expect(app?.status).toBe('included');
+    });
+
+    it('should tag budget-skipped files with reason=budget and record truncation', () => {
+        const diff = makeMultiDiff([
+            { name: 'src/tiny.ts', lines: 2 },
+            { name: 'src/medium.ts', lines: 20 },
+            { name: 'src/huge.ts', lines: 2000 },
+        ]);
+        const result = truncateDiff(diff, 1200);
+
+        expect(result.files).toHaveLength(3);
+        const byName = Object.fromEntries(result.files.map((f) => [f.filename, f]));
+        expect(byName['src/tiny.ts'].status).toBe('included');
+
+        const huge = byName['src/huge.ts'];
+        if (huge.status === 'skipped') {
+            expect(huge.skipReason).toBe('budget');
+            expect(huge.finalBytes).toBe(0);
+        } else {
+            expect(huge.status).toBe('truncated');
+            expect(huge.finalBytes).toBeLessThan(huge.originalBytes);
+        }
+    });
+
     it('should preserve "No newline at end of file" marker', () => {
         const diff = `diff --git a/readme.md b/readme.md
 --- a/readme.md
