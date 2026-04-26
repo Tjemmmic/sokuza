@@ -88,6 +88,80 @@ function extractBearer(req: FastifyRequest): string | undefined {
 }
 
 /**
+ * Default Host header values accepted by `registerHostGuard`. Covers the
+ * loopback names a local sokuza is reachable as. Any deployment that binds
+ * to a non-loopback hostname must add it via the explicit allow-list arg.
+ */
+export const DEFAULT_ALLOWED_HOSTS: readonly string[] = [
+    'localhost',
+    '127.0.0.1',
+    '::1',
+    'sokuza.localhost',
+];
+
+/**
+ * Extract the hostname portion from a Host header, lowercased and with
+ * the port stripped. Handles bracketed IPv6 ([::1]:24847 → ::1).
+ * Returns null for malformed inputs.
+ */
+export function parseHostHeader(raw: string | undefined): string | null {
+    if (!raw) return null;
+    const trimmed = raw.trim();
+    if (!trimmed) return null;
+    if (trimmed.startsWith('[')) {
+        // IPv6: [host]:port. The port is optional.
+        const close = trimmed.indexOf(']');
+        if (close < 0) return null;
+        return trimmed.slice(1, close).toLowerCase();
+    }
+    // Hostname or IPv4: name[:port]
+    const colon = trimmed.indexOf(':');
+    return (colon >= 0 ? trimmed.slice(0, colon) : trimmed).toLowerCase();
+}
+
+/**
+ * Register a `preHandler` that rejects requests whose Host header isn't in
+ * the allow-list. Defense-in-depth against DNS rebinding: even if an
+ * attacker registers a domain that resolves to 127.0.0.1, the browser
+ * sends the attacker's hostname in the Host header — which won't match.
+ *
+ * Exempt by design (matches `registerAuthGate`):
+ *   - /health    — discovery, must accept whatever hostname the public
+ *                  site probes via (sokuza.localhost OR 127.0.0.1).
+ *   - /webhooks/* — receive arbitrary tunnel hostnames; rely on
+ *                   per-integration signature verification instead.
+ *
+ * MUST be registered BEFORE registerAuthGate so the host check runs first.
+ * The allow-list must be lowercased; `parseHostHeader` lowercases requests.
+ */
+export function registerHostGuard(
+    server: FastifyInstance,
+    allowedHosts: readonly string[],
+    logger: Logger,
+): void {
+    const allow = new Set(allowedHosts.map((h) => h.toLowerCase()));
+    server.addHook('onRequest', async (req: FastifyRequest, reply: FastifyReply) => {
+        const url = req.url;
+        // Discovery + webhooks: deliberately exempt (see fn doc).
+        if (url === '/health' || url.startsWith('/health?')) return;
+        if (url.startsWith('/webhooks/')) return;
+
+        const host = parseHostHeader(req.headers.host as string | undefined);
+        if (!host || !allow.has(host)) {
+            logger.warn(
+                { url, ip: req.ip, host: req.headers.host },
+                'Rejected request with disallowed Host header (DNS-rebinding guard)',
+            );
+            reply.status(403).send({
+                error: 'host_not_allowed',
+                hint: 'This sokuza instance only accepts requests for an allow-listed Host header. If you are tunnelling, set Host to one of the configured loopback names.',
+            });
+            return reply;
+        }
+    });
+}
+
+/**
  * Register a `preHandler` that rejects unauthenticated requests to any
  * path that starts with `/api/`, plus the dashboard HTML surfaces. Skips
  * `/health` and `/webhooks/*` which have their own auth models.

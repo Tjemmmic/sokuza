@@ -22,7 +22,12 @@ import {
     persistRuntimeState,
     pruneStaleRuntimeStates,
 } from '../server/discovery.js';
-import { loadOrCreateDashboardToken, registerAuthGate } from '../server/auth.js';
+import {
+    loadOrCreateDashboardToken,
+    registerAuthGate,
+    registerHostGuard,
+    DEFAULT_ALLOWED_HOSTS,
+} from '../server/auth.js';
 import type { FastifyInstance } from 'fastify';
 import { resolve, join } from 'node:path';
 import { WorkflowQueue } from './queue.js';
@@ -507,6 +512,26 @@ export class SokuzaEngine {
         }
 
         this.server = createServer(this.logger);
+
+        // DNS-rebinding guard. Reject requests whose Host header isn't a
+        // loopback name we explicitly accept. Defense-in-depth alongside the
+        // bearer token: even if a remote site convinces a browser to issue
+        // requests to 127.0.0.1, the browser sends the attacker's hostname
+        // in Host — which won't match. Registered BEFORE the auth gate so
+        // the host check fires first; /health and /webhooks/* are exempt
+        // (the same paths the auth gate exempts) so discovery still works.
+        const configuredHost = this.config.server.host;
+        const allowedHosts = [
+            ...DEFAULT_ALLOWED_HOSTS,
+            ...(configuredHost && configuredHost !== '0.0.0.0' && configuredHost !== '::'
+                ? [configuredHost]
+                : []),
+            ...(process.env.SOKUZA_ALLOWED_HOSTS ?? '')
+                .split(',')
+                .map((h) => h.trim())
+                .filter(Boolean),
+        ];
+        registerHostGuard(this.server, allowedHosts, this.logger);
 
         // Gate /api/* behind a bearer token. The dashboard HTML itself still
         // loads without auth so its JS can prompt the user for the token.

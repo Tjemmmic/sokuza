@@ -8,6 +8,9 @@ import pino from 'pino';
 import {
     loadOrCreateDashboardToken,
     registerAuthGate,
+    registerHostGuard,
+    parseHostHeader,
+    DEFAULT_ALLOWED_HOSTS,
     rotateDashboardToken,
     tokenFilePath,
     tokensEqual,
@@ -164,5 +167,117 @@ describe('registerAuthGate', () => {
             headers: { Authorization: `Bearer ${'e'.repeat(64)}` },
         });
         expect(res.statusCode).toBe(401);
+    });
+});
+
+describe('parseHostHeader', () => {
+    it('strips a numeric port', () => {
+        expect(parseHostHeader('localhost:24847')).toBe('localhost');
+        expect(parseHostHeader('127.0.0.1:9000')).toBe('127.0.0.1');
+    });
+
+    it('handles bare hostnames without a port', () => {
+        expect(parseHostHeader('sokuza.localhost')).toBe('sokuza.localhost');
+    });
+
+    it('handles bracketed IPv6 with and without port', () => {
+        expect(parseHostHeader('[::1]:24847')).toBe('::1');
+        expect(parseHostHeader('[::1]')).toBe('::1');
+        expect(parseHostHeader('[2001:db8::1]:8080')).toBe('2001:db8::1');
+    });
+
+    it('lowercases the hostname (Host headers are case-insensitive)', () => {
+        expect(parseHostHeader('LocalHost:24847')).toBe('localhost');
+    });
+
+    it('returns null for missing or malformed input', () => {
+        expect(parseHostHeader(undefined)).toBeNull();
+        expect(parseHostHeader('')).toBeNull();
+        expect(parseHostHeader('   ')).toBeNull();
+        // Unclosed bracket is a malformed Host.
+        expect(parseHostHeader('[::1')).toBeNull();
+    });
+});
+
+describe('registerHostGuard', () => {
+    function newServer(allowed: readonly string[] = DEFAULT_ALLOWED_HOSTS) {
+        const s = Fastify({ logger: false });
+        registerHostGuard(s, allowed, logger);
+        s.get('/health', async () => ({ ok: true }));
+        s.get('/api/ping', async () => ({ pong: true }));
+        s.get('/webhooks/foo', async () => ({ received: true }));
+        s.get('/', async (_req, reply) => reply.type('text/html').send('<html>dashboard</html>'));
+        s.get('/dashboard/app.js', async (_req, reply) => reply.type('application/javascript').send('// app'));
+        return s;
+    }
+
+    it('lets /health through with any Host header (discovery exemption)', async () => {
+        const s = newServer();
+        const res = await s.inject({
+            method: 'GET', url: '/health',
+            headers: { host: 'attacker.example.com:24847' },
+        });
+        expect(res.statusCode).toBe(200);
+    });
+
+    it('lets /webhooks/* through with any Host header (tunnel exemption)', async () => {
+        const s = newServer();
+        const res = await s.inject({
+            method: 'GET', url: '/webhooks/foo',
+            headers: { host: 'sokuza.ngrok.app' },
+        });
+        expect(res.statusCode).toBe(200);
+    });
+
+    it('accepts /api/* with an allowed loopback Host', async () => {
+        const s = newServer();
+        for (const host of ['localhost:24847', '127.0.0.1', '[::1]:24847', 'sokuza.localhost:24847']) {
+            const res = await s.inject({
+                method: 'GET', url: '/api/ping',
+                headers: { host },
+            });
+            expect(res.statusCode, `host=${host}`).toBe(200);
+        }
+    });
+
+    it('rejects /api/* when Host is not in the allow-list', async () => {
+        const s = newServer();
+        const res = await s.inject({
+            method: 'GET', url: '/api/ping',
+            headers: { host: 'attacker.example.com' },
+        });
+        expect(res.statusCode).toBe(403);
+        expect(JSON.parse(res.payload).error).toBe('host_not_allowed');
+    });
+
+    it('rejects the dashboard HTML when Host is not in the allow-list', async () => {
+        // Without this rejection, an attacker DNS-rebinding to 127.0.0.1
+        // could load the dashboard HTML in their origin's context, then
+        // try to read the bearer token off localStorage from the user's
+        // existing tab. The host gate stops it at the door.
+        const s = newServer();
+        const res = await s.inject({
+            method: 'GET', url: '/',
+            headers: { host: 'attacker.example.com' },
+        });
+        expect(res.statusCode).toBe(403);
+    });
+
+    it('honors caller-supplied allow-list extensions', async () => {
+        const s = newServer([...DEFAULT_ALLOWED_HOSTS, 'my-bind.example.local']);
+        const res = await s.inject({
+            method: 'GET', url: '/api/ping',
+            headers: { host: 'my-bind.example.local:24847' },
+        });
+        expect(res.statusCode).toBe(200);
+    });
+
+    it('compares hosts case-insensitively', async () => {
+        const s = newServer();
+        const res = await s.inject({
+            method: 'GET', url: '/api/ping',
+            headers: { host: 'LOCALHOST:24847' },
+        });
+        expect(res.statusCode).toBe(200);
     });
 });
