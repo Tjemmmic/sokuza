@@ -135,6 +135,17 @@ Decision rules (STRICT):
 If the PR is genuinely fine: return an empty \`issues\` array and \`"decision": "APPROVE"\`.
 
 Remember: JSON only. No leading commentary, no trailing commentary. First character \`{\`, last character \`}\`.
+
+## Critical: do not give up before emitting JSON
+
+If you are an agentic CLI (opencode, claude-code, cursor, …) capable of tool use:
+you MAY perform any number of file reads, greps, or searches first. But your
+FINAL message MUST be the single JSON object above. If you finish your
+investigation without emitting that JSON, you have failed the task. There is
+no scenario where "I gathered enough context but didn't produce the JSON" is
+acceptable — produce the JSON even if you are unsure, with whatever findings
+you have. An empty \`issues\` array with \`"decision": "APPROVE"\` is a valid
+output if you found nothing.
 `;
 
 /**
@@ -302,7 +313,23 @@ export function parseFileLocation(raw: string): { path: string; lineStart?: numb
  * Returns \`null\` when nothing parseable is found; callers should fall
  * back to posting the raw text with a warning.
  */
+export type ParseFailureKind = 'no-json' | 'malformed-json' | 'invalid-shape';
+
+export interface ParseStructuredReviewResult {
+    review: StructuredReview | null;
+    /** Set when `review === null`. Lets callers report *why* parsing
+     *  failed — distinguishing chatty-agent giveup from malformed
+     *  output from valid JSON in the wrong shape. */
+    failureKind?: ParseFailureKind;
+}
+
+/** Backwards-compatible parser. Returns the review or null. New code
+ *  should prefer `parseStructuredReviewExt` for failure-kind reporting. */
 export function parseStructuredReview(raw: string): StructuredReview | null {
+    return parseStructuredReviewExt(raw).review;
+}
+
+export function parseStructuredReviewExt(raw: string): ParseStructuredReviewResult {
     const candidates: string[] = [];
     const trimmed = raw.trim();
     if (trimmed.startsWith('{')) candidates.push(trimmed);
@@ -318,14 +345,29 @@ export function parseStructuredReview(raw: string): StructuredReview | null {
         candidates.push(trimmed.slice(firstBrace, lastBrace + 1));
     }
 
+    if (candidates.length === 0) {
+        // No `{...}` anywhere — model never produced structured output.
+        // Most common cause: chatty CLI agent (opencode, etc.) ran out of
+        // budget/iterations mid-investigation without converging.
+        return { review: null, failureKind: 'no-json' };
+    }
+
+    let sawMalformed = false;
+    let sawInvalidShape = false;
     for (const candidate of candidates) {
         try {
             const parsed = JSON.parse(candidate);
             const validated = validateStructuredReview(parsed);
-            if (validated) return validated;
-        } catch { /* try next */ }
+            if (validated) return { review: validated };
+            sawInvalidShape = true;
+        } catch {
+            sawMalformed = true;
+        }
     }
-    return null;
+    return {
+        review: null,
+        failureKind: sawInvalidShape ? 'invalid-shape' : sawMalformed ? 'malformed-json' : 'no-json',
+    };
 }
 
 function validateStructuredReview(raw: unknown): StructuredReview | null {
@@ -511,6 +553,55 @@ export function renderReviewForApi(
         comments,
         event,
     };
+}
+
+/**
+ * Build a focused repair prompt that takes a previous (failed) attempt
+ * and asks the model to convert it into clean JSON.
+ *
+ * Deliberately short and directive: no new investigation, no tool use,
+ * no commentary. The previous attempt typically contains the findings
+ * already (especially in the `no-json` case where the model explored
+ * but never converged) — we just need them in the right shape.
+ *
+ * Used by ai-review's parse-failure retry path.
+ */
+export function buildRepairPrompt(
+    previousOutput: string,
+    failureKind: ParseFailureKind,
+    thresholds?: ApprovalThresholds,
+): { systemPrompt: string; userMessage: string } {
+    const thresholdsToUse = thresholds ?? DEFAULT_THRESHOLDS;
+    const outputFormat = STANDARD_OUTPUT_FORMAT
+        .replace('{{MAX_P2}}', String(thresholdsToUse.maxP2));
+
+    const failureNote = failureKind === 'no-json'
+        ? 'Your previous attempt produced exploration text but never emitted the final JSON. The findings you investigated are still useful — extract them into the JSON schema below.'
+        : failureKind === 'malformed-json'
+            ? 'Your previous attempt produced JSON-like output but it was not valid JSON. Re-emit it with proper JSON syntax.'
+            : 'Your previous attempt produced valid JSON but in the wrong shape. Re-emit it matching the schema below exactly.';
+
+    const systemPrompt = `You are a JSON formatter. Do not investigate further. Do not use tools. Do not write commentary. Output the SINGLE JSON object below and nothing else. The first character of your response must be \`{\`. The last must be \`}\`.
+
+${failureNote}
+
+${outputFormat.trim()}`;
+
+    // Cap at 8KB so the model isn't drowning in its own previous noise —
+    // the head and tail typically contain the relevant content.
+    const trimmed = previousOutput.length > 8192
+        ? previousOutput.slice(0, 4096) + '\n\n[...truncated...]\n\n' + previousOutput.slice(-4096)
+        : previousOutput;
+
+    const userMessage = `Below is the previous output that failed to parse. Convert its findings into the required JSON schema.
+
+\`\`\`
+${trimmed}
+\`\`\`
+
+Output the JSON object now. JSON only.`;
+
+    return { systemPrompt, userMessage };
 }
 
 function formatIssueBody(issue: StructuredReview['issues'][number]): string {

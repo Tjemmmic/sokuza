@@ -345,29 +345,44 @@ function promptForToken() {
 if (!dashboardToken) promptForToken();
 
 // ─── API Layer ──────────────────────────────────────────────────────────────
+async function readErrorMessage(r) {
+    // Server endpoints return JSON `{ error: "..." }` on failure. Surface
+    // it to the caller's toast/log instead of leaving them with a bare
+    // status code; debugging through `tsx watch` logs is rough otherwise.
+    try {
+        const body = await r.clone().json();
+        if (body && typeof body.error === 'string') return body.error;
+    } catch { /* not JSON */ }
+    try {
+        const text = await r.text();
+        if (text) return text.length > 300 ? `${text.slice(0, 300)}…` : text;
+    } catch { /* */ }
+    return `HTTP ${r.status}`;
+}
+
 const api = {
     async get(p) {
         const r = await authedFetch(p);
         if (r.status === 401) { await handleAuthFailure(r); throw new Error('unauthorized'); }
-        if (!r.ok) throw new Error(`${r.status}`);
+        if (!r.ok) throw new Error(await readErrorMessage(r));
         return r.json();
     },
     async post(p, b) {
         const r = await authedFetch(p, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(b) });
         if (r.status === 401) { await handleAuthFailure(r); throw new Error('unauthorized'); }
-        if (!r.ok) throw new Error(`${r.status}`);
+        if (!r.ok) throw new Error(await readErrorMessage(r));
         return r.json();
     },
     async put(p, b) {
         const r = await authedFetch(p, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(b) });
         if (r.status === 401) { await handleAuthFailure(r); throw new Error('unauthorized'); }
-        if (!r.ok) throw new Error(`${r.status}`);
+        if (!r.ok) throw new Error(await readErrorMessage(r));
         return r.json();
     },
     async del(p) {
         const r = await authedFetch(p, { method: 'DELETE' });
         if (r.status === 401) { await handleAuthFailure(r); throw new Error('unauthorized'); }
-        if (!r.ok) throw new Error(`${r.status}`);
+        if (!r.ok) throw new Error(await readErrorMessage(r));
         return r.json();
     },
 };
@@ -5513,9 +5528,15 @@ function renderAiReviewDetailBody(r) {
         }</tbody></table>`
         : '<p style="color:var(--text-muted);font-size:12px">No per-file detail recorded.</p>';
 
+    const repairBadge = Array.isArray(o.repairAttempts) && o.repairAttempts.length > 0
+        ? `<div style="margin-bottom:8px;padding:6px 10px;background:#22c55e22;border-left:3px solid #22c55e;font-size:12px">Recovered after ${o.repairAttempts.length} repair attempt${o.repairAttempts.length === 1 ? '' : 's'} (kind${o.repairAttempts.length === 1 ? '' : 's'}: ${esc(o.repairAttempts.map(a => a.kind).join(', '))}).</div>`
+        : '';
+
     const issuesList = (o.issues && o.issues.length)
-        ? `<ul style="font-size:12px;padding-left:18px">${o.issues.map(i => `<li><strong>${esc(i.priority)}</strong> · <code>${esc(i.file || '')}</code> — ${esc(i.title || '')}</li>`).join('')}</ul>`
-        : '<p style="color:var(--text-muted);font-size:12px">No issues flagged.</p>';
+        ? `${repairBadge}<ul style="font-size:12px;padding-left:18px">${o.issues.map(i => `<li><strong>${esc(i.priority)}</strong> · <code>${esc(i.file || '')}</code> — ${esc(i.title || '')}</li>`).join('')}</ul>`
+        : (o.parseSucceeded === false && o.rawSample
+            ? `${repairBadge}<details style="font-size:12px"><summary style="cursor:pointer;color:#f59e0b">${esc(parseFailureLabel(o.parseFailureKind))} — show raw model output</summary><pre style="margin-top:8px;padding:10px;background:var(--bg-primary);border:1px solid var(--border);max-height:320px;overflow:auto;white-space:pre-wrap;word-break:break-word">${esc(o.rawSample)}</pre></details>${renderRepairHistory(o.repairAttempts)}`
+            : `${repairBadge}<p style="color:var(--text-muted);font-size:12px">No issues flagged.</p>`);
 
     return `
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:18px;font-size:13px">
@@ -5644,6 +5665,22 @@ window.saveAiReviewNote = async function (id) {
     input.dataset.savedNote = input.value;
     await window.setAiReviewLabel(id, verdict);
 };
+
+function renderRepairHistory(attempts) {
+    if (!Array.isArray(attempts) || attempts.length === 0) return '';
+    return `<details style="font-size:12px;margin-top:8px"><summary style="cursor:pointer;color:var(--text-muted)">Earlier failed attempts (${attempts.length})</summary>${
+        attempts.map((a, i) => `<div style="margin-top:8px"><strong style="color:#f59e0b">Attempt ${i + 1} · ${esc(parseFailureLabel(a.kind))}</strong><pre style="margin-top:4px;padding:8px;background:var(--bg-primary);border:1px solid var(--border);max-height:240px;overflow:auto;white-space:pre-wrap;word-break:break-word;font-size:11px">${esc(a.rawSample)}</pre></div>`).join('')
+    }</details>`;
+}
+
+function parseFailureLabel(kind) {
+    switch (kind) {
+        case 'no-json':        return 'Agent gave up before producing JSON';
+        case 'malformed-json': return 'Found JSON-like output but parse failed';
+        case 'invalid-shape':  return 'JSON parsed but did not match review schema';
+        default:               return 'Parse failed';
+    }
+}
 
 function renderFileStatus(f) {
     if (f.status === 'included') return '<span style="color:#22c55e">included</span>';

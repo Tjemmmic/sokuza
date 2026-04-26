@@ -2,8 +2,10 @@ import type { ActionHandler } from '../core/types.js';
 import { truncateDiff, DEFAULT_MAX_CHARS } from '../core/diff-truncator.js';
 import {
     generateCodeReviewPrompt,
-    parseStructuredReview,
+    parseStructuredReviewExt,
     renderReviewMarkdown,
+    buildRepairPrompt,
+    type ParseFailureKind,
 } from './review-templates.js';
 import { runCompletionWithFallback } from '../core/ai-providers.js';
 import {
@@ -217,7 +219,60 @@ export const aiReviewAction: ActionHandler = async (params, context) => {
     // regardless of how well the model obeyed its rules about headings,
     // fences, etc. If parsing fails, fall back to the raw text so users
     // still get *something* — but log loudly so we notice the drift.
-    const parsed = parseStructuredReview(completion.text);
+    let parseResult = parseStructuredReviewExt(completion.text);
+    let parsed = parseResult.review;
+    const repairAttempts: Array<{ kind: ParseFailureKind; rawSample: string }> = [];
+
+    // Repair loop. The agent's first attempt may have produced exploration
+    // text without converging, malformed JSON, or valid JSON in the wrong
+    // shape. All three are usually fixable by a focused follow-up: feed
+    // the previous output back in and ask for clean JSON only.
+    //
+    // Bounded by `parse_repair_retries` (default 1). Each retry is a fresh
+    // completion call with the same provider, so cost/latency scale with
+    // the cap. Catastrophic failures (provider error, no output at all)
+    // are not retried since they indicate something deeper than format.
+    const maxRepairs = Math.max(0, (params.parse_repair_retries as number) ?? 1);
+    let attemptText = completion.text;
+    for (let attempt = 1; attempt <= maxRepairs && !parsed && parseResult.failureKind; attempt++) {
+        if (!attemptText.trim()) break; // nothing to repair from
+        repairAttempts.push({
+            kind: parseResult.failureKind,
+            rawSample: attemptText.slice(0, 5000),
+        });
+        const repair = buildRepairPrompt(attemptText, parseResult.failureKind);
+        context.logger.warn(
+            {
+                provider: completion.provider,
+                model: completion.model,
+                failureKind: parseResult.failureKind,
+                attempt,
+                maxRepairs,
+            },
+            'Parse failed; running repair completion to recover JSON',
+        );
+        try {
+            const repairCompletion = await runCompletionWithFallback(
+                context.ai,
+                params.provider as string | undefined,
+                {
+                    systemPrompt: repair.systemPrompt,
+                    userMessage: repair.userMessage,
+                    model: params.model as string | undefined,
+                    maxTokens: (params.max_tokens as number) ?? DEFAULT_MAX_TOKENS,
+                    workdir: params.workdir as string | undefined,
+                    logger: context.logger,
+                },
+            );
+            attemptText = repairCompletion.text;
+            parseResult = parseStructuredReviewExt(repairCompletion.text);
+            parsed = parseResult.review;
+        } catch (err) {
+            context.logger.warn({ err, attempt }, 'Repair completion threw; will fall back to raw');
+            break;
+        }
+    }
+
     let review: string;
     if (parsed) {
         review = renderReviewMarkdown(parsed);
@@ -227,18 +282,25 @@ export const aiReviewAction: ActionHandler = async (params, context) => {
                 model: completion.model,
                 issues: parsed.issues.length,
                 decision: parsed.decision,
+                repairAttempts: repairAttempts.length,
             },
-            'AI review rendered from structured JSON',
+            repairAttempts.length > 0
+                ? 'AI review rendered after repair'
+                : 'AI review rendered from structured JSON',
         );
     } else {
-        review = completion.text;
+        review = attemptText || completion.text;
         context.logger.warn(
             {
                 provider: completion.provider,
                 model: completion.model,
-                preview: completion.text.slice(0, 300),
+                failureKind: parseResult.failureKind,
+                repairAttempts: repairAttempts.length,
+                preview: review.slice(0, 300),
             },
-            'AI review did not return valid JSON; posting raw text as fallback',
+            parseResult.failureKind === 'no-json'
+                ? 'AI review agent did not produce JSON output (model gave up before converging) even after repair; posting raw text as fallback'
+                : 'AI review did not return valid JSON even after repair; posting raw text as fallback',
         );
     }
 
@@ -254,7 +316,7 @@ export const aiReviewAction: ActionHandler = async (params, context) => {
                     parseSucceeded: true,
                     decision: parsed.decision,
                     issueCount: parsed.issues.length,
-                    issues: parsed.issues.map((i) => ({
+                    issues: parsed.issues.map((i: typeof parsed.issues[number]) => ({
                         priority: i.priority,
                         title: i.title,
                         file: i.file,
@@ -265,10 +327,17 @@ export const aiReviewAction: ActionHandler = async (params, context) => {
                         fix: i.fix,
                     })),
                     reviewChars: review.length,
+                    // Record repair history even on success so the dashboard
+                    // can show "rendered after N repair attempts" — useful
+                    // signal that the prompt or model is flaky.
+                    ...(repairAttempts.length > 0 ? { repairAttempts } : {}),
                 }
                 : {
                     parseSucceeded: false,
                     reviewChars: review.length,
+                    rawSample: attemptText.slice(0, 5000),
+                    parseFailureKind: parseResult.failureKind,
+                    ...(repairAttempts.length > 0 ? { repairAttempts } : {}),
                 },
         },
         context.logger,

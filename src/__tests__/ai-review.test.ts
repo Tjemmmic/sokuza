@@ -137,7 +137,11 @@ describe('aiReviewAction', () => {
         mockSpawn.mockReturnValue(createMockChild('CLI review output'));
         const context = makeContext({ steps: { fd: { diff: 'some diff' } } });
 
-        const result = (await aiReviewAction({}, context)) as Record<string, unknown>;
+        // parse_repair_retries: 0 — these tests assert single-spawn
+        // behavior, predating the parse-failure repair loop. Without
+        // disabling retries, the action would re-spawn the CLI and the
+        // shared mockReturnValue child would already be closed.
+        const result = (await aiReviewAction({ parse_repair_retries: 0 }, context)) as Record<string, unknown>;
         expect(result.provider).toBe('claude-code');
         expect(result.review).toBe('CLI review output');
     });
@@ -150,7 +154,7 @@ describe('aiReviewAction', () => {
             steps: { fd: { diff: 'diff' } },
         });
 
-        const result = (await aiReviewAction({ provider: 'claude-code' }, context)) as Record<string, unknown>;
+        const result = (await aiReviewAction({ provider: 'claude-code', parse_repair_retries: 0 }, context)) as Record<string, unknown>;
         expect(result.provider).toBe('claude-code');
     });
 
@@ -159,7 +163,7 @@ describe('aiReviewAction', () => {
         mockSpawn.mockReturnValue(mockChild);
         const context = makeContext({ steps: { fd: { diff: 'big diff' } } });
 
-        await aiReviewAction({}, context);
+        await aiReviewAction({ parse_repair_retries: 0 }, context);
 
         // Verify spawn args don't contain the prompt content
         const spawnArgs = mockSpawn.mock.calls[0][1] as string[];
@@ -210,6 +214,97 @@ describe('aiReviewAction', () => {
         expect(record.truncation.triggered).toBe(false);
         expect(Array.isArray(record.truncation.files)).toBe(true);
         expect(record.output.reviewChars).toBeGreaterThan(0);
+    });
+
+    it('repairs a non-JSON first attempt by re-querying the provider', async () => {
+        process.env.ANTHROPIC_API_KEY = 'test-key';
+        // First call: chatty exploration text (no JSON) — simulates the
+        // opencode/GLM flake mode. Second call: valid JSON via the repair
+        // prompt. Action should succeed and tag the record with one repair.
+        const exploration = 'Let me look at the diff first. I see the change adds a new field, and I want to verify it. Looking at the imports...';
+        const repaired = JSON.stringify({
+            summary: 'Recovered',
+            issues: [],
+            decision: 'APPROVE',
+            justification: 'No issues found after recovery',
+        });
+        mockCreate
+            .mockResolvedValueOnce({
+                content: [{ type: 'text', text: exploration }],
+                model: 'claude-sonnet-4-6',
+                usage: { input_tokens: 100, output_tokens: 50 },
+            })
+            .mockResolvedValueOnce({
+                content: [{ type: 'text', text: repaired }],
+                model: 'claude-sonnet-4-6',
+                usage: { input_tokens: 80, output_tokens: 40 },
+            });
+
+        const context = makeContext({
+            ai: loadAIProviders(undefined),
+            steps: { fd: { diff: 'diff content' } },
+            event: {
+                source: 'github', event: 'pull_request.opened',
+                timestamp: new Date().toISOString(),
+                payload: {}, metadata: { repo: 'org/repo', prNumber: 1 },
+            },
+        });
+
+        const result = await aiReviewAction({}, context) as Record<string, unknown>;
+        expect((result.parsed as Record<string, unknown> | undefined)?.decision).toBe('APPROVE');
+
+        // Both completions called.
+        expect(mockCreate).toHaveBeenCalledTimes(2);
+
+        // Record reflects success-after-one-repair.
+        const dateDir = (await readdir(join(runsRoot, 'ai-review')))[0];
+        const files = await readdir(join(runsRoot, 'ai-review', dateDir));
+        const record = JSON.parse(await readFile(join(runsRoot, 'ai-review', dateDir, files[0]), 'utf-8'));
+        expect(record.output.parseSucceeded).toBe(true);
+        expect(record.output.repairAttempts).toHaveLength(1);
+        expect(record.output.repairAttempts[0].kind).toBe('no-json');
+        expect(record.output.repairAttempts[0].rawSample).toContain('Let me look');
+    });
+
+    it('honors parse_repair_retries=0 to disable the repair loop', async () => {
+        process.env.ANTHROPIC_API_KEY = 'test-key';
+        mockCreate.mockResolvedValueOnce({
+            content: [{ type: 'text', text: 'just exploration, no json' }],
+            model: 'claude-sonnet-4-6',
+            usage: { input_tokens: 10, output_tokens: 5 },
+        });
+
+        const context = makeContext({
+            ai: loadAIProviders(undefined),
+            steps: { fd: { diff: 'x' } },
+        });
+        await aiReviewAction({ parse_repair_retries: 0 }, context);
+        // No retry — exactly one call.
+        expect(mockCreate).toHaveBeenCalledTimes(1);
+    });
+
+    it('gives up after the configured retries with parseFailureKind set', async () => {
+        process.env.ANTHROPIC_API_KEY = 'test-key';
+        mockCreate.mockResolvedValue({
+            content: [{ type: 'text', text: 'still no json after retry' }],
+            model: 'claude-sonnet-4-6',
+            usage: { input_tokens: 10, output_tokens: 5 },
+        });
+
+        const context = makeContext({
+            ai: loadAIProviders(undefined),
+            steps: { fd: { diff: 'x' } },
+        });
+        await aiReviewAction({ parse_repair_retries: 2 }, context);
+        // 1 initial + 2 repairs = 3 total.
+        expect(mockCreate).toHaveBeenCalledTimes(3);
+
+        const dateDir = (await readdir(join(runsRoot, 'ai-review')))[0];
+        const files = await readdir(join(runsRoot, 'ai-review', dateDir));
+        const record = JSON.parse(await readFile(join(runsRoot, 'ai-review', dateDir, files[0]), 'utf-8'));
+        expect(record.output.parseSucceeded).toBe(false);
+        expect(record.output.parseFailureKind).toBe('no-json');
+        expect(record.output.repairAttempts).toHaveLength(2);
     });
 
     it('writes a run record with error field when the provider fails', async () => {

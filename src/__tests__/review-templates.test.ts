@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
     parseStructuredReview,
+    parseStructuredReviewExt,
     parseFileLocation,
     renderReviewForApi,
     type StructuredReview,
@@ -69,6 +70,47 @@ describe('parseStructuredReview', () => {
             lineStart: undefined,
             lineEnd: undefined,
         });
+    });
+});
+
+describe('parseStructuredReviewExt failure classification', () => {
+    it('classifies pure prose with no braces as no-json', () => {
+        // Real-world failure: opencode + GLM 5.1 emitted exploration text
+        // with no final JSON. The CLI agent gave up before converging.
+        const raw = `Let me investigate the codebase to verify several potential issues I've spotted in the diff.Good — \`custom_debug::Debug\` and \`bytes_debug_fmt\` are well-established in the codebase. Let me verify one more edge case and check the test file.Let me verify the \`sanitize_file_name\` edge cases for "." and ".."`;
+        const result = parseStructuredReviewExt(raw);
+        expect(result.review).toBeNull();
+        expect(result.failureKind).toBe('no-json');
+    });
+
+    it('classifies a candidate with broken JSON as malformed-json', () => {
+        // Trailing comma — no JSON.parse will accept this.
+        const raw = '{"summary": "x", "issues": [], "decision": "APPROVE",}';
+        const result = parseStructuredReviewExt(raw);
+        expect(result.review).toBeNull();
+        expect(result.failureKind).toBe('malformed-json');
+    });
+
+    it('classifies parsable JSON in wrong shape as invalid-shape', () => {
+        // Valid JSON, but no summary, no issues, no justification — the
+        // validator rejects it. Distinct from "model emitted nothing".
+        const raw = '{"foo": "bar"}';
+        const result = parseStructuredReviewExt(raw);
+        expect(result.review).toBeNull();
+        expect(result.failureKind).toBe('invalid-shape');
+    });
+
+    it('returns success for valid review JSON wrapped in conversational prose', () => {
+        const raw = `Sure, here's my review:\n\n{"summary": "ok", "issues": [], "decision": "APPROVE", "justification": "lgtm"}\n\nLet me know if you have questions.`;
+        const result = parseStructuredReviewExt(raw);
+        expect(result.review).not.toBeNull();
+        expect(result.failureKind).toBeUndefined();
+    });
+
+    it('parseStructuredReview legacy signature still returns null on failure', () => {
+        // Callers that haven't migrated to parseStructuredReviewExt should
+        // continue to work — same null-on-failure shape.
+        expect(parseStructuredReview('not json at all')).toBeNull();
     });
 });
 

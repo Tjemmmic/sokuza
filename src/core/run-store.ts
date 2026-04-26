@@ -94,6 +94,27 @@ export interface AiReviewRunRecord {
             fix?: string;
         }>;
         reviewChars: number;
+        /** First ~5KB of the model's raw output. Captured only when
+         *  parsing fails, so we can debug prompt/parser drift without
+         *  bloating happy-path records. */
+        rawSample?: string;
+        /** Diagnosis when `parseSucceeded === false`:
+         *   - 'no-json'        — output contains no `{...}` candidate.
+         *                        Model never converged on a final answer.
+         *   - 'malformed-json' — found a `{...}` candidate but JSON.parse failed.
+         *   - 'invalid-shape'  — JSON parsed but didn't match the review schema.
+         *  Lets the dashboard distinguish "agentic model gave up" from
+         *  "parser is too strict" without re-reading rawSample. */
+        parseFailureKind?: 'no-json' | 'malformed-json' | 'invalid-shape';
+        /** Each entry is a previous attempt that failed to parse. Set
+         *  when the action retried the model to recover JSON. Last
+         *  attempt is always the one whose output is in `rawSample`
+         *  (on failure) or that ultimately produced `issues` (on
+         *  success-after-repair). */
+        repairAttempts?: Array<{
+            kind: 'no-json' | 'malformed-json' | 'invalid-shape';
+            rawSample: string;
+        }>;
     };
     /** Set when the action threw before completing. */
     error?: string;
