@@ -1,0 +1,44 @@
+name: CI
+
+# Runs on every push to main and on every PR. Mirrors the gates the
+# release workflow enforces, so a PR that would later block a release
+# fails here first.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Lint, test, build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run lint
+
+      - name: Test
+        run: npm test
+
+      - name: Build (verifies tsup bundling and dts emit)
+        run: npm run build
+
+      - name: Validate CHANGELOG entry for current version
+        # If a PR bumps the version in package.json without adding an
+        # entry, this fails before merge. If the version stays the same,
+        # the existing entry still satisfies the check.
+        run: npm run check-changelog

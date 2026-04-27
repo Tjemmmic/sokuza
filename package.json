@@ -16,7 +16,9 @@
     "templates",
     "sokuza.config.example.yaml",
     "sokuza.env.example",
-    "README.md"
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
   ],
   "scripts": {
     "dev": "tsx watch src/index.ts",
@@ -24,7 +26,9 @@
     "start": "node dist/index.js",
     "test": "vitest run",
     "test:watch": "vitest",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "check-changelog": "node scripts/check-changelog.mjs",
+    "prepublishOnly": "npm run lint && npm test && npm run check-changelog && npm run build"
   },
   "keywords": [
     "automation",
@@ -34,6 +38,15 @@
     "ai"
   ],
   "license": "MIT",
+  "author": "Donovan Tjemmes <mdtjemmes@proton.me>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Tjemmmic/sokuza.git"
+  },
+  "homepage": "https://sokuza.ai",
+  "bugs": {
+    "url": "https://github.com/Tjemmmic/sokuza/issues"
+  },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.78.0",
     "dotenv": "^17.3.1",

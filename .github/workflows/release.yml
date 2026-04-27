@@ -1,0 +1,159 @@
+name: Release
+
+# Auto-release on version bump.
+#
+# The maintainer's release flow is one push:
+#   1. Move `## [Unreleased]` content under a new `## [X.Y.Z] - YYYY-MM-DD`
+#      heading in CHANGELOG.md.
+#   2. Bump `version` in package.json.
+#   3. Commit, push to main.
+#
+# This workflow then:
+#   - Reads `package.json#version`.
+#   - Checks whether a `vX.Y.Z` tag already exists. If yes, skips silently
+#     (the push didn't bump the version, or a prior run already shipped it).
+#   - Otherwise: runs full gates (lint, test, changelog check, build),
+#     creates and pushes the tag, publishes to npm with provenance, and
+#     creates a GitHub Release with notes extracted from CHANGELOG.md.
+#
+# `workflow_dispatch` is included as a safety valve — useful for
+# re-running after a transient publish failure without forcing a
+# no-op commit.
+#
+# Provenance requires `id-token: write`. It records a verifiable link
+# from this workflow run → the published npm artifact, viewable at
+# npmjs.com under the package's "Provenance" tab.
+#
+# Required repo configuration:
+#   - secrets.NPM_TOKEN: a "Granular Access Token" scoped to publish the
+#     `sokuza` package only.
+#     https://docs.npmjs.com/creating-and-viewing-access-tokens
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Only one release at a time. A second push that lands while a release
+# is mid-flight queues, so we can't accidentally double-publish.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Tag + publish if version is new
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    permissions:
+      contents: write     # for pushing the tag and creating the GitHub Release
+      id-token: write     # for npm provenance
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # need git history for tag detection
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Read version from package.json
+        id: version
+        run: |
+          VERSION="$(node -p "require('./package.json').version")"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Detected version: $VERSION"
+
+      - name: Check whether tag already exists
+        id: tagcheck
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          if git rev-parse "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists — nothing to release."
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Tag $TAG does not exist — proceeding with release."
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Setup Node.js
+        if: steps.tagcheck.outputs.should_release == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          # Required for `npm publish --provenance` to anchor the
+          # attestation to the right registry.
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install dependencies
+        if: steps.tagcheck.outputs.should_release == 'true'
+        run: npm ci
+
+      - name: Typecheck
+        if: steps.tagcheck.outputs.should_release == 'true'
+        run: npm run lint
+
+      - name: Test
+        if: steps.tagcheck.outputs.should_release == 'true'
+        run: npm test
+
+      - name: Validate CHANGELOG entry
+        # Hard gate: refuses to publish if `## [<version>]` isn't in
+        # CHANGELOG.md. Catches the version-bump-without-notes mistake.
+        if: steps.tagcheck.outputs.should_release == 'true'
+        run: npm run check-changelog
+
+      - name: Build
+        if: steps.tagcheck.outputs.should_release == 'true'
+        run: npm run build
+
+      - name: Extract release notes from CHANGELOG
+        if: steps.tagcheck.outputs.should_release == 'true'
+        # Grab the section between `## [<version>]` and the next `## ` heading.
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          awk -v ver="$VERSION" '
+            $0 ~ "^## \\[" ver "\\]" { capture = 1; next }
+            capture && /^## / { exit }
+            capture { print }
+          ' CHANGELOG.md > release-notes.md
+          if [ ! -s release-notes.md ]; then
+            echo "Release notes for $VERSION are empty — check CHANGELOG.md" >&2
+            exit 1
+          fi
+          echo "Extracted $(wc -l < release-notes.md) lines of release notes"
+
+      - name: Create and push tag
+        # Done BEFORE publishing so the tag points at the exact commit
+        # whose tarball we're about to ship. If publish fails, the tag
+        # still exists and a re-run of this workflow (workflow_dispatch)
+        # picks up the existing tag and continues from build → publish.
+        if: steps.tagcheck.outputs.should_release == 'true'
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "Release $TAG"
+          git push origin "$TAG"
+
+      - name: Publish to npm with provenance
+        # `--access public` is required for unscoped packages on the
+        # public registry. `--provenance` records this workflow run as
+        # the source of the artifact for supply-chain verification.
+        if: steps.tagcheck.outputs.should_release == 'true'
+        run: npm publish --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Create GitHub Release
+        if: steps.tagcheck.outputs.should_release == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: ${{ steps.version.outputs.tag }}
+          body_path: release-notes.md
+          draft: false
+          # Auto-flag prereleases (e.g. v0.2.0-rc.1) so they don't
+          # appear under "Latest" on the repo's releases page.
+          prerelease: ${{ contains(steps.version.outputs.version, '-') }}
