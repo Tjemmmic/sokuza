@@ -15,6 +15,13 @@ under a new `## [X.Y.Z] - YYYY-MM-DD` heading, bump `version` in
 `package.json`, commit, push to main. The release workflow tags +
 publishes automatically.
 
+## [0.1.1] - 2026-04-26
+
+### Changed
+
+- **README rewritten** to match current reality. The previous README pre-dated the dashboard, address-review action, auto-fix loop, CLI command surface, and most of the run-store / workdir-store / pricing infrastructure. New version documents what actually ships, with accurate examples, an honest pre-1.0 disclaimer, and a project layout that mirrors `src/`.
+- **`templates/ai-pr-review.yaml` header comment** no longer references the long-removed `use_actual_review: true` parameter. Now points users at the `auto-fix-pr-review` template when they want the closed review→fix→re-review loop.
+
 ## [0.1.0] - 2026-04-26
 
 Initial public release.
