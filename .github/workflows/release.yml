@@ -10,11 +10,22 @@ name: Release
 #
 # This workflow then:
 #   - Reads `package.json#version`.
-#   - Checks whether a `vX.Y.Z` tag already exists. If yes, skips silently
-#     (the push didn't bump the version, or a prior run already shipped it).
-#   - Otherwise: runs full gates (lint, test, changelog check, build),
-#     creates and pushes the tag, publishes to npm with provenance, and
-#     creates a GitHub Release with notes extracted from CHANGELOG.md.
+#   - Checks the **npm registry** (not the git tag) for whether that
+#     version is already published. If yes, skips silently.
+#   - Otherwise: runs gates (lint, test, changelog check, build),
+#     publishes to npm with provenance, then tags the published commit
+#     and creates a GitHub Release.
+#
+# Idempotency is anchored to npm rather than the local tag because a
+# previous run that crashed or hit a publish error (e.g. EOTP) could
+# otherwise leave a tag in place with no corresponding npm artifact —
+# and the tag-only check would then skip every retry forever. The npm
+# check is the truth.
+#
+# Tag creation moved to AFTER a successful publish so a half-completed
+# run can be safely re-run without manual git surgery. If a stale tag
+# from a previous failed run exists, we force-overwrite it to point at
+# the commit we actually shipped.
 #
 # `workflow_dispatch` is included as a safety valve — useful for
 # re-running after a transient publish failure without forcing a
@@ -42,7 +53,7 @@ concurrency:
 
 jobs:
   release:
-    name: Tag + publish if version is new
+    name: Publish if version is new on npm
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
@@ -53,7 +64,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0          # need git history for tag detection
+          fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Read version from package.json
@@ -64,20 +75,8 @@ jobs:
           echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
           echo "Detected version: $VERSION"
 
-      - name: Check whether tag already exists
-        id: tagcheck
-        run: |
-          TAG="${{ steps.version.outputs.tag }}"
-          if git rev-parse "refs/tags/$TAG" >/dev/null 2>&1; then
-            echo "Tag $TAG already exists — nothing to release."
-            echo "should_release=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "Tag $TAG does not exist — proceeding with release."
-            echo "should_release=true" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Setup Node.js
-        if: steps.tagcheck.outputs.should_release == 'true'
+        # Done early so `npm view` (registry lookup) works for the gate.
         uses: actions/setup-node@v4
         with:
           node-version: '20'
@@ -86,30 +85,45 @@ jobs:
           # attestation to the right registry.
           registry-url: 'https://registry.npmjs.org'
 
+      - name: Check whether version is already published on npm
+        id: npmcheck
+        # `npm view <pkg>@<version> version` exits non-zero when the
+        # version doesn't exist. We discard stderr so the log isn't
+        # noisy with the "not found" message on first publish.
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          if npm view "sokuza@$VERSION" version --json >/dev/null 2>&1; then
+            echo "Version $VERSION is already published on npm — nothing to release."
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Version $VERSION is not on npm yet — proceeding with release."
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Install dependencies
-        if: steps.tagcheck.outputs.should_release == 'true'
+        if: steps.npmcheck.outputs.should_release == 'true'
         run: npm ci
 
       - name: Typecheck
-        if: steps.tagcheck.outputs.should_release == 'true'
+        if: steps.npmcheck.outputs.should_release == 'true'
         run: npm run lint
 
       - name: Test
-        if: steps.tagcheck.outputs.should_release == 'true'
+        if: steps.npmcheck.outputs.should_release == 'true'
         run: npm test
 
       - name: Validate CHANGELOG entry
         # Hard gate: refuses to publish if `## [<version>]` isn't in
         # CHANGELOG.md. Catches the version-bump-without-notes mistake.
-        if: steps.tagcheck.outputs.should_release == 'true'
+        if: steps.npmcheck.outputs.should_release == 'true'
         run: npm run check-changelog
 
       - name: Build
-        if: steps.tagcheck.outputs.should_release == 'true'
+        if: steps.npmcheck.outputs.should_release == 'true'
         run: npm run build
 
       - name: Extract release notes from CHANGELOG
-        if: steps.tagcheck.outputs.should_release == 'true'
+        if: steps.npmcheck.outputs.should_release == 'true'
         # Grab the section between `## [<version>]` and the next `## ` heading.
         run: |
           VERSION="${{ steps.version.outputs.version }}"
@@ -124,30 +138,37 @@ jobs:
           fi
           echo "Extracted $(wc -l < release-notes.md) lines of release notes"
 
-      - name: Create and push tag
-        # Done BEFORE publishing so the tag points at the exact commit
-        # whose tarball we're about to ship. If publish fails, the tag
-        # still exists and a re-run of this workflow (workflow_dispatch)
-        # picks up the existing tag and continues from build → publish.
-        if: steps.tagcheck.outputs.should_release == 'true'
-        run: |
-          TAG="${{ steps.version.outputs.tag }}"
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -a "$TAG" -m "Release $TAG"
-          git push origin "$TAG"
-
       - name: Publish to npm with provenance
         # `--access public` is required for unscoped packages on the
         # public registry. `--provenance` records this workflow run as
         # the source of the artifact for supply-chain verification.
-        if: steps.tagcheck.outputs.should_release == 'true'
+        #
+        # This is the "actually shipped" moment. Tag + GH Release happen
+        # only on success; a failure here leaves no inconsistent state
+        # behind, and the next run will re-attempt because the npm check
+        # will still see the version as missing.
+        if: steps.npmcheck.outputs.should_release == 'true'
         run: npm publish --access public --provenance
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
+      - name: Tag the published commit
+        # Runs only after a successful publish. Force-overwrites any
+        # existing tag from a previously-failed run so the tag always
+        # points at the commit whose tarball is actually on npm.
+        if: steps.npmcheck.outputs.should_release == 'true'
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # `-f` rewrites the tag if present; `--force` on push lets us
+          # overwrite the remote tag too. Safe here because the npm
+          # publish has already succeeded — we know which commit shipped.
+          git tag -fa "$TAG" -m "Release $TAG"
+          git push --force origin "$TAG"
+
       - name: Create GitHub Release
-        if: steps.tagcheck.outputs.should_release == 'true'
+        if: steps.npmcheck.outputs.should_release == 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.version.outputs.tag }}
