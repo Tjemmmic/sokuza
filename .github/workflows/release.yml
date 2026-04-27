@@ -31,14 +31,23 @@ name: Release
 # re-running after a transient publish failure without forcing a
 # no-op commit.
 #
-# Provenance requires `id-token: write`. It records a verifiable link
-# from this workflow run → the published npm artifact, viewable at
-# npmjs.com under the package's "Provenance" tab.
+# Authentication uses **npm trusted publishing** via GitHub OIDC.
+# No long-lived NPM_TOKEN, no 2FA OTP friction — the npm CLI exchanges
+# this workflow's OIDC token for a short-lived publish token at the
+# moment of `npm publish`. The trust binding is configured once on
+# npmjs.com (Package Settings → Trusted Publishers → Add GitHub Actions),
+# pointing at this repo + workflow filename.
+#
+# Provenance comes free with trusted publishing; the same `id-token:
+# write` permission powers both. Provenance shows up on npmjs.com under
+# the package's "Provenance" tab.
 #
 # Required repo configuration:
-#   - secrets.NPM_TOKEN: a "Granular Access Token" scoped to publish the
-#     `sokuza` package only.
-#     https://docs.npmjs.com/creating-and-viewing-access-tokens
+#   - npm trusted-publisher entry on the `sokuza` package pointing at:
+#       org/user:    Tjemmmic
+#       repository:  sokuza
+#       workflow:    .github/workflows/release.yml
+#   - npm CLI 11.5.1+ on the runner (we install latest npm in a step).
 
 on:
   push:
@@ -82,8 +91,15 @@ jobs:
           node-version: '20'
           cache: 'npm'
           # Required for `npm publish --provenance` to anchor the
-          # attestation to the right registry.
+          # attestation to the right registry. Also where trusted
+          # publishing reads its target registry from.
           registry-url: 'https://registry.npmjs.org'
+
+      - name: Upgrade npm to a version that supports trusted publishing
+        # Node 20 LTS ships with npm 10.x. OIDC trusted publishing for
+        # the public registry requires npm 11.5.1+; pinning to @latest
+        # keeps us on whatever npm currently considers stable.
+        run: npm install -g npm@latest
 
       - name: Check whether version is already published on npm
         id: npmcheck
@@ -138,10 +154,15 @@ jobs:
           fi
           echo "Extracted $(wc -l < release-notes.md) lines of release notes"
 
-      - name: Publish to npm with provenance
+      - name: Publish to npm (trusted publishing + provenance)
         # `--access public` is required for unscoped packages on the
         # public registry. `--provenance` records this workflow run as
         # the source of the artifact for supply-chain verification.
+        #
+        # No NODE_AUTH_TOKEN: the npm CLI detects the GitHub OIDC
+        # environment, mints a short-lived publish token from the
+        # configured trusted publisher, and uses it for this single
+        # publish. Token never touches our env, never gets logged.
         #
         # This is the "actually shipped" moment. Tag + GH Release happen
         # only on success; a failure here leaves no inconsistent state
@@ -149,8 +170,6 @@ jobs:
         # will still see the version as missing.
         if: steps.npmcheck.outputs.should_release == 'true'
         run: npm publish --access public --provenance
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Tag the published commit
         # Runs only after a successful publish. Force-overwrites any
