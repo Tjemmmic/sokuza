@@ -1,348 +1,265 @@
 # Sokuza
 
-**Cross-platform AI workflow automation engine.**
+A workflow automation engine for the kind of work AI is suddenly good at — code review, fix-on-feedback loops, triage, follow-up. Wires GitHub / Slack / webhooks / cron to AI providers (Anthropic API, Claude Code CLI, opencode, anything OpenAI-compatible) and gives you a dashboard to watch what it's doing.
 
-Sokuza connects multiple event sources — GitHub, Slack, custom webhooks, and scheduled timers — to composable workflows.  A single workflow can react to a GitHub PR and post to Slack, or a Slack command can trigger a code review. Templates make common patterns one-liners; custom steps let you build anything.
+> Pre-1.0. Breaking changes possible until 1.0. See [CHANGELOG.md](CHANGELOG.md).
 
-## Quick Start
+---
+
+## Install
 
 ```bash
-# 1. Install dependencies
-npm install
-
-# 2. Set up environment variables
-cp .env.example .env
-# Edit .env with your values (see Environment Variables below)
-
-# 3. Create your config
-cp sokuza.config.example.yaml sokuza.config.yaml
-
-# 4. Start in development mode (auto-reload)
-npm run dev
+npm install -g sokuza
+sokuza init                # scaffolds ~/.sokuza/config.yaml
+sokuza                     # starts the engine + dashboard
 ```
 
-## Environment Variables
+The first run prints a one-time dashboard link with the bearer token embedded. Open it; the dashboard handles the rest.
 
-Create a `.env` file (see `.env.example`):
+For a project-local install (running against the repo, not from `~/.sokuza/`):
 
-| Variable | Required | Description |
-|---|---|---|
-| `GITHUB_WEBHOOK_SECRET` | For GitHub | Secret for verifying GitHub webhook signatures |
-| `GITHUB_TOKEN` | For GitHub | GitHub PAT with `repo` scope |
-| `SLACK_BOT_TOKEN` | For Slack | Slack Bot User OAuth Token (`xoxb-...`) |
-| `SLACK_SIGNING_SECRET` | For Slack | Slack app signing secret |
-| `ANTHROPIC_API_KEY` | For AI* | Anthropic API key for direct API access |
+```bash
+sokuza init --local        # config + .env land in CWD
+sokuza --config ./sokuza.config.yaml
+```
 
-\*If no `ANTHROPIC_API_KEY` is set, AI actions fall back to the **Claude Code CLI** (requires `claude` CLI installed).
+Requires Node 20+.
 
-## Integrations
+## Five-minute first review
 
-| Integration | Webhook Endpoint | Description |
-|---|---|---|
-| **GitHub** | `/webhooks/github` | PR events, issues, pushes, reviews |
-| **GitHub CLI** | _(polling-based)_ | Zero-config GitHub integration using `gh` CLI |
-| **Slack** | `/webhooks/slack/events` `/webhooks/slack/commands` | Messages, @mentions, reactions, slash commands |
-| **Webhook** | `/webhooks/custom/:name` | Accept arbitrary JSON from any source |
-| **Cron** | _(timer-based)_ | Scheduled triggers (every-5m, hourly, daily, etc.) |
+1. Add a GitHub Personal Access Token (`repo` scope is enough) to `~/.sokuza/config.yaml`:
 
-### Actions
+   ```yaml
+   integrations:
+     github:
+       token: ${GITHUB_TOKEN}
+       webhookSecret: ${GITHUB_WEBHOOK_SECRET}
+   ```
 
-**Generic** (work with any source):
+2. Tell sokuza to run an AI review on PR open:
 
-| Action | Description |
-|---|---|
-| `log` | Log a message with event context |
-| `webhook` | POST a payload to an external URL |
-| `ai-review` | Send a diff to Claude for code review |
-| `ai-agent` | Run Claude Code CLI inside a repo with tool access |
+   ```yaml
+   workflows:
+     - name: review-prs
+       template: ai-pr-review
+       trigger:
+         repo: my-org/my-repo
+   ```
 
-**GitHub-specific** (auto-registered when GitHub is enabled):
+3. Restart sokuza, expose port 24847 to GitHub (any tunnel works):
 
-| Action | Description |
-|---|---|
-| `github-fetch-diff` | Fetch a PR's diff and file list |
-| `github-comment` | Post a comment on a PR or issue |
-| `github-clone-repo` | Clone a repo to a temp directory |
-| `github-create-pr` | Commit changes, push, and open a PR |
-| `github-create-review` | Submit a PR review (approve/request-changes/comment) via REST API |
+   ```bash
+   npx -y localtunnel --port 24847
+   ```
 
-**Slack-specific** (auto-registered when Slack is enabled):
+   Add the tunnel URL + `/webhooks/github` as a webhook in your repo's settings, with the same `GITHUB_WEBHOOK_SECRET`.
 
-| Action | Description |
-|---|---|
-| `slack-send-message` | Post a message to a channel |
-| `slack-react` | Add an emoji reaction to a message |
+4. Open a PR. Watch the **AI Reviews** page in the dashboard.
 
-## Workflow Config
+## Auto-fix loop (review → fix → re-review)
 
-### Templates
+Sokuza can take its own AI reviews and act on them — either as inline GitHub suggestions (safe) or as direct commits + pushes to the PR branch (less safe, gated). The loop converges automatically when the review judges the PR merge-ready or the iteration cap is hit.
 
-Drop a YAML file in `templates/` and reference it by name:
+Two cooperating workflows:
 
 ```yaml
 workflows:
-  - name: review-prs
-    template: ai-pr-review
+  # 1. Posts the AI review as a real GitHub Review with the marker
+  #    `<!-- sokuza:run-id=... -->` that triggers step 2.
+  - name: auto-pr-review
+    template: auto-fix-pr-review
     trigger:
-      event: pull_request.opened
-      repo: "my-org/my-repo"
-```
+      repo: my-org/my-repo
 
-Available templates: `ai-pr-review`, `log-events`, `enforce-rules`, `review-notify-slack`, `respond-to-reviews`, `security-audit`, `deep-audit`
-
-**Library templates** (`templates/library/`): Additional workflow templates for specialized tasks like security audits, dependency reviews, and repo scouting. All review templates now use a standardized P1/P2/P3 priority system with consistent output format.
-
-## AI Code Review System
-
-Sokuza provides a standardized AI code review system with consistent formatting, priority levels, and approval logic across all review templates.
-
-### Review Features
-
-- **Consistent Format**: All reviews follow the same markdown structure with standardized headers and issue format
-- **Priority System**: Three-level priority system (P1/P2/P3) with clear blocking criteria
-- **Approval Logic**: Deterministic approval decisions based on issue counts
-- **Multiple Review Types**: Support for general code reviews, security audits, and deep architectural audits
-
-### Review Priority Levels
-
-| Priority | Name | Description | Blocking? |
-|----------|------|-------------|------------|
-| **P1** | Blocking | Bugs, security vulnerabilities, crashes, broken API contracts | Yes |
-| **P2** | Should Fix | Missing error handling, untested logic, performance issues | No (3+ blocks) |
-| **P3** | Nice to Have | Readability, naming, minor style improvements | No |
-
-### Approval Thresholds
-
-A PR is **approved** when:
-- Zero P1 issues AND
-- Fewer than 3 P2 issues
-
-A PR **requests changes** when:
-- Any P1 issue exists OR
-- 3 or more P2 issues exist
-
-### Review Output Format
-
-All reviews follow this standardized structure:
-
-```markdown
-## 🤖 AI Code Review
-
-### Summary
-[One-sentence overview]
-
-### Issues Found
-[Count] total issues: [X] P1 (blocking), [Y] P2 (should fix), [Z] P3 (nice to have)
-
----
-
-❗ P1 — [Specific title]
-**File:** `path/to/file.ts:L42-L50`
-**Problem:** [What is wrong and WHY]
-**Fix:** [Exact suggestion]
-
----
-
-### Review Decision
-✅ APPROVE / ❌ CHANGES REQUESTED
-
-### Quick Reference
-- P1: [title] • [title]
-- P2: [title] • [title] • [title]
-```
-
-### Posting Actual GitHub Reviews
-
-By default, AI reviews are posted as comments. To post as actual GitHub reviews (which appear in the PR's review section):
-
-```yaml
-workflows:
-  - name: review-prs
-    template: ai-pr-review
+  # 2. Wakes on the marker, runs the /address-review skill in a
+  #    persistent per-PR workdir, posts a review-with-suggestions or
+  #    commits + pushes fixes (depending on `mode`).
+  - name: auto-address-review
+    template: auto-fix-address-review
     trigger:
-      event: pull_request.opened
-      repo: "my-org/my-repo"
+      repo: my-org/my-repo
     params:
-      use_actual_review: true  # Requires gh-cli integration
+      mode: suggest        # 'suggest' (post inline suggestions) or 'push'
+      max_iterations: 5
+      merge_ready:
+        max_p1: 0
+        max_p2: 1
+        max_p3: -1         # -1 = unlimited
 ```
 
-**Note**: `use_actual_review` requires the `gh-cli` integration to be enabled. The `gh` CLI must be installed and authenticated (`gh auth login`).
+Loop guards built in: iteration cap, identical-issue-set fingerprint repeat, merge-ready heuristic, in-flight lock label, `sokuza-no-auto-fix` skip label, cooldown between iterations, PR-closed check.
 
-### Cross-Source Workflows
+Reviewers can also drive it manually with comment commands (set up via the `sokuza-slash-commands` template):
 
-A single trigger from one source can fire actions across multiple platforms:
+| Command | Effect |
+|---|---|
+| `/sokuza fix` | Trigger an address-review run on this PR |
+| `/sokuza fix mode=push` | Same, but force push-mode regardless of workflow config |
+| `/sokuza skip` | Add the `sokuza-no-auto-fix` label, halting auto-fix on this PR |
+| `/sokuza unskip` | Remove the skip label |
+
+## Dashboard
+
+The dashboard is at `http://localhost:24847/` (open via the one-time link `sokuza` prints, or get the token any time with `sokuza token`).
+
+| Page | What's there |
+|---|---|
+| **Dashboard** | Recent events, active workflows, quick-action library |
+| **Workflows** | Browse / edit / manually trigger workflows |
+| **AI Reviews** | Every `ai-review` run with truncation breakdown, parse-failure raw output, repair-attempt history, labeling (👍/👎 + note), 30-day stats |
+| **Auto-Fix** | Address runs (mode, iter, issues, tests, cost), persistent workdirs (size + evict), per-PR convergence timeline interleaving reviews + address runs |
+| **Chat** | Repo / branch / PR-scoped chat sessions with the AI agent |
+| **Integrations** | AI providers + GitHub/Slack/webhook setup |
+| **Event Log / Queue / Logs** | Real-time event stream, queue state, application log |
+
+## CLI
+
+| Command | Purpose |
+|---|---|
+| `sokuza` | Start the engine (default) |
+| `sokuza init [--local] [--force]` | Scaffold config (default `~/.sokuza/config.yaml`; `--local` for CWD + `.env`) |
+| `sokuza status` | Report locally-running instances |
+| `sokuza logs [-f] [-n N]` | Tail the application log |
+| `sokuza token [--rotate] [--json]` | Print the dashboard bearer token |
+| `sokuza service enable` / `disable` / `status` | Install/manage the autostart service (launchd on macOS, systemd on Linux) |
+| `sokuza update` | Upgrade via the installer (npm, brew) |
+| `sokuza version` | Print version |
+
+## Configuration
+
+`~/.sokuza/config.yaml` — auto-scaffolded from [sokuza.config.example.yaml](sokuza.config.example.yaml) on first run, `chmod 0600` so it's safe to embed AI provider API keys directly. Or use `${VAR_NAME}` interpolation from environment / `.env`.
+
+The example file documents every option. Headlines:
+
+- `server: { port, host }` — defaults to `127.0.0.1:24847`. Set `host: 0.0.0.0` only when you need to receive webhooks from a tunnel; nothing in front of `/api/*` and the dashboard except a bearer token + Host-header guard.
+- `ai.providers` — register named providers (Anthropic API, OpenAI-compatible API, CLI like `claude` / `opencode`). Workflows pick by name. Per-workflow / per-step override + fallback chain.
+- `integrations` — GitHub, Slack, webhook, gh-cli, github-poll, cron.
+- `workflows` — list of workflow definitions (or template references).
+- `auto_fix` — global defaults for the address-review action (mode, max_iterations, merge_ready thresholds). Per-workflow params override.
+
+Pricing for cost estimates lives in [src/core/pricing.ts](src/core/pricing.ts) (built-in defaults) plus an optional `~/.sokuza/pricing.yaml` override. Costs are computed at read time, so updating prices retroactively re-costs historical runs.
+
+## Built-in actions
+
+| Action | Where it lives |
+|---|---|
+| `log`, `webhook` | [src/actions/log.ts](src/actions/log.ts), [webhook.ts](src/actions/webhook.ts) |
+| `ai-review` | [src/actions/ai-review.ts](src/actions/ai-review.ts) — structured-JSON code review with parse-failure repair loop |
+| `ai-agent` | [src/actions/ai-agent.ts](src/actions/ai-agent.ts) — tool-using agent in a cloned repo |
+| `address-review` | [src/actions/address-review.ts](src/actions/address-review.ts) — consumes a review, runs the [/address-review skill](src/actions/address-review-skill.ts), posts suggestions or pushes commits |
+| `github-fetch-diff`, `github-comment`, `github-clone-repo`, `github-create-pr`, `github-create-review`, `github-fetch-reviews`, `github-add-label`, `github-remove-label` | [src/integrations/github/actions/](src/integrations/github/actions/) |
+| `slack-send-message`, `slack-react` | [src/integrations/slack/actions/](src/integrations/slack/actions/) |
+
+## Templates
+
+Top-level templates (user-facing):
+
+| Template | Purpose |
+|---|---|
+| `ai-pr-review` | One-shot AI review posted as a comment |
+| `auto-fix-pr-review` | AI review posted as a real GitHub Review with the marker the auto-fix loop needs |
+| `auto-fix-address-review` | Triggers when the marker comment lands; runs address-review |
+| `sokuza-slash-commands` | `/sokuza fix` / `skip` / `unskip` |
+| `fix-github-issue` | Manual workflow to fix a GitHub issue end-to-end |
+| `enforce-rules` | Repo-rule checks |
+| `respond-to-reviews` | Reply to incoming reviews on a PR |
+| `review-notify-slack` | Cross-source: PR review → Slack ping |
+| `log-events` | No-op logger, useful for trigger debugging |
+
+Library templates ship under [templates/library/](templates/library/) — auto-label PRs, dependency review, license check, security audit, daily digest, etc. (~28 starters). Browse them in the dashboard's Library page.
+
+## Workflow YAML
+
+Minimum:
 
 ```yaml
 workflows:
-  - name: pr-review-notify
+  - name: hello
     trigger:
       source: github
       event: pull_request.opened
     steps:
-      - id: diff
-        action: github-fetch-diff
-      - id: review
-        action: ai-review
-      - action: github-comment
-        params:
-          body: "{{steps.review.review}}"
-      - action: slack-send-message
-        params:
-          channel: "#code-reviews"
-          text: "New review on {{event.metadata.repo}}"
+      - action: log
+        params: { message: "PR #{{event.payload.pull_request.number}}" }
 ```
 
-### Scheduled Workflows
+Anything more interesting is in [sokuza.config.example.yaml](sokuza.config.example.yaml) and [templates/](templates/). Workflows compose: trigger filters, parameter templating (`{{event.x.y}}`, `{{steps.<id>.<field>}}`, `{{slash.args.mode}}`), parallel-step groups, per-step `condition` and `timeout`, per-step provider override, queue config (concurrency, dedup, priority).
 
-```yaml
-integrations:
-  cron: {}
+## Security
 
-workflows:
-  - name: daily-health
-    trigger:
-      source: cron
-      event: daily
-    steps:
-      - id: repo
-        action: github-clone-repo
-        params: { repo: "my-org/my-repo" }
-      - action: ai-agent
-        params:
-          workdir: "{{steps.repo.path}}"
-          prompt: "Check for vulnerabilities"
-      - action: slack-send-message
-        params:
-          channel: "#engineering"
-          text: "{{steps.analysis.review}}"
-```
+- **Bearer token** on `/api/*` and the dashboard. Generated once, stored at `~/.sokuza/dashboard-token` with `0600`. Rotate with `sokuza token --rotate`.
+- **DNS-rebinding guard**: `Host` header allow-list (`localhost`, `127.0.0.1`, `::1`, `sokuza.localhost`, plus any configured bind hostname and `SOKUZA_ALLOWED_HOSTS`). Exempt: `/health` and `/webhooks/*`.
+- **CORS lock on `/health`**: only `https://sokuza.ai` (and the local dev origins behind `SOKUZA_ALLOW_DEV_ORIGINS`) may read it cross-origin. Never `*`.
+- **Webhook signature verification** for the GitHub and Slack integrations.
+- The dashboard binds to `127.0.0.1` by default. Don't move it off loopback unless you've put auth in front.
 
-### Custom Webhook Workflows
+## Observability
 
-```yaml
-integrations:
-  webhook:
-    endpoints:
-      deploy-hook:
-        secret: "${DEPLOY_HOOK_SECRET}"
-
-workflows:
-  - name: deploy-notify
-    trigger:
-      source: webhook
-      event: deploy-hook
-    steps:
-      - action: slack-send-message
-        params:
-          channel: "#deploys"
-          text: "Deployed {{event.payload.version}} to {{event.payload.env}}"
-```
-
-### Conditional Steps
-
-Steps only run when a condition is truthy:
-```yaml
-- action: github-create-pr
-  condition: "{{steps.analysis.changes_needed}}"
-  params: { workdir: "{{steps.repo.path}}" }
-```
-
-### Shorthand Triggers
-
-```yaml
-trigger:
-  event: pull_request.opened
-  repo: "my-org/my-repo"
-  branch: "main"
-  author: "dependabot[bot]"
-  labels: ["needs-review"]
-```
-
-## Project Structure
-
-```
-src/
-├── index.ts                             # Entry point
-├── core/
-│   ├── types.ts                         # Shared types
-│   ├── config.ts                        # YAML config loader
-│   ├── engine.ts                        # Main orchestrator
-│   ├── templates.ts                     # YAML template loader
-│   ├── diff-truncator.ts               # Smart diff truncation
-│   └── workflow.ts                      # Trigger matching & execution
-├── actions/                             # Generic (source-agnostic) actions
-│   ├── registry.ts
-│   ├── log.ts
-│   ├── webhook.ts
-│   ├── ai-review.ts
-│   └── ai-agent.ts
-├── integrations/
-│   ├── registry.ts
-│   ├── github/                          # GitHub integration
-│   │   ├── index.ts
-│   │   ├── api.ts
-│   │   ├── events.ts
-│   │   ├── signature.ts
-│   │   └── actions/                     # GitHub-specific actions
-│   │       ├── fetch-diff.ts
-│   │       ├── comment.ts
-│   │       ├── clone-repo.ts
-│   │       └── create-pr.ts
-│   ├── slack/                           # Slack integration
-│   │   ├── index.ts
-│   │   ├── api.ts
-│   │   ├── events.ts
-│   │   ├── signature.ts
-│   │   └── actions/
-│   │       ├── send-message.ts
-│   │       └── react.ts
-│   ├── webhook/                         # Generic inbound webhooks
-│   │   └── index.ts
-│   └── cron/                            # Scheduled triggers
-│       └── index.ts
-├── server/
-│   └── server.ts
-└── __tests__/
-templates/                               # YAML workflow templates
-├── ai-pr-review.yaml
-├── log-events.yaml
-├── enforce-rules.yaml
-└── review-notify-slack.yaml
-```
+- **Run records** at `~/.sokuza/runs/ai-review/<date>/<id>.json` and `~/.sokuza/runs/address-review/<date>/<id>.json`. Capture inputs, provider, model, token usage, structured issues, per-file truncation outcomes, parse-failure kinds, repair attempts.
+- **Persistent workdirs** at `~/.sokuza/auto-fix-workdirs/<owner>/<repo>/<pr>/`. File-locked, stale-lock recovery on engine startup, idle eviction, evict-on-PR-close. Configurable root via `SOKUZA_WORKDIR_ROOT`.
+- **Dashboard** surfaces all of the above with filtering, drill-down, labeling, cost estimates.
 
 ## Development
 
 ```bash
-npm run dev          # Start with auto-reload
-npm run build        # Build for production
-npm run lint         # Type-check without emitting
-npm test             # Run tests
+npm install
+npm run dev       # tsx watch — auto-restart on TS changes
+npm test
+npm run lint      # tsc --noEmit
+npm run build     # tsup → dist/index.js (single bundled file)
 ```
 
-### Testing the public site against a local sokuza
+Tests use [vitest](https://vitest.dev/). Real-side-effect tests (filesystem, GitHub API) use mocks; tests that touch `~/.sokuza/` thread through `SOKUZA_RUNS_DIR` / `SOKUZA_WORKDIR_ROOT` environment overrides so they never hit the real home directory.
 
-When running the sokuza-web Astro dev server against a local sokuza (the
-"Open app" detector at `/open`), the browser's origin is
-`http://localhost:4321` (or 4322/4323 if 4321 is busy). The `/health`
-endpoint's CORS allow-list only admits `https://sokuza.ai` in production,
-so cross-origin probes from the dev site are rejected by default.
+To work against the public marketing site (`https://sokuza.ai`)'s `/open` discovery probe from a local Astro dev server, set `SOKUZA_ALLOW_DEV_ORIGINS=1` when starting sokuza so its `/health` CORS allow-list also accepts `localhost:432[123]`.
 
-Set `SOKUZA_ALLOW_DEV_ORIGINS=1` when starting sokuza to additionally
-accept the Astro dev origins:
+## Project layout
 
-```bash
-SOKUZA_ALLOW_DEV_ORIGINS=1 sokuza
+```
+src/
+├── index.ts                     # Entry point, CLI dispatcher
+├── version.ts
+├── cli/                         # `sokuza init|status|logs|token|service|update`
+├── core/
+│   ├── engine.ts                # Orchestrator
+│   ├── workflow.ts              # Trigger matching, step execution, templating
+│   ├── queue.ts                 # Job queue with dedup/concurrency/timeouts
+│   ├── config.ts, config-store.ts
+│   ├── templates.ts             # YAML template loader
+│   ├── ai-providers.ts          # Provider registry, completion + agent runners
+│   ├── diff-truncator.ts        # Smart per-file diff truncation
+│   ├── run-store.ts             # ai-review + address-review records
+│   ├── workdir-store.ts         # Persistent per-PR git workdirs
+│   ├── pricing.ts               # Token-cost computation
+│   ├── chat-store.ts, chat-agent.ts, chat-tools.ts
+│   └── log-store.ts
+├── actions/
+│   ├── log.ts, webhook.ts
+│   ├── ai-review.ts             # JSON-output review with parse-failure repair
+│   ├── ai-agent.ts              # Tool-using agent in a cloned repo
+│   ├── address-review.ts        # /address-review skill executor
+│   ├── address-review-skill.ts  # Embedded skill prompt
+│   └── review-templates.ts      # Prompt + parser + renderer
+├── integrations/
+│   ├── github/                  # Webhooks + actions
+│   ├── github-poll/             # Polling alternative when webhooks aren't an option
+│   ├── gh-cli/                  # Uses `gh` CLI, no webhook setup needed
+│   ├── slack/
+│   ├── webhook/                 # Generic inbound webhooks
+│   └── cron/                    # Scheduled triggers
+├── server/
+│   ├── server.ts                # Fastify app + `/health`
+│   ├── auth.ts                  # Bearer token + DNS-rebinding guard
+│   ├── api.ts                   # Dashboard REST API
+│   └── discovery.ts             # `/health`, runtime state, port fallback
+└── __tests__/
+
+dashboard/                       # Vanilla-JS SPA, no bundler
+templates/                       # Workflow YAML templates
+templates/library/               # Browseable starter library
+scripts/check-changelog.mjs      # Release-time changelog gate
 ```
 
-This is a development-only escape hatch — leave it unset in production so
-no random dev origin on the user's machine can read `/health`.
+## License
 
-## Exposing to the Internet
-
-For development, use [localtunnel](https://github.com/localtunnel/localtunnel) to expose your local server:
-
-```bash
-npx -y localtunnel --port 24847
-```
-
-Then configure the provided URL as your webhook endpoint in GitHub/Slack settings.
+MIT — see [LICENSE](LICENSE).

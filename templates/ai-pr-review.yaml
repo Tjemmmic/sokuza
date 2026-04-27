@@ -1,8 +1,13 @@
 # AI-Powered PR Review
 #
-# Clones repo, fetches the PR diff, sends both to Claude for a
-# contextual review, and posts a comment or review.
-# Works with both the Anthropic API (ANTHROPIC_API_KEY) and Claude Code CLI.
+# Clones the repo, fetches the PR diff, sends both to the configured AI
+# provider for review, and posts the rendered review back as a PR
+# comment. Works with any AI provider in the registry (Anthropic API,
+# Claude Code CLI, opencode, etc.).
+#
+# For the closed review→fix→re-review loop, use the auto-fix-pr-review
+# template instead, which posts via github-create-review (with the
+# `<!-- sokuza:run-id=... -->` marker the address-review trigger needs).
 #
 # Usage:
 #   - name: review-prs
@@ -10,12 +15,6 @@
 #     trigger:
 #       event: pull_request.opened
 #       repo: "my-org/my-repo"
-#     params:
-#       use_actual_review: true  # Post as actual GitHub review (default: false)
-#
-# Note: When use_actual_review is true, you must also enable
-# gh-cli integration in your config (requires gh CLI to be
-# installed and authenticated).
 
 trigger:
   source: github
