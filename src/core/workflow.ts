@@ -262,6 +262,10 @@ export async function executeWorkflow(
         const groups = groupSteps(workflow.steps);
 
         for (const group of groups) {
+            if (_signal?.aborted) {
+                throw new Error('Workflow aborted');
+            }
+
             if (group.kind === 'sequential') {
                 const { index, step } = group.steps[0];
                 const ctx = makeContext(event, results, steps, integrationConfigs, aiRegistry, logger, workflow.name, recordWebhookDelivery, extras);

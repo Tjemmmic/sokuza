@@ -648,11 +648,11 @@ export class SokuzaEngine {
     private createJobExecutor(): JobExecutor {
         const actions = this.actions;
         const logger = this.logger;
-        return async (job, integrationConfigs, ai, recordWebhookDelivery, workdirManager, getConfig) => {
+        return async (job, integrationConfigs, ai, recordWebhookDelivery, workdirManager, getConfig, signal) => {
             try {
                 const output = await executeWorkflow(
                     job.workflow, job.event, actions, logger,
-                    integrationConfigs, ai, undefined, recordWebhookDelivery,
+                    integrationConfigs, ai, signal, recordWebhookDelivery,
                     { workdirManager, getConfig },
                 );
                 // Attach step results so chat tools and run-history UI can

@@ -21,6 +21,7 @@ export type JobExecutor = (
     recordWebhookDelivery?: ActionContext['recordWebhookDelivery'],
     workdirManager?: ActionContext['workdirManager'],
     getConfig?: ActionContext['getConfig'],
+    signal?: AbortSignal,
 ) => Promise<void>;
 
 export class WorkflowQueue {
@@ -290,7 +291,8 @@ export class WorkflowQueue {
             this.startJob(job);
 
             const { integrationConfigs, ai, recordWebhookDelivery, workdirManager, getConfig } = this.executorContext;
-            this.executor(job, integrationConfigs, ai, recordWebhookDelivery, workdirManager, getConfig)
+            const signal = this.abortControllers.get(job.id)?.signal;
+            this.executor(job, integrationConfigs, ai, recordWebhookDelivery, workdirManager, getConfig, signal)
                 .catch((err) => {
                     if (job.status === 'running') {
                         job.status = 'failed';
@@ -314,8 +316,19 @@ export class WorkflowQueue {
 
         if (job.resolvedConfig.timeout > 0) {
             const timer = setTimeout(() => {
-                this.logger.warn({ jobId: job.id, timeout: job.resolvedConfig.timeout }, 'Job timed out');
+                if (!this.running.has(job.id)) return;
+                this.logger.warn({ jobId: job.id, timeout: job.resolvedConfig.timeout }, 'Job timed out — force-failing');
                 ac.abort();
+                job.status = 'failed';
+                job.error = `Timed out after ${job.resolvedConfig.timeout}s`;
+                job.completedAt = new Date().toISOString();
+                this.removeFromDedup(job);
+                this.releaseConcurrency(job);
+                this.running.delete(job.id);
+                this.abortControllers.delete(job.id);
+                this.addToHistory(job);
+                this.notify(job);
+                this.scheduleTick();
             }, job.resolvedConfig.timeout * 1000);
             this.timers.set(job.id, timer);
         }
@@ -428,9 +441,23 @@ export class WorkflowQueue {
                 );
                 return deduped;
             }
+            // latest-wins: cancel the running duplicate so it releases its
+            // concurrency slot instead of running to completion alongside
+            // the replacement job.
+            const ac = this.abortControllers.get(existingId);
+            if (ac) ac.abort();
+            existingRunning.status = 'cancelled';
+            existingRunning.completedAt = new Date().toISOString();
+            existingRunning.error = 'Superseded by newer job (latest-wins dedup)';
+            this.releaseConcurrency(existingRunning);
+            this.running.delete(existingId);
+            this.clearTimer(existingId);
+            this.abortControllers.delete(existingId);
+            this.addToHistory(existingRunning);
+            this.notify(existingRunning);
             this.logger.info(
                 { oldJobId: existingId, newJobId: newJob.id, dedupKey: key },
-                'Running job will be superseded (latest-wins)',
+                'Running job cancelled and superseded (latest-wins)',
             );
             return null;
         }
