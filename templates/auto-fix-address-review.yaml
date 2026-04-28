@@ -28,11 +28,22 @@
 
 trigger:
   source: github
-  event: issue_comment.created
+  event:
+    # The AI review is posted as a PR review (via github-create-review),
+    # which fires pull_request_review.submitted. The previous trigger
+    # (issue_comment.created) never matched the actual review event,
+    # causing the loop to stall — and random issue comments containing
+    # the marker to trigger spurious runs.
+    - pull_request_review.submitted
+    # Keep issue_comment.created for backward-compat with setups that
+    # post the review as a plain comment (e.g. via github-comment).
+    - issue_comment.created
   filters:
-    # Only trigger on AI review comments — the marker is embedded by
-    # github-create-review in suggest/COMMENT mode reviews.
-    "payload.comment.body": "*<!-- sokuza:run-id=*"
+    # Match the sokuza run-id marker in EITHER the review body or the
+    # comment body. Only one path will exist per event type; the other
+    # resolves to undefined and the glob still succeeds because
+    # matchesFilter uses OR-across-paths for |-delimited keys.
+    "payload.review.body|payload.comment.body": "*<!-- sokuza:run-id=*"
 
 steps:
   - id: address
