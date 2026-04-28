@@ -312,6 +312,66 @@ describe('matchesTrigger', () => {
             });
         });
 
+        describe('OR-across-paths (| delimiter)', () => {
+            // The auto-fix-address-review template relies on this: a single
+            // filter key like "payload.review.body|payload.comment.body" must
+            // match if EITHER path satisfies the value, because the trigger
+            // listens to both pull_request_review.submitted (review body) and
+            // issue_comment.created (comment body).
+            const wf = makeWorkflow({
+                trigger: {
+                    source: 'github',
+                    event: ['pull_request_review.submitted', 'issue_comment.created'],
+                    filters: { 'payload.review.body|payload.comment.body': '*marker*' },
+                },
+            });
+
+            it('matches when only the first alternative path is present', () => {
+                expect(matchesTrigger(wf, makeEvent({
+                    event: 'pull_request_review.submitted',
+                    payload: { review: { body: 'some marker here' } },
+                }))).toBe(true);
+            });
+
+            it('matches when only the second alternative path is present', () => {
+                expect(matchesTrigger(wf, makeEvent({
+                    event: 'issue_comment.created',
+                    payload: { comment: { body: 'some marker here' } },
+                }))).toBe(true);
+            });
+
+            it('does not match when neither alternative path is present', () => {
+                expect(matchesTrigger(wf, makeEvent({
+                    event: 'pull_request_review.submitted',
+                    payload: {},
+                }))).toBe(false);
+            });
+
+            it('does not match when both paths exist but neither value satisfies the filter', () => {
+                expect(matchesTrigger(wf, makeEvent({
+                    event: 'issue_comment.created',
+                    payload: {
+                        review: { body: 'no token' },
+                        comment: { body: 'also nothing' },
+                    },
+                }))).toBe(false);
+            });
+
+            it('tolerates whitespace around the delimiter', () => {
+                const spaced = makeWorkflow({
+                    trigger: {
+                        source: 'github',
+                        event: 'issue_comment.created',
+                        filters: { 'payload.review.body | payload.comment.body': '*marker*' },
+                    },
+                });
+                expect(matchesTrigger(spaced, makeEvent({
+                    event: 'issue_comment.created',
+                    payload: { comment: { body: 'has marker inside' } },
+                }))).toBe(true);
+            });
+        });
+
         it('skips filters for manual triggers', () => {
             const wf = makeWorkflow({
                 trigger: {
