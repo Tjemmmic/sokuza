@@ -142,6 +142,7 @@ export class WorkflowQueue {
             this.releaseConcurrency(running);
             this.running.delete(jobId);
             this.clearTimer(jobId);
+            this.abortControllers.delete(jobId);
             this.addToHistory(running);
             this.notify(running);
             this.logger.info({ jobId }, 'Running job cancelled');
