@@ -458,6 +458,114 @@ describe('WorkflowQueue', () => {
             expect(stats.byStatus.running).toBe(0);
         });
 
+        it('should force-fail a hung job after its timeout and release its slot', async () => {
+            const q = new WorkflowQueue(makeLogger(), 2, 10);
+            let signalSeen: AbortSignal | undefined;
+            const resolvers: Array<() => void> = [];
+
+            q.setExecutor(
+                async (_job, _cfg, _ai, _rec, _wd, _gc, signal) => {
+                    signalSeen = signal;
+                    await new Promise<void>((r) => { resolvers.push(r); });
+                },
+                { integrationConfigs: {}, ai: undefined },
+            );
+
+            const job = q.enqueue(
+                makeWorkflow(),
+                makeEvent(),
+                makeResolvedConfig({ dedup: 'none', dedupKey: 'timeout-test', timeout: 0.05, retry: 0 }),
+            );
+
+            await new Promise((r) => setTimeout(r, 30));
+            expect(q.getJobs('running')).toHaveLength(1);
+
+            // Wait past timeout (0.05s) for the timer to fire and force-fail the job
+            await new Promise((r) => setTimeout(r, 100));
+
+            expect(job.status).toBe('failed');
+            expect(job.error).toMatch(/Timed out/);
+            expect(q.getJobs('running')).toHaveLength(0);
+            expect(signalSeen?.aborted).toBe(true);
+
+            const stats = q.getStats();
+            expect(stats.availableSlots).toBe(2);
+            expect(stats.byStatus.running).toBe(0);
+            expect(stats.byStatus.failed).toBe(1);
+
+            // Timer entry must be cleared, otherwise the timers map leaks
+            // across the queue's lifetime.
+            expect((q as unknown as { timers: Map<string, unknown> }).timers.size).toBe(0);
+
+            // Now resolve the still-pending executor — its onJobCompleted must
+            // be a no-op (guarded by `running.has`), not a double-decrement.
+            resolvers[0]();
+            await new Promise((r) => setTimeout(r, 30));
+
+            const stats2 = q.getStats();
+            expect(stats2.availableSlots).toBe(2);
+            expect(stats2.byStatus.failed).toBe(1);
+        });
+
+        it('latest-wins should cancel a running duplicate and run the replacement', async () => {
+            const q = new WorkflowQueue(makeLogger(), 2, 10);
+            const started: string[] = [];
+            const signals: Array<AbortSignal | undefined> = [];
+            const resolvers: Array<() => void> = [];
+
+            q.setExecutor(
+                async (job, _cfg, _ai, _rec, _wd, _gc, signal) => {
+                    started.push(job.id);
+                    signals.push(signal);
+                    await new Promise<void>((r) => { resolvers.push(r); });
+                },
+                { integrationConfigs: {}, ai: undefined },
+            );
+
+            const first = q.enqueue(
+                makeWorkflow(),
+                makeEvent({ payload: { v: 1 } }),
+                makeResolvedConfig({ dedup: 'latest-wins', dedupKey: 'lw-running', concurrency: 10 }),
+            );
+
+            await new Promise((r) => setTimeout(r, 30));
+            expect(q.getJobs('running').map((j) => j.id)).toEqual([first.id]);
+
+            const second = q.enqueue(
+                makeWorkflow(),
+                makeEvent({ payload: { v: 2 } }),
+                makeResolvedConfig({ dedup: 'latest-wins', dedupKey: 'lw-running', concurrency: 10 }),
+            );
+
+            // First should now be cancelled (in history), its slot released,
+            // and second should be queued/started.
+            expect(first.status).toBe('cancelled');
+            expect(first.error).toMatch(/Superseded/);
+            expect(signals[0]?.aborted).toBe(true);
+
+            await new Promise((r) => setTimeout(r, 30));
+            expect(started).toEqual([first.id, second.id]);
+            expect(q.getJobs('running').map((j) => j.id)).toEqual([second.id]);
+
+            const stats = q.getStats();
+            expect(stats.availableSlots).toBe(1);
+            expect(stats.byStatus.cancelled).toBe(1);
+            expect(stats.byStatus.running).toBe(1);
+
+            // Resolve both pending executors. The cancelled job's
+            // onJobCompleted must short-circuit (already removed from
+            // running), so no double-decrement of concurrency.
+            resolvers[0]();
+            resolvers[1]();
+            await new Promise((r) => setTimeout(r, 30));
+
+            const stats2 = q.getStats();
+            expect(stats2.availableSlots).toBe(2);
+            expect(stats2.byStatus.running).toBe(0);
+            expect(stats2.byStatus.completed).toBe(1);
+            expect(stats2.byStatus.cancelled).toBe(1);
+        });
+
         it('should mark job as failed when executor throws without setting status', async () => {
             const q = new WorkflowQueue(makeLogger(), 5, 10);
 

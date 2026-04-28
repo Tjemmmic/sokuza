@@ -320,6 +320,7 @@ export class WorkflowQueue {
                 if (!this.running.has(job.id)) return;
                 this.logger.warn({ jobId: job.id, timeout: job.resolvedConfig.timeout }, 'Job timed out — force-failing');
                 ac.abort();
+                this.clearTimer(job.id);
                 job.status = 'failed';
                 job.error = `Timed out after ${job.resolvedConfig.timeout}s`;
                 job.completedAt = new Date().toISOString();
