@@ -82,9 +82,27 @@ const CASE_INSENSITIVE_PATHS = new Set([
 
 /**
  * Match a single filter key against the event.
- * Supports dot-path resolution and array-contains with `[]` syntax.
+ * Supports dot-path resolution, array-contains with `[]` syntax,
+ * and OR-across-paths with `|` syntax (e.g.
+ * "payload.review.body|payload.comment.body" matches if EITHER
+ * path satisfies the expected value).
  */
 function matchesFilter(
+    event: EventPayload,
+    filterKey: string,
+    expected: string,
+): boolean {
+    // OR-across-paths: "path.a|path.b" — true if any alternative matches.
+    if (filterKey.includes('|')) {
+        return filterKey.split('|').some((altKey) =>
+            matchesSingleFilter(event, altKey.trim(), expected),
+        );
+    }
+
+    return matchesSingleFilter(event, filterKey, expected);
+}
+
+function matchesSingleFilter(
     event: EventPayload,
     filterKey: string,
     expected: string,
@@ -262,6 +280,10 @@ export async function executeWorkflow(
         const groups = groupSteps(workflow.steps);
 
         for (const group of groups) {
+            if (_signal?.aborted) {
+                throw new Error('Workflow aborted');
+            }
+
             if (group.kind === 'sequential') {
                 const { index, step } = group.steps[0];
                 const ctx = makeContext(event, results, steps, integrationConfigs, aiRegistry, logger, workflow.name, recordWebhookDelivery, extras);

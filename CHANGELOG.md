@@ -15,6 +15,17 @@ under a new `## [X.Y.Z] - YYYY-MM-DD` heading, bump `version` in
 `package.json`, commit, push to main. The release workflow tags +
 publishes automatically.
 
+## [0.1.2] - 2026-04-27
+
+### Fixed
+
+- **Zombie jobs: AbortSignal now threaded to executors.** The queue created an AbortController per job but never passed its signal to the executor, making `cancel()` and timeout a no-op. Signal is now forwarded through `engine.ts` into `executeWorkflow()`, and workflows check for abort between step groups.
+- **Timed-out jobs no longer hold concurrency slots forever.** The timeout handler previously only called `abort()` without transitioning the job out of the running set. It now force-fails the job: marks it failed, releases the concurrency slot, removes it from the running map, and records it in history.
+- **`latest-wins` dedup cancels the running duplicate.** Previously a new job with the same dedup key would enqueue but the already-running duplicate kept going, defeating the purpose of latest-wins. The running job is now aborted and moved to history before the replacement is enqueued.
+- **Dedup keys resolve correctly for PR comments.** `parseEvent` only looked at `body.pull_request` to extract `prNumber`, but `issue_comment.created` events on PRs carry the number under `body.issue` (with `issue.pull_request` set). All such comments collapsed to the same dedup key, letting duplicates pile up.
+- **Auto-fix trigger matches the actual review event.** `auto-fix-address-review` only triggered on `issue_comment.created`, but `github-create-review` fires `pull_request_review.submitted`. The intended loop never closed; random comments containing the marker triggered spurious runs instead. Trigger now matches both events, and the filter uses OR-across-paths (`payload.review.body|payload.comment.body`) to find the marker in either payload shape.
+- **`address-review` reads marker from review body.** `resolveReviewRunId` only checked `comment.body` for the `sokuza:run-id` marker. When the trigger fires via `pull_request_review.submitted`, the marker is in `review.body`. Now checks both.
+
 ## [0.1.1] - 2026-04-26
 
 ### Changed

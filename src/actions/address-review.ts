@@ -406,8 +406,12 @@ async function resolveReviewRunId(
     const explicit = params.review_run_id as string | undefined;
     if (explicit && explicit !== 'latest') return explicit;
 
-    // Try comment-marker extraction (auto trigger from issue_comment.created).
-    const body = (context.event.payload?.comment as Record<string, unknown> | undefined)?.body as string | undefined;
+    // Try marker extraction from the triggering event's body.
+    // pull_request_review.submitted → payload.review.body
+    // issue_comment.created         → payload.comment.body
+    const commentBody = (context.event.payload?.comment as Record<string, unknown> | undefined)?.body as string | undefined;
+    const reviewBody = (context.event.payload?.review as Record<string, unknown> | undefined)?.body as string | undefined;
+    const body = commentBody ?? reviewBody;
     if (body) {
         const m = body.match(/<!--\s*sokuza:run-id=([A-Za-z0-9-]{1,128})\s*-->/);
         if (m) return m[1];

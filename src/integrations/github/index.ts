@@ -77,11 +77,16 @@ export class GitHubIntegration implements Integration {
             ? repoFullName.split('/')
             : ['unknown', repoFullName];
 
-        // Extract PR/issue number
+        // Extract PR/issue number.
+        // For issue_comment.created on a PR, GitHub sends body.issue (not
+        // body.pull_request). Detect this via issue.pull_request being set
+        // and promote the issue number to prNumber so dedup keys resolve
+        // correctly.
         const pr = body.pull_request as Record<string, unknown> | undefined;
         const issue = body.issue as Record<string, unknown> | undefined;
-        const prNumber = pr?.number as number | undefined;
-        const issueNumber = issue?.number as number | undefined;
+        const isIssueOnPr = !pr && issue && (issue.pull_request !== undefined && issue.pull_request !== null);
+        const prNumber = (pr?.number ?? (isIssueOnPr ? issue?.number : undefined)) as number | undefined;
+        const issueNumber = (isIssueOnPr ? undefined : issue?.number) as number | undefined;
 
         return {
             source: 'github',
