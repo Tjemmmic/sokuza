@@ -368,13 +368,23 @@ const api = {
         return r.json();
     },
     async post(p, b) {
-        const r = await authedFetch(p, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(b) });
+        const init = { method: 'POST' };
+        if (b !== undefined) {
+            init.headers = { 'Content-Type': 'application/json' };
+            init.body = JSON.stringify(b);
+        }
+        const r = await authedFetch(p, init);
         if (r.status === 401) { await handleAuthFailure(r); throw new Error('unauthorized'); }
         if (!r.ok) throw new Error(await readErrorMessage(r));
         return r.json();
     },
     async put(p, b) {
-        const r = await authedFetch(p, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(b) });
+        const init = { method: 'PUT' };
+        if (b !== undefined) {
+            init.headers = { 'Content-Type': 'application/json' };
+            init.body = JSON.stringify(b);
+        }
+        const r = await authedFetch(p, init);
         if (r.status === 401) { await handleAuthFailure(r); throw new Error('unauthorized'); }
         if (!r.ok) throw new Error(await readErrorMessage(r));
         return r.json();
