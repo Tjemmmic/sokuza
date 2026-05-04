@@ -303,4 +303,127 @@ export class GitHubApiClient {
 
         return (await res.json()) as Record<string, unknown>;
     }
+
+    /** PATCH a pull request — title, body, state, base. Any subset works. */
+    async updatePullRequest(
+        owner: string,
+        repo: string,
+        prNumber: number,
+        options: { title?: string; body?: string; state?: 'open' | 'closed'; base?: string },
+    ): Promise<Record<string, unknown>> {
+        const url = `${this.baseUrl}/repos/${owner}/${repo}/pulls/${prNumber}`;
+        const payload: Record<string, unknown> = {};
+        if (options.title !== undefined) payload.title = options.title;
+        if (options.body !== undefined) payload.body = options.body;
+        if (options.state !== undefined) payload.state = options.state;
+        if (options.base !== undefined) payload.base = options.base;
+        const res = await fetchWithTimeout(url, {
+            method: 'PATCH',
+            headers: this.headers(),
+            body: JSON.stringify(payload),
+        });
+        if (!res.ok) {
+            const errorBody = await res.text();
+            throw new Error(
+                `GitHub API error updating PR: ${res.status} ${res.statusText} — ${errorBody}`,
+            );
+        }
+        return (await res.json()) as Record<string, unknown>;
+    }
+
+    /** Merge a pull request. Method defaults to "merge"; use "squash"/"rebase"
+     *  for those merge styles. Throws on 405 (not mergeable) — caller decides
+     *  whether to retry or surface the failure. */
+    async mergePullRequest(
+        owner: string,
+        repo: string,
+        prNumber: number,
+        options: {
+            method?: 'merge' | 'squash' | 'rebase';
+            commit_title?: string;
+            commit_message?: string;
+            sha?: string;
+        } = {},
+    ): Promise<{ merged: boolean; sha: string; message: string }> {
+        const url = `${this.baseUrl}/repos/${owner}/${repo}/pulls/${prNumber}/merge`;
+        const payload: Record<string, unknown> = { merge_method: options.method ?? 'merge' };
+        if (options.commit_title) payload.commit_title = options.commit_title;
+        if (options.commit_message) payload.commit_message = options.commit_message;
+        if (options.sha) payload.sha = options.sha;
+        const res = await fetchWithTimeout(url, {
+            method: 'PUT',
+            headers: this.headers(),
+            body: JSON.stringify(payload),
+        });
+        if (!res.ok) {
+            const errorBody = await res.text();
+            throw new Error(
+                `GitHub API error merging PR: ${res.status} ${res.statusText} — ${errorBody}`,
+            );
+        }
+        const json = (await res.json()) as { merged?: boolean; sha?: string; message?: string };
+        return {
+            merged: json.merged === true,
+            sha: typeof json.sha === 'string' ? json.sha : '',
+            message: typeof json.message === 'string' ? json.message : '',
+        };
+    }
+
+    async getIssue(
+        owner: string,
+        repo: string,
+        issueNumber: number,
+    ): Promise<Record<string, unknown>> {
+        const url = `${this.baseUrl}/repos/${owner}/${repo}/issues/${issueNumber}`;
+        const res = await fetchWithTimeout(url, { headers: this.headers() });
+        if (!res.ok) {
+            throw new Error(
+                `GitHub API error fetching issue: ${res.status} ${res.statusText}`,
+            );
+        }
+        return (await res.json()) as Record<string, unknown>;
+    }
+
+    /** Fetch all check runs for a commit SHA, paginating through all results. */
+    async getCheckRuns(
+        owner: string,
+        repo: string,
+        sha: string,
+    ): Promise<Array<Record<string, unknown>>> {
+        const all: Array<Record<string, unknown>> = [];
+        let page = 1;
+        const perPage = 100;
+        while (true) {
+            const url = `${this.baseUrl}/repos/${owner}/${repo}/commits/${sha}/check-runs?page=${page}&per_page=${perPage}`;
+            const res = await fetchWithTimeout(url, { headers: this.headers() });
+            if (!res.ok) {
+                throw new Error(
+                    `GitHub API error listing check-runs: ${res.status} ${res.statusText}`,
+                );
+            }
+            const json = (await res.json()) as { check_runs?: Array<Record<string, unknown>>; total_count?: number };
+            const runs = json.check_runs ?? [];
+            all.push(...runs);
+            if (runs.length < perPage) break;
+            page++;
+        }
+        return all;
+    }
+
+    /** Combined commit status (the legacy "statuses" API — separate from
+     *  check-runs and used by some CIs like Travis/CircleCI). */
+    async getCombinedStatus(
+        owner: string,
+        repo: string,
+        sha: string,
+    ): Promise<Record<string, unknown>> {
+        const url = `${this.baseUrl}/repos/${owner}/${repo}/commits/${sha}/status`;
+        const res = await fetchWithTimeout(url, { headers: this.headers() });
+        if (!res.ok) {
+            throw new Error(
+                `GitHub API error fetching combined status: ${res.status} ${res.statusText}`,
+            );
+        }
+        return (await res.json()) as Record<string, unknown>;
+    }
 }
