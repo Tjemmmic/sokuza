@@ -685,7 +685,7 @@ const logNode = actionNode({
     icon: '📝',
     color: COLOR_UTILITY,
     ports: [
-        { name: 'message', label: 'Message', role: 'input', wire: true, config: true, control: 'textarea', required: true },
+        { name: 'message', label: 'Message', role: 'input', wire: true, config: true, control: 'textarea', type: 'string', required: true },
         { name: 'level', label: 'Level', role: 'input', config: true, control: 'select', options: [
             { value: 'info', label: 'Info' },
             { value: 'warn', label: 'Warn' },
@@ -761,7 +761,7 @@ const setNode: NodeDefinition = {
     icon: '🏷️',
     color: COLOR_FLOW,
     ports: [
-        { name: 'input', label: 'Value', role: 'input', wire: true, config: true, control: 'textarea', required: true },
+        { name: 'input', label: 'Value', role: 'input', wire: true, config: true, control: 'textarea', type: 'any', required: true },
         { name: 'value', label: 'Value', role: 'output', wire: true, type: 'any' },
     ],
     execute: async (inputs) => ({ value: inputs.input }),

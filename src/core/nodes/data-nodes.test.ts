@@ -359,14 +359,16 @@ describe('flow.filter-list', () => {
 });
 
 describe('builtin port-type contract', () => {
-    it('every wire-able input carries an explicit type (no silent any-fallback)', () => {
-        const def = registry.get('ai.review');
-        if (!def) throw new Error('ai.review not registered');
-        for (const port of def.ports) {
-            if (port.role === 'input' && port.wire === true) {
-                expect(port.type, `port ${port.name} on ai.review`).toBeDefined();
+    it('every wire-able input on every builtin node carries an explicit type (no silent any-fallback)', () => {
+        const offenders: string[] = [];
+        for (const def of registry.list()) {
+            for (const port of def.ports) {
+                if (port.role === 'input' && port.wire === true && port.type === undefined) {
+                    offenders.push(`${def.type}.${port.name}`);
+                }
             }
         }
+        expect(offenders, 'Wire-able inputs missing type tag (would fall back to any silently)').toEqual([]);
     });
 
     it('clone-repo and create-pr re-emit construction-time fields', () => {
