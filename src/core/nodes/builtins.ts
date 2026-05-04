@@ -469,6 +469,116 @@ const githubFetchReviews = actionNode({
     ],
 });
 
+const githubFetchPr = actionNode({
+    type: 'github.fetch-pr',
+    actionName: 'github-fetch-pr',
+    group: 'GitHub',
+    title: 'Fetch Pull Request',
+    description: 'Round-trip: fetch the full PR object by number — pipe its output into Decompose Pull Request',
+    icon: '📥',
+    color: COLOR_GITHUB,
+    ports: [
+        { name: 'pr_number', label: 'PR Number', role: 'input', wire: true, config: true, control: 'number', type: 'number', required: true },
+        { name: 'repo', label: 'Repository', role: 'input', wire: true, config: true, control: 'text', type: 'string' },
+        { name: 'token', label: 'GitHub Token (optional override)', role: 'input', config: true, control: 'text' },
+        { name: 'pr', label: 'Pull Request', role: 'output', wire: true, type: 'pr' },
+        { name: 'number', label: 'Number', role: 'output', wire: true, type: 'number' },
+        { name: 'repo', label: 'Repository', role: 'output', wire: true, type: 'string' },
+    ],
+});
+
+const githubFetchIssue = actionNode({
+    type: 'github.fetch-issue',
+    actionName: 'github-fetch-issue',
+    group: 'GitHub',
+    title: 'Fetch Issue',
+    description: 'Round-trip: fetch the full Issue object by number — pipe into Decompose Issue',
+    icon: '📥',
+    color: COLOR_GITHUB,
+    ports: [
+        { name: 'issue_number', label: 'Issue Number', role: 'input', wire: true, config: true, control: 'number', type: 'number', required: true },
+        { name: 'repo', label: 'Repository', role: 'input', wire: true, config: true, control: 'text', type: 'string' },
+        { name: 'token', label: 'GitHub Token (optional override)', role: 'input', config: true, control: 'text' },
+        { name: 'issue', label: 'Issue', role: 'output', wire: true, type: 'issue' },
+        { name: 'number', label: 'Number', role: 'output', wire: true, type: 'number' },
+        { name: 'repo', label: 'Repository', role: 'output', wire: true, type: 'string' },
+    ],
+});
+
+const githubMergePr = actionNode({
+    type: 'github.merge-pr',
+    actionName: 'github-merge-pr',
+    group: 'GitHub',
+    title: 'Merge Pull Request',
+    description: 'Merge a PR via the API — supports merge / squash / rebase',
+    icon: '🟣',
+    color: COLOR_GITHUB,
+    ports: [
+        { name: 'pr_number', label: 'PR Number', role: 'input', wire: true, config: true, control: 'number', type: 'number', required: true },
+        { name: 'repo', label: 'Repository', role: 'input', wire: true, config: true, control: 'text', type: 'string' },
+        { name: 'method', label: 'Merge Method', role: 'input', config: true, control: 'select', options: [
+            { value: 'merge', label: 'Merge commit' },
+            { value: 'squash', label: 'Squash and merge' },
+            { value: 'rebase', label: 'Rebase and merge' },
+        ], default: 'merge' },
+        { name: 'commit_title', label: 'Commit Title (optional)', role: 'input', config: true, control: 'text' },
+        { name: 'commit_message', label: 'Commit Message (optional)', role: 'input', config: true, control: 'textarea' },
+        { name: 'sha', label: 'Required Head SHA (optional)', role: 'input', wire: true, config: true, control: 'text', type: 'string', helpText: 'If supplied, GitHub fails the merge if the PR HEAD has moved' },
+        { name: 'token', label: 'GitHub Token (optional override)', role: 'input', config: true, control: 'text' },
+        { name: 'merged', label: 'Merged?', role: 'output', wire: true, type: 'boolean' },
+        { name: 'sha', label: 'Merge Commit SHA', role: 'output', wire: true, type: 'string' },
+        { name: 'message', label: 'API Message', role: 'output', wire: true, type: 'string' },
+    ],
+});
+
+const githubUpdatePr = actionNode({
+    type: 'github.update-pr',
+    actionName: 'github-update-pr',
+    group: 'GitHub',
+    title: 'Update Pull Request',
+    description: 'PATCH a PR — change title/body/base, or close it via state="closed"',
+    icon: '✏️',
+    color: COLOR_GITHUB,
+    ports: [
+        { name: 'pr_number', label: 'PR Number', role: 'input', wire: true, config: true, control: 'number', type: 'number', required: true },
+        { name: 'repo', label: 'Repository', role: 'input', wire: true, config: true, control: 'text', type: 'string' },
+        { name: 'title', label: 'Title (optional)', role: 'input', wire: true, config: true, control: 'text', type: 'string' },
+        { name: 'body', label: 'Body (optional)', role: 'input', wire: true, config: true, control: 'code-md', type: 'string' },
+        { name: 'state', label: 'State', role: 'input', config: true, control: 'select', options: [
+            { value: '', label: '(no change)' },
+            { value: 'open', label: 'Open' },
+            { value: 'closed', label: 'Closed' },
+        ] },
+        { name: 'base', label: 'Base Branch (optional)', role: 'input', config: true, control: 'text' },
+        { name: 'token', label: 'GitHub Token (optional override)', role: 'input', config: true, control: 'text' },
+        { name: 'url', label: 'PR URL', role: 'output', wire: true, type: 'string' },
+        { name: 'state', label: 'New State', role: 'output', wire: true, type: 'string' },
+        { name: 'number', label: 'PR Number', role: 'output', wire: true, type: 'number' },
+    ],
+});
+
+const githubWaitForChecks = actionNode({
+    type: 'github.wait-for-checks',
+    actionName: 'github-wait-for-checks',
+    group: 'GitHub',
+    title: 'Wait for CI Checks',
+    description: 'Poll commit checks until done or timeout. Folds in both the Checks API and the legacy combined-status API.',
+    icon: '⏳',
+    color: COLOR_GITHUB,
+    ports: [
+        { name: 'sha', label: 'Commit SHA', role: 'input', wire: true, config: true, control: 'text', type: 'string', helpText: 'Defaults to the PR head SHA from the trigger event' },
+        { name: 'repo', label: 'Repository', role: 'input', wire: true, config: true, control: 'text', type: 'string' },
+        { name: 'timeout', label: 'Timeout (seconds)', role: 'input', config: true, control: 'number', type: 'number', default: 600 },
+        { name: 'interval', label: 'Poll Interval (seconds)', role: 'input', config: true, control: 'number', type: 'number', default: 15 },
+        { name: 'token', label: 'GitHub Token (optional override)', role: 'input', config: true, control: 'text' },
+        { name: 'success', label: 'All Passing?', role: 'output', wire: true, type: 'boolean' },
+        { name: 'failedChecks', label: 'Failed Check Names', role: 'output', wire: true, type: 'json' },
+        { name: 'totalChecks', label: 'Total Checks', role: 'output', wire: true, type: 'number' },
+        { name: 'sha', label: 'SHA Polled', role: 'output', wire: true, type: 'string' },
+        { name: 'timedOut', label: 'Timed Out?', role: 'output', wire: true, type: 'boolean' },
+    ],
+});
+
 const githubAddLabel = actionNode({
     type: 'github.add-label',
     actionName: 'github-add-label',
@@ -500,6 +610,31 @@ const githubRemoveLabel = actionNode({
         { name: 'repo', label: 'Repository', role: 'input', wire: true, config: true, control: 'text', type: 'string' },
         { name: 'success', label: 'Success', role: 'output', wire: true, type: 'boolean' },
         { name: 'removedLabel', label: 'Removed Label', role: 'output', wire: true, type: 'string' },
+    ],
+});
+
+// ─── Git nodes (provider-agnostic) ──────────────────────────────────────────
+
+const COLOR_GIT = '#dd4c35';
+
+const gitCommitAndPush = actionNode({
+    type: 'git.commit-and-push',
+    actionName: 'git-commit-and-push',
+    group: 'Git',
+    title: 'Commit and Push',
+    description: 'Stage, commit, and push changes in a workdir — works with GitHub, GitLab, self-hosted',
+    icon: '⤴️',
+    color: COLOR_GIT,
+    ports: [
+        { name: 'workdir', label: 'Workdir', role: 'input', wire: true, type: 'string', required: true, helpText: 'From github-clone-repo' },
+        { name: 'message', label: 'Commit Message', role: 'input', wire: true, config: true, control: 'text', type: 'string', required: true },
+        { name: 'branch', label: 'Branch (optional)', role: 'input', wire: true, config: true, control: 'text', type: 'string', helpText: 'Empty = use the workdir\'s current branch; named = checkout (creates if missing)' },
+        { name: 'paths', label: 'Paths to Stage (optional)', role: 'input', config: true, control: 'text', helpText: 'Comma-separated. Empty = git add -A.' },
+        { name: 'remote', label: 'Remote', role: 'input', config: true, control: 'text', default: 'origin' },
+        { name: 'pushed', label: 'Pushed?', role: 'output', wire: true, type: 'boolean' },
+        { name: 'hasChanges', label: 'Had Changes?', role: 'output', wire: true, type: 'boolean' },
+        { name: 'sha', label: 'Commit SHA', role: 'output', wire: true, type: 'string' },
+        { name: 'branch', label: 'Branch', role: 'output', wire: true, type: 'string' },
     ],
 });
 
@@ -630,6 +765,52 @@ const setNode: NodeDefinition = {
         { name: 'value', label: 'Value', role: 'output', wire: true, type: 'any' },
     ],
     execute: async (inputs) => ({ value: inputs.input }),
+};
+
+const filterListNode: NodeDefinition = {
+    type: 'flow.filter-list',
+    category: 'control',
+    group: 'Flow',
+    title: 'Filter List',
+    description: 'Filter a JSON array by a per-item field test (equals / not-equals / truthy / exists)',
+    icon: '⚗️',
+    color: COLOR_FLOW,
+    ports: [
+        { name: 'list', label: 'List', role: 'input', wire: true, type: 'json', required: true, helpText: 'Wire any json array (e.g. labels, files, issues)' },
+        { name: 'path', label: 'Field Path', role: 'input', wire: true, config: true, control: 'text', type: 'string', helpText: 'Dot-path inside each item (e.g. priority, user.login). Empty = compare the item itself.' },
+        { name: 'mode', label: 'Test', role: 'input', config: true, control: 'select', options: [
+            { value: 'equals', label: 'equals value' },
+            { value: 'not-equals', label: 'not equals value' },
+            { value: 'truthy', label: 'is truthy (no value needed)' },
+            { value: 'exists', label: 'exists / defined (no value needed)' },
+            { value: 'contains', label: 'string contains value' },
+        ], default: 'equals' },
+        { name: 'value', label: 'Value', role: 'input', wire: true, config: true, control: 'text', type: 'string', helpText: 'Compared as string (auto-coerces numbers/booleans). Ignored for truthy/exists.' },
+        { name: 'filtered', label: 'Filtered List', role: 'output', wire: true, type: 'json' },
+        { name: 'count', label: 'Count', role: 'output', wire: true, type: 'number' },
+        { name: 'first', label: 'First Match', role: 'output', wire: true, type: 'any' },
+    ],
+    execute: async (inputs) => {
+        const list = Array.isArray(inputs.list) ? inputs.list : [];
+        const mode = (inputs.mode as string) ?? 'equals';
+        const path = typeof inputs.path === 'string' ? inputs.path : '';
+        const value = inputs.value;
+        const valueStr = value === undefined || value === null ? '' : String(value);
+
+        const filtered = list.filter((item) => {
+            const target = pluckPath(item, path);
+            const targetStr = target === undefined || target === null ? '' : String(target);
+            switch (mode) {
+                case 'truthy': return Boolean(target);
+                case 'exists': return target !== undefined && target !== null;
+                case 'equals': return targetStr === valueStr;
+                case 'not-equals': return targetStr !== valueStr;
+                case 'contains': return targetStr.includes(valueStr);
+                default: return false;
+            }
+        });
+        return { filtered, count: filtered.length, first: filtered[0] };
+    },
 };
 
 const mergeNode: NodeDefinition = {
@@ -961,12 +1142,15 @@ const ALL_BUILTINS: NodeDefinition[] = [
     // GitHub
     githubFetchDiff, githubComment, githubCloneRepo, githubCreatePr,
     githubCreateReview, githubFetchReviews, githubAddLabel, githubRemoveLabel,
+    githubFetchPr, githubFetchIssue, githubMergePr, githubUpdatePr, githubWaitForChecks,
+    // Git (provider-agnostic)
+    gitCommitAndPush,
     // Notify
     slackSend, slackReact,
     // Utility
     logNode, webhookNode,
     // Flow
-    ifNode, setNode, mergeNode,
+    ifNode, setNode, mergeNode, filterListNode,
     // Data
     jsonPluckNode,
     prFieldsNode, issueFieldsNode, reviewFieldsNode, commitsFieldsNode, eventFieldsNode,
