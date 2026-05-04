@@ -20,6 +20,9 @@ import { aiReviewAction } from '../actions/ai-review.js';
 import { aiAgentAction } from '../actions/ai-agent.js';
 import { addressReviewAction } from '../actions/address-review.js';
 
+import { getNodeRegistry } from '../core/nodes/registry.js';
+import { registerBuiltinNodes } from '../core/nodes/builtins.js';
+
 import { locateBundledFile } from './bundled-files.js';
 
 const DEFAULT_CONFIG_NAME = 'sokuza.config.yaml';
@@ -96,6 +99,10 @@ export async function runStart(opts: StartOptions): Promise<void> {
     engine.registerAction('ai-review', aiReviewAction);
     engine.registerAction('ai-agent', aiAgentAction);
     engine.registerAction('address-review', addressReviewAction);
+
+    // Register the built-in visual node definitions. The dashboard reads
+    // the resulting registry via GET /api/nodes to populate the palette.
+    registerBuiltinNodes(getNodeRegistry());
 
     await engine.start();
 

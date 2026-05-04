@@ -708,6 +708,17 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
         return { actions: deps.getRegisteredActions() };
     });
 
+    // ─── Visual-editor node registry ────────────────────────────────────
+    //
+    // Returns the serialized definitions for every node type the engine
+    // knows about. Drives the visual editor's palette and inspector form.
+    // No body — the palette refreshes the whole list on open.
+
+    server.get('/api/nodes', async () => {
+        const { getNodeRegistry } = await import('../core/nodes/registry.js');
+        return { nodes: getNodeRegistry().serialize() };
+    });
+
     // ─── System: autostart service + updates ────────────────────────────
     //
     // These routes mirror the `sokuza service` / `sokuza update` CLI
@@ -2160,8 +2171,8 @@ function serializeJob(job: import('../core/types.js').QueueJob) {
         workflowSnapshot: {
             name: job.workflow.name,
             trigger: job.workflow.trigger,
-            stepCount: job.workflow.steps.length,
-            stepActions: job.workflow.steps.map(s => s.action),
+            stepCount: job.workflow.steps?.length ?? job.workflow.graph?.nodes.length ?? 0,
+            stepActions: job.workflow.steps?.map(s => s.action) ?? job.workflow.graph?.nodes.map(n => n.type) ?? [],
         },
         event: {
             source: job.event.source,
