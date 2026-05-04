@@ -1222,12 +1222,25 @@ async function renderWorkflows(el) {
     `;
 }
 
-// ─── Workflow Editor (structured) ───────────────────────────────────────────
+// ─── Workflow Editor ────────────────────────────────────────────────────────
+//
+// The visual node-graph editor (dashboard/graph-editor.js) is now the
+// primary surface. The legacy YAML/form editor is still reachable via
+// `openLegacyWorkflowEditor()` so power users can fall back to text-based
+// authoring when they need it.
 window.openWorkflowEditor = function (existingName) {
+    if (typeof window.openGraphEditor === 'function') {
+        // Switch the router to a synthetic page so navigation back works.
+        currentPage = 'workflow-editor';
+        return window.openGraphEditor(existingName);
+    }
+    return window.openLegacyWorkflowEditor(existingName);
+};
+
+window.openLegacyWorkflowEditor = function (existingName) {
     const isEdit = !!existingName;
     const wf = isEdit ? workflows.find((w) => w.name === existingName) : null;
 
-    // If creating new and no name given, show Quick Start chooser
     if (!isEdit && !wf) {
         return openQuickStart();
     }
