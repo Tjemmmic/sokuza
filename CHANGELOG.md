@@ -15,6 +15,13 @@ under a new `## [X.Y.Z] - YYYY-MM-DD` heading, bump `version` in
 `package.json`, commit, push to main. The release workflow tags +
 publishes automatically.
 
+### Added
+
+- **Visual node-graph workflow editor.** Workflows can now be authored on a drag-and-drop canvas: drag node types from the palette, wire output ports to input ports, configure each node in the inspector. Supersedes the YAML/form editor as the default surface — the legacy editor is reachable via `openLegacyWorkflowEditor()` for power users. Existing workflows render as auto-laid-out graphs and can be re-wired visually.
+- **Pluggable node registry.** Adding a new feature is now a single `NodeDefinition` object in `src/core/nodes/builtins.ts` (or registered by an integration). The registry drives the palette (via `GET /api/nodes`), the inspector form, and the runtime — no parallel UI/runtime/schema edits.
+- **Graph runtime.** New `executeGraph()` runs node graphs with topo-sort layered parallelism, per-node `condition` / `on_error` / `timeout`, and `{{nodes.<id>.<port>}}` template interpolation alongside the legacy `{{steps.x}}` / `{{event.x}}` / `{{inputs.x}}`. Workflows opt in by setting `graph:` instead of `steps:`; the engine dispatches automatically.
+- **Trigger-as-node.** Each integration source has a `trigger.<source>` node (github, github-poll, gh-cli, slack, webhook, cron, manual). Trigger node config is bridged to the legacy `TriggerDefinition` so event matching keeps working unchanged.
+
 ## [0.1.2] - 2026-04-27
 
 ### Fixed
