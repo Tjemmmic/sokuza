@@ -654,6 +654,302 @@ const mergeNode: NodeDefinition = {
     },
 };
 
+// ─── Data nodes ─────────────────────────────────────────────────────────────
+//
+// Closed structural types (pr, issue, review, commits, event, json) carry
+// a lot of useful sub-fields, but no action node accepts them as input —
+// the actions all want flat scalars (pr_number, repo, branch, …). The
+// nodes below bridge that gap: each takes a structured value and emits
+// the named scalars downstream nodes need.
+//
+// Shape of payload.pull_request and payload.issue mirrors the GitHub
+// webhook schema, which is what the runtime synthesizes the `pr`/`issue`
+// trigger outputs from (see runtime.defaultTriggerOutputs).
+
+const COLOR_DATA = '#06b6d4';
+
+/** Walk a dot-path through nested objects / arrays. Empty path returns the
+ *  source unchanged. Numeric segments index arrays. */
+function pluckPath(source: unknown, path: string): unknown {
+    if (path === '' || path === undefined || path === null) return source;
+    const parts = String(path).split('.').filter((p) => p.length > 0);
+    let cur: unknown = source;
+    for (const part of parts) {
+        if (cur === null || cur === undefined) return undefined;
+        if (Array.isArray(cur)) {
+            const idx = Number(part);
+            if (!Number.isInteger(idx)) return undefined;
+            cur = cur[idx];
+        } else if (typeof cur === 'object') {
+            cur = (cur as Record<string, unknown>)[part];
+        } else {
+            return undefined;
+        }
+    }
+    return cur;
+}
+
+function asString(v: unknown): string {
+    if (v === undefined || v === null) return '';
+    if (typeof v === 'string') return v;
+    if (typeof v === 'number' || typeof v === 'boolean') return String(v);
+    try { return JSON.stringify(v); } catch { return String(v); }
+}
+
+const jsonPluckNode: NodeDefinition = {
+    type: 'data.json-pluck',
+    category: 'action',
+    group: 'Data',
+    title: 'JSON Pluck',
+    description: 'Read a value out of any object or JSON via dot-path (e.g. head.ref, items.0.name)',
+    icon: '🔍',
+    color: COLOR_DATA,
+    ports: [
+        { name: 'from', label: 'From', role: 'input', wire: true, type: 'any', required: true, helpText: 'Wire any object, payload, or JSON output' },
+        { name: 'path', label: 'Path', role: 'input', wire: true, config: true, control: 'text', type: 'string', required: true, placeholder: 'pull_request.head.ref' },
+        { name: 'value', label: 'Value', role: 'output', wire: true, type: 'any' },
+        { name: 'valueText', label: 'Value (as text)', role: 'output', wire: true, type: 'string' },
+        { name: 'exists', label: 'Exists?', role: 'output', wire: true, type: 'boolean' },
+    ],
+    execute: async (inputs) => {
+        const from = inputs.from;
+        const path = typeof inputs.path === 'string' ? inputs.path : '';
+        const value = pluckPath(from, path);
+        return {
+            value,
+            valueText: asString(value),
+            exists: value !== undefined && value !== null,
+        };
+    },
+};
+
+/** Coerce GitHub label objects (or strings) into a plain `["bug", …]` list. */
+function normalizeLabels(raw: unknown): string[] {
+    if (!Array.isArray(raw)) return [];
+    const out: string[] = [];
+    for (const item of raw) {
+        if (typeof item === 'string') out.push(item);
+        else if (item && typeof item === 'object' && typeof (item as { name?: unknown }).name === 'string') {
+            out.push((item as { name: string }).name);
+        }
+    }
+    return out;
+}
+
+/** "github.com/owner/repo/pull/123" or {full_name:"owner/repo"} → "owner/repo". */
+function deriveRepoFromPr(pr: Record<string, unknown>): string {
+    const base = pr.base as Record<string, unknown> | undefined;
+    const baseRepo = base?.repo as Record<string, unknown> | undefined;
+    if (typeof baseRepo?.full_name === 'string') return baseRepo.full_name;
+    const url = typeof pr.html_url === 'string' ? pr.html_url : '';
+    const m = url.match(/github\.com\/([^/]+\/[^/]+)\//);
+    return m ? m[1] : '';
+}
+
+const prFieldsNode: NodeDefinition = {
+    type: 'data.pr-fields',
+    category: 'action',
+    group: 'Data',
+    title: 'Decompose Pull Request',
+    description: 'Split a PR object into its scalar fields so action nodes can wire to them',
+    icon: '🧩',
+    color: COLOR_DATA,
+    ports: [
+        { name: 'pr', label: 'Pull Request', role: 'input', wire: true, type: 'pr', required: true },
+        { name: 'number', label: 'Number', role: 'output', wire: true, type: 'number' },
+        { name: 'repo', label: 'Repository', role: 'output', wire: true, type: 'string' },
+        { name: 'branch', label: 'Head Branch', role: 'output', wire: true, type: 'string' },
+        { name: 'baseBranch', label: 'Base Branch', role: 'output', wire: true, type: 'string' },
+        { name: 'headSha', label: 'Head SHA', role: 'output', wire: true, type: 'string' },
+        { name: 'baseSha', label: 'Base SHA', role: 'output', wire: true, type: 'string' },
+        { name: 'author', label: 'Author', role: 'output', wire: true, type: 'string' },
+        { name: 'title', label: 'Title', role: 'output', wire: true, type: 'string' },
+        { name: 'body', label: 'Body', role: 'output', wire: true, type: 'string' },
+        { name: 'state', label: 'State', role: 'output', wire: true, type: 'string' },
+        { name: 'draft', label: 'Draft?', role: 'output', wire: true, type: 'boolean' },
+        { name: 'url', label: 'URL', role: 'output', wire: true, type: 'string' },
+        { name: 'labels', label: 'Labels', role: 'output', wire: true, type: 'json' },
+    ],
+    execute: async (inputs) => {
+        const pr = (inputs.pr ?? {}) as Record<string, unknown>;
+        const head = (pr.head as Record<string, unknown>) ?? {};
+        const base = (pr.base as Record<string, unknown>) ?? {};
+        const user = (pr.user as Record<string, unknown>) ?? {};
+        return {
+            number: typeof pr.number === 'number' ? pr.number : undefined,
+            repo: deriveRepoFromPr(pr),
+            branch: typeof head.ref === 'string' ? head.ref : '',
+            baseBranch: typeof base.ref === 'string' ? base.ref : '',
+            headSha: typeof head.sha === 'string' ? head.sha : '',
+            baseSha: typeof base.sha === 'string' ? base.sha : '',
+            author: typeof user.login === 'string' ? user.login : '',
+            title: typeof pr.title === 'string' ? pr.title : '',
+            body: typeof pr.body === 'string' ? pr.body : '',
+            state: typeof pr.state === 'string' ? pr.state : '',
+            draft: pr.draft === true,
+            url: typeof pr.html_url === 'string' ? pr.html_url : '',
+            labels: normalizeLabels(pr.labels),
+        };
+    },
+};
+
+const issueFieldsNode: NodeDefinition = {
+    type: 'data.issue-fields',
+    category: 'action',
+    group: 'Data',
+    title: 'Decompose Issue',
+    description: 'Split an Issue object into its scalar fields',
+    icon: '🧩',
+    color: COLOR_DATA,
+    ports: [
+        { name: 'issue', label: 'Issue', role: 'input', wire: true, type: 'issue', required: true },
+        { name: 'number', label: 'Number', role: 'output', wire: true, type: 'number' },
+        { name: 'repo', label: 'Repository', role: 'output', wire: true, type: 'string' },
+        { name: 'author', label: 'Author', role: 'output', wire: true, type: 'string' },
+        { name: 'title', label: 'Title', role: 'output', wire: true, type: 'string' },
+        { name: 'body', label: 'Body', role: 'output', wire: true, type: 'string' },
+        { name: 'state', label: 'State', role: 'output', wire: true, type: 'string' },
+        { name: 'url', label: 'URL', role: 'output', wire: true, type: 'string' },
+        { name: 'labels', label: 'Labels', role: 'output', wire: true, type: 'json' },
+    ],
+    execute: async (inputs) => {
+        const issue = (inputs.issue ?? {}) as Record<string, unknown>;
+        const user = (issue.user as Record<string, unknown>) ?? {};
+        const url = typeof issue.html_url === 'string' ? issue.html_url : '';
+        const repoMatch = url.match(/github\.com\/([^/]+\/[^/]+)\//);
+        return {
+            number: typeof issue.number === 'number' ? issue.number : undefined,
+            repo: repoMatch ? repoMatch[1] : '',
+            author: typeof user.login === 'string' ? user.login : '',
+            title: typeof issue.title === 'string' ? issue.title : '',
+            body: typeof issue.body === 'string' ? issue.body : '',
+            state: typeof issue.state === 'string' ? issue.state : '',
+            url,
+            labels: normalizeLabels(issue.labels),
+        };
+    },
+};
+
+const reviewFieldsNode: NodeDefinition = {
+    type: 'data.review-fields',
+    category: 'action',
+    group: 'Data',
+    title: 'Decompose Structured Review',
+    description: 'Read summary, issue list, and counts out of an AI Code Review result',
+    icon: '🧩',
+    color: COLOR_DATA,
+    ports: [
+        { name: 'review', label: 'Structured Review', role: 'input', wire: true, type: 'review', required: true },
+        { name: 'summary', label: 'Summary', role: 'output', wire: true, type: 'string' },
+        { name: 'issues', label: 'Issues', role: 'output', wire: true, type: 'json' },
+        { name: 'mergeReady', label: 'Merge Ready?', role: 'output', wire: true, type: 'boolean' },
+        { name: 'blockingCount', label: 'Blocking Count', role: 'output', wire: true, type: 'number' },
+        { name: 'nonBlockingCount', label: 'Non-Blocking Count', role: 'output', wire: true, type: 'number' },
+        { name: 'totalCount', label: 'Total Issues', role: 'output', wire: true, type: 'number' },
+    ],
+    execute: async (inputs) => {
+        const r = (inputs.review ?? {}) as Record<string, unknown>;
+        const issues = Array.isArray(r.issues) ? r.issues : [];
+        const blocking = issues.filter((i) => {
+            if (!i || typeof i !== 'object') return false;
+            const p = (i as { priority?: unknown }).priority;
+            // P0/P1 are typically blocking; everything else isn't.
+            return p === 'P0' || p === 'P1';
+        });
+        return {
+            summary: typeof r.summary === 'string' ? r.summary : '',
+            issues,
+            mergeReady: r.mergeReady === true,
+            blockingCount: blocking.length,
+            nonBlockingCount: issues.length - blocking.length,
+            totalCount: issues.length,
+        };
+    },
+};
+
+const commitsFieldsNode: NodeDefinition = {
+    type: 'data.commits-fields',
+    category: 'action',
+    group: 'Data',
+    title: 'Decompose Commits',
+    description: 'Read latest SHA, count, and message list out of a push event\'s commits',
+    icon: '🧩',
+    color: COLOR_DATA,
+    ports: [
+        { name: 'commits', label: 'Commits', role: 'input', wire: true, type: 'commits', required: true },
+        { name: 'count', label: 'Count', role: 'output', wire: true, type: 'number' },
+        { name: 'latestSha', label: 'Latest SHA', role: 'output', wire: true, type: 'string' },
+        { name: 'latestMessage', label: 'Latest Message', role: 'output', wire: true, type: 'string' },
+        { name: 'latestAuthor', label: 'Latest Author', role: 'output', wire: true, type: 'string' },
+        { name: 'messages', label: 'All Messages', role: 'output', wire: true, type: 'json' },
+        { name: 'shas', label: 'All SHAs', role: 'output', wire: true, type: 'json' },
+    ],
+    execute: async (inputs) => {
+        const list = Array.isArray(inputs.commits) ? inputs.commits as Array<Record<string, unknown>> : [];
+        const latest = list.length > 0 ? list[list.length - 1] : undefined;
+        const author = latest?.author as Record<string, unknown> | undefined;
+        return {
+            count: list.length,
+            latestSha: typeof latest?.id === 'string'
+                ? latest.id
+                : (typeof latest?.sha === 'string' ? latest.sha : ''),
+            latestMessage: typeof latest?.message === 'string' ? latest.message : '',
+            latestAuthor: typeof author?.username === 'string'
+                ? author.username
+                : (typeof author?.name === 'string' ? author.name : ''),
+            messages: list.map((c) => (typeof c.message === 'string' ? c.message : '')),
+            shas: list.map((c) => (typeof c.id === 'string' ? c.id : (typeof c.sha === 'string' ? c.sha : ''))),
+        };
+    },
+};
+
+const eventFieldsNode: NodeDefinition = {
+    type: 'data.event-fields',
+    category: 'action',
+    group: 'Data',
+    title: 'Decompose Event',
+    description: 'Split the canonical event envelope into source/eventName/payload/metadata',
+    icon: '🧩',
+    color: COLOR_DATA,
+    ports: [
+        { name: 'event', label: 'Event', role: 'input', wire: true, type: 'event', required: true },
+        { name: 'source', label: 'Source', role: 'output', wire: true, type: 'string' },
+        { name: 'eventName', label: 'Event Name', role: 'output', wire: true, type: 'string' },
+        { name: 'timestamp', label: 'Timestamp', role: 'output', wire: true, type: 'string' },
+        { name: 'payload', label: 'Payload', role: 'output', wire: true, type: 'json' },
+        { name: 'metadata', label: 'Metadata', role: 'output', wire: true, type: 'json' },
+    ],
+    execute: async (inputs) => {
+        const e = (inputs.event ?? {}) as Record<string, unknown>;
+        return {
+            source: typeof e.source === 'string' ? e.source : '',
+            eventName: typeof e.event === 'string' ? e.event : '',
+            timestamp: typeof e.timestamp === 'string' ? e.timestamp : '',
+            payload: e.payload ?? {},
+            metadata: e.metadata ?? {},
+        };
+    },
+};
+
+const templateNode: NodeDefinition = {
+    type: 'data.template',
+    category: 'action',
+    group: 'Data',
+    title: 'Format String',
+    description: 'Compose a string with {{nodes.x.y}} placeholders — interpolation happens at runtime',
+    icon: '✏️',
+    color: COLOR_DATA,
+    ports: [
+        // The template body is interpolated by the engine before reaching
+        // execute(), so we can just hand the result through. Showing this
+        // as its own node makes the composition visible on the canvas
+        // instead of hiding inside another node's body field.
+        { name: 'template', label: 'Template', role: 'input', wire: true, config: true, control: 'textarea', type: 'string', required: true, placeholder: 'PR #{{nodes.fields.number}} by {{nodes.fields.author}}' },
+        { name: 'text', label: 'Text', role: 'output', wire: true, type: 'string' },
+    ],
+    execute: async (inputs) => ({ text: typeof inputs.template === 'string' ? inputs.template : asString(inputs.template) }),
+};
+
 // ─── Registration entrypoint ────────────────────────────────────────────────
 
 const ALL_BUILTINS: NodeDefinition[] = [
@@ -671,6 +967,10 @@ const ALL_BUILTINS: NodeDefinition[] = [
     logNode, webhookNode,
     // Flow
     ifNode, setNode, mergeNode,
+    // Data
+    jsonPluckNode,
+    prFieldsNode, issueFieldsNode, reviewFieldsNode, commitsFieldsNode, eventFieldsNode,
+    templateNode,
 ];
 
 export function registerBuiltinNodes(registry: NodeRegistry): void {
