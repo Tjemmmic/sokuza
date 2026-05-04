@@ -4,7 +4,14 @@ import { resolveRepoTarget, requireToken } from './_target.js';
 
 const DEFAULT_TIMEOUT_S = 600; // 10 min — long enough for typical CI
 const DEFAULT_INTERVAL_S = 15;
+const MIN_INTERVAL_S = 1;          // guard against tight loops hammering the API
+const MAX_INTERVAL_S = 600;        // 10 min — anything coarser is a misconfig, not a feature
 const MAX_TIMEOUT_S = 6 * 60 * 60; // 6h hard ceiling so a typo can't run forever
+// Default 15s interval × 6h ceiling = 1440 polls × 2 HTTP requests = 2880
+// req/invocation. GitHub's authenticated quota is 5000/h, so a single
+// long-running action can still consume the full org budget. The interval
+// floor keeps misconfigs from making this worse; the parallelised polls
+// halve wall-clock time for large CI matrices.
 
 const FAILED_CONCLUSIONS = new Set(['failure', 'timed_out', 'cancelled', 'action_required', 'stale']);
 
@@ -33,7 +40,10 @@ export const githubWaitForChecksAction: ActionHandler = async (params, context) 
     }
 
     const timeoutSec = clampPositive(params.timeout, DEFAULT_TIMEOUT_S, MAX_TIMEOUT_S, 'timeout');
-    const intervalSec = clampPositive(params.interval, DEFAULT_INTERVAL_S, MAX_TIMEOUT_S, 'interval');
+    const intervalSec = clampPositive(params.interval, DEFAULT_INTERVAL_S, MAX_INTERVAL_S, 'interval', MIN_INTERVAL_S);
+    if (intervalSec > timeoutSec) {
+        throw new Error(`github-wait-for-checks: interval (${intervalSec}s) cannot exceed timeout (${timeoutSec}s)`);
+    }
     const client = new GitHubApiClient(token);
 
     const deadline = Date.now() + timeoutSec * 1000;
@@ -86,9 +96,14 @@ interface CheckSnapshot {
     state: string;
 }
 
-/** Single read of check-runs + combined-status for one SHA, normalised. */
+/** Single read of check-runs + combined-status for one SHA, normalised.
+ *  Issues both API calls in parallel — they're independent and each round-
+ *  trip dominates pollOnce wall-time. */
 async function pollOnce(client: GitHubApiClient, owner: string, repo: string, sha: string): Promise<CheckSnapshot> {
-    const runs = await client.getCheckRuns(owner, repo, sha);
+    const [runs, combined] = await Promise.all([
+        client.getCheckRuns(owner, repo, sha),
+        client.getCombinedStatus(owner, repo, sha),
+    ]);
     const failed: string[] = [];
     let pending = 0;
     for (const run of runs) {
@@ -105,7 +120,6 @@ async function pollOnce(client: GitHubApiClient, owner: string, repo: string, sh
     // Legacy combined-status. The `statuses[]` array can carry stale
     // older postings for the same context — dedupe by context, keeping
     // the most recent updated_at, before tallying.
-    const combined = await client.getCombinedStatus(owner, repo, sha);
     const state = String((combined as { state?: unknown }).state ?? '');
     const rawStatuses = Array.isArray((combined as { statuses?: unknown }).statuses)
         ? (combined as { statuses: Array<Record<string, unknown>> }).statuses
@@ -142,12 +156,14 @@ function resolveSha(params: Parameters<ActionHandler>[0], context: ActionContext
 }
 
 /** Coerce + range-check a positive-number param, falling back to a default
- *  when the user supplied no value or a value we can't trust (NaN/0/negative). */
+ *  when the user supplied no value. Throws on NaN/non-finite/below-min;
+ *  silently clamps an over-max input down to max so a paste-typo (e.g.
+ *  "60000" instead of "600") doesn't lock up an invocation forever. */
 function clampPositive(raw: unknown, fallback: number, max: number, name: string, min = 0.001): number {
     if (raw === undefined || raw === null || raw === '') return fallback;
     const n = typeof raw === 'number' ? raw : Number(raw);
     if (!Number.isFinite(n) || n < min) {
-        throw new Error(`github-wait-for-checks: ${name} must be a positive number (got ${String(raw)})`);
+        throw new Error(`github-wait-for-checks: ${name} must be a positive number >= ${min} (got ${String(raw)})`);
     }
     return Math.min(n, max);
 }

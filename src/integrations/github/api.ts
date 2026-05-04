@@ -407,16 +407,19 @@ export class GitHubApiClient {
         return (await res.json()) as Record<string, unknown>;
     }
 
-    /** Fetch all check runs for a commit SHA, paginating through all results. */
+    /** Fetch check runs for a commit SHA, paginating up to maxPages.
+     *  The default cap (5 pages × 100 per page = 500 runs) is comfortably
+     *  above any realistic CI count and bounds rate-limit exposure when the
+     *  caller polls in a loop. */
     async getCheckRuns(
         owner: string,
         repo: string,
         sha: string,
+        maxPages = 5,
     ): Promise<Array<Record<string, unknown>>> {
         const all: Array<Record<string, unknown>> = [];
-        let page = 1;
         const perPage = 100;
-        while (true) {
+        for (let page = 1; page <= maxPages; page++) {
             const url = `${this.baseUrl}/repos/${owner}/${repo}/commits/${sha}/check-runs?page=${page}&per_page=${perPage}`;
             const res = await fetchWithTimeout(url, { headers: this.headers() });
             if (!res.ok) {
@@ -428,7 +431,6 @@ export class GitHubApiClient {
             const runs = json.check_runs ?? [];
             all.push(...runs);
             if (runs.length < perPage) break;
-            page++;
         }
         return all;
     }

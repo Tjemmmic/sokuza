@@ -40,6 +40,22 @@ describe('GitHubApiClient — error body truncation (L2)', () => {
     });
 });
 
+describe('GitHubApiClient — getCheckRuns pagination cap (M8)', () => {
+    it('stops paginating at maxPages even when GitHub keeps returning full pages', async () => {
+        let calls = 0;
+        vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+            calls++;
+            // Always return a full page (100) so the natural break never fires.
+            const runs = Array.from({ length: 100 }, (_, i) => ({ name: `run-${calls}-${i}`, status: 'completed', conclusion: 'success' }));
+            return new Response(JSON.stringify({ check_runs: runs, total_count: 1000 }), { status: 200 });
+        });
+        const client = new GitHubApiClient('tok');
+        const runs = await client.getCheckRuns('o', 'r', 'sha', 3);
+        expect(calls).toBe(3); // capped at maxPages, not infinite
+        expect(runs.length).toBe(300);
+    });
+});
+
 describe('GitHubApiClient — 406 fallback (L1)', () => {
     it('falls back to per-file assembly on a real 406 (status check, not substring match)', async () => {
         let call = 0;

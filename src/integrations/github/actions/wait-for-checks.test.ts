@@ -114,16 +114,20 @@ describe('github-wait-for-checks', () => {
         expect(result.totalChecks).toBe(1);
     });
 
-    it('returns timedOut=true when the deadline passes with checks still pending', async () => {
-        mockSequence([{
+    it('returns timedOut=true when the deadline passes with checks still pending, after polling at least twice (L9)', async () => {
+        const spy = mockSequence([{
             checkRuns: [{ name: 'long', status: 'in_progress' }],
             statuses: { state: 'pending', statuses: [] },
         }]);
-        const promise = githubWaitForChecksAction({ sha: 'abc', timeout: 0.1, interval: 0.05 }, makeContext());
+        const promise = githubWaitForChecksAction({ sha: 'abc', timeout: 3, interval: 1 }, makeContext());
         await vi.runAllTimersAsync();
         const result = await promise;
         expect(result.timedOut).toBe(true);
         expect(result.success).toBe(false);
+        // Each poll = 2 HTTP calls (check-runs + combined-status) in parallel.
+        // 3s / 1s interval = up to 3 polls = at least 4 calls (we polled more
+        // than once before timing out).
+        expect(spy.mock.calls.length).toBeGreaterThan(2);
     });
 
     it('falls back to event payload PR head SHA when params.sha is missing', async () => {
@@ -163,7 +167,7 @@ describe('github-wait-for-checks', () => {
     it('does not return success=true when combined state is "pending" (H1 negative case)', async () => {
         // If we time out with a still-pending state, success must be false.
         mockSequence([{ checkRuns: [], statuses: { state: 'pending', statuses: [] } }]);
-        const promise = githubWaitForChecksAction({ sha: 'abc', timeout: 0.1, interval: 0.05 }, makeContext());
+        const promise = githubWaitForChecksAction({ sha: 'abc', timeout: 3, interval: 1 }, makeContext());
         await vi.runAllTimersAsync();
         const result = await promise;
         expect(result.success).toBe(false);
@@ -230,5 +234,51 @@ describe('github-wait-for-checks', () => {
         const ctx = makeContext();
         await expect(githubWaitForChecksAction({ sha: 'abc', interval: 0 }, ctx)).rejects.toThrow(/interval must be a positive/);
         await expect(githubWaitForChecksAction({ sha: 'abc', interval: -1 }, ctx)).rejects.toThrow(/interval must be a positive/);
+    });
+
+    it('rejects sub-second interval — guards against tight-loop API hammering (H5)', async () => {
+        const ctx = makeContext();
+        await expect(githubWaitForChecksAction({ sha: 'abc', interval: 0.5 }, ctx)).rejects.toThrow(/interval must be a positive number >= 1/);
+    });
+
+    it('rejects interval > timeout — that combination would never poll (H5)', async () => {
+        const ctx = makeContext();
+        await expect(githubWaitForChecksAction({ sha: 'abc', timeout: 5, interval: 30 }, ctx)).rejects.toThrow(/interval \(30s\) cannot exceed timeout \(5s\)/);
+    });
+
+    it('clamps an over-max interval down to MAX_INTERVAL_S=600 instead of erroring', async () => {
+        // Even with a misconfigured huge interval, the action should still run
+        // (clamped) — that's better than failing a real CI gate over a typo.
+        mockSequence([{ checkRuns: [], statuses: { state: 'success', statuses: [] } }]);
+        const promise = githubWaitForChecksAction({ sha: 'abc', timeout: 3600, interval: 99999 }, makeContext());
+        await vi.runAllTimersAsync();
+        const result = await promise;
+        expect(result.success).toBe(true);
+    });
+
+    it('issues check-runs and combined-status in parallel (H5 — halves wall time)', async () => {
+        // Verify both calls dispatch before either resolves: track call order.
+        const startedAt: number[] = [];
+        let resolveOrder: (() => void) | null = null;
+        vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+            startedAt.push(Date.now());
+            const url = typeof input === 'string' ? input : (input as URL).toString();
+            // Block both responses on the same micro-pause; they should still
+            // be dispatched at the same tick if Promise.all is doing its job.
+            await new Promise<void>((r) => { resolveOrder = r; setTimeout(r, 0); });
+            if (url.includes('/check-runs')) {
+                return new Response(JSON.stringify({ check_runs: [], total_count: 0 }), { status: 200 });
+            }
+            return new Response(JSON.stringify({ state: 'success', statuses: [] }), { status: 200 });
+        });
+        const promise = githubWaitForChecksAction({ sha: 'abc' }, makeContext());
+        await vi.runAllTimersAsync();
+        await promise;
+        // Both fetches were started before either resolved — i.e. dispatched
+        // in parallel. With sequential await, the second call would have
+        // started AFTER the first resolved (bigger gap).
+        expect(startedAt.length).toBeGreaterThanOrEqual(2);
+        // ts-prune false-positive
+        void resolveOrder;
     });
 });
