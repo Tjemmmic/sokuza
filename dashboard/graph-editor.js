@@ -38,24 +38,187 @@ window.openGraphEditor = async function (workflowName) {
     ge.wiringFrom = null;
 
     try {
-        const [defsRes, wfRes] = await Promise.all([
-            api.get('/api/nodes'),
-            isNew ? Promise.resolve(null) : api.get(`/api/workflows/${encodeURIComponent(workflowName)}/details`),
-        ]);
+        // Load node defs first so the recipe modal (and downstream editor)
+        // both have the registry available.
+        const defsRes = await api.get('/api/nodes');
         ge.nodeDefsList = defsRes.nodes || [];
         ge.nodeDefsByType = Object.fromEntries(ge.nodeDefsList.map((d) => [d.type, d]));
 
         if (isNew) {
-            ge.workflow = blankWorkflow();
-        } else {
-            const wf = wfRes.workflow;
-            ge.workflow = ensureGraphShape(wf);
+            // Show the recipe picker first — far less intimidating than
+            // dropping the user on an empty canvas. They can still click
+            // "Blank canvas" to skip.
+            return openRecipePicker();
         }
 
+        const wfRes = await api.get(`/api/workflows/${encodeURIComponent(workflowName)}/details`);
+        ge.workflow = ensureGraphShape(wfRes.workflow);
         renderEditor();
     } catch (err) {
         toast(`Failed to open editor: ${err.message}`, 'error');
     }
+};
+
+// ─── Recipes ──────────────────────────────────────────────────────────────
+//
+// Pre-wired starter graphs the user can spawn instead of staring at an
+// empty canvas. Each recipe is a workflow shape (the same JSON we save).
+// The point is to make the "happy path" workflows — review on PR open,
+// auto-fix loop, manual review on demand — discoverable in one click.
+
+const RECIPES = [
+    {
+        id: 'manual-pr-review',
+        title: 'Manual PR Review',
+        icon: '🎮',
+        tagline: 'Pick a PR from the dashboard and run an AI review on it',
+        bullets: ['1 manual input (the PR)', 'Fetch its diff', 'AI Code Review', 'Post the review as a PR comment'],
+        build: () => ({
+            name: 'manual-pr-review',
+            description: 'Run an AI review on demand against any PR',
+            enabled: true,
+            graph: {
+                nodes: [
+                    { id: 'trigger', type: 'trigger.manual', position: { x: 60, y: 160 },
+                      config: { inputs: [{ name: 'pr', label: 'Pull Request', type: 'github-pr', required: true }] } },
+                    { id: 'fetch_diff', type: 'github.fetch-diff', position: { x: 380, y: 160 },
+                      config: {} },
+                    { id: 'review', type: 'ai.review', position: { x: 720, y: 160 }, config: {} },
+                    { id: 'post', type: 'github.comment', position: { x: 1060, y: 160 },
+                      config: { body: '{{nodes.review.markdown}}' } },
+                ],
+                edges: [
+                    { id: 'e1', from: { node: 'trigger', port: 'pr' }, to: { node: 'fetch_diff', port: 'pr_number' } },
+                    { id: 'e2', from: { node: 'fetch_diff', port: 'diff' }, to: { node: 'review', port: 'diff' } },
+                    { id: 'e3', from: { node: 'trigger', port: 'pr' }, to: { node: 'review', port: 'pr_number' } },
+                    { id: 'e4', from: { node: 'trigger', port: 'pr' }, to: { node: 'post', port: 'pr_number' } },
+                ],
+            },
+        }),
+    },
+    {
+        id: 'auto-pr-review',
+        title: 'Auto PR Review',
+        icon: '⚡',
+        tagline: 'Review every new PR automatically when it opens',
+        bullets: ['GitHub trigger on pull_request.opened', 'Fetch diff', 'AI Code Review', 'Post comment'],
+        build: () => ({
+            name: 'auto-pr-review',
+            description: 'AI review on every new PR',
+            enabled: true,
+            graph: {
+                nodes: [
+                    { id: 'trigger', type: 'trigger.github', position: { x: 60, y: 160 },
+                      config: { events: ['pull_request.opened'] } },
+                    { id: 'fetch_diff', type: 'github.fetch-diff', position: { x: 380, y: 160 }, config: {} },
+                    { id: 'review', type: 'ai.review', position: { x: 720, y: 160 }, config: {} },
+                    { id: 'post', type: 'github.comment', position: { x: 1060, y: 160 },
+                      config: { body: '{{nodes.review.markdown}}' } },
+                ],
+                edges: [
+                    { id: 'e1', from: { node: 'trigger', port: 'prNumber' }, to: { node: 'fetch_diff', port: 'pr_number' } },
+                    { id: 'e2', from: { node: 'trigger', port: 'repo' }, to: { node: 'fetch_diff', port: 'repo' } },
+                    { id: 'e3', from: { node: 'fetch_diff', port: 'diff' }, to: { node: 'review', port: 'diff' } },
+                    { id: 'e4', from: { node: 'trigger', port: 'prNumber' }, to: { node: 'review', port: 'pr_number' } },
+                    { id: 'e5', from: { node: 'trigger', port: 'repo' }, to: { node: 'review', port: 'repo' } },
+                    { id: 'e6', from: { node: 'trigger', port: 'prNumber' }, to: { node: 'post', port: 'pr_number' } },
+                    { id: 'e7', from: { node: 'trigger', port: 'repo' }, to: { node: 'post', port: 'repo' } },
+                ],
+            },
+        }),
+    },
+    {
+        id: 'auto-fix-loop',
+        title: 'Auto-Fix Loop',
+        icon: '🩹',
+        tagline: 'AI review → posted Review → address-review picks it up',
+        bullets: ['Review every new PR as a real GitHub Review', 'Auto-fix workflow consumes the review', 'Suggest or push fixes'],
+        build: () => ({
+            name: 'auto-fix-pr-review',
+            description: 'Auto review + auto fix loop',
+            enabled: true,
+            graph: {
+                nodes: [
+                    { id: 'trigger', type: 'trigger.github', position: { x: 60, y: 160 },
+                      config: { events: ['pull_request.opened', 'pull_request.synchronize'] } },
+                    { id: 'fetch_diff', type: 'github.fetch-diff', position: { x: 380, y: 160 }, config: {} },
+                    { id: 'review', type: 'ai.review', position: { x: 720, y: 160 }, config: {} },
+                    { id: 'post', type: 'github.create-review', position: { x: 1060, y: 160 },
+                      config: { body: '{{nodes.review.markdown}}\n\n<!-- sokuza:run-id={{nodes.review.runId}} -->', event: 'COMMENT' } },
+                ],
+                edges: [
+                    { id: 'e1', from: { node: 'trigger', port: 'prNumber' }, to: { node: 'fetch_diff', port: 'pr_number' } },
+                    { id: 'e2', from: { node: 'trigger', port: 'repo' }, to: { node: 'fetch_diff', port: 'repo' } },
+                    { id: 'e3', from: { node: 'fetch_diff', port: 'diff' }, to: { node: 'review', port: 'diff' } },
+                    { id: 'e4', from: { node: 'trigger', port: 'prNumber' }, to: { node: 'review', port: 'pr_number' } },
+                    { id: 'e5', from: { node: 'trigger', port: 'repo' }, to: { node: 'review', port: 'repo' } },
+                    { id: 'e6', from: { node: 'trigger', port: 'prNumber' }, to: { node: 'post', port: 'pr_number' } },
+                    { id: 'e7', from: { node: 'trigger', port: 'repo' }, to: { node: 'post', port: 'repo' } },
+                ],
+            },
+        }),
+    },
+    {
+        id: 'log-events',
+        title: 'Log Events',
+        icon: '📝',
+        tagline: 'A no-op workflow that just logs every event — handy for debugging triggers',
+        bullets: ['GitHub trigger on any event', 'Log message with source/event'],
+        build: () => ({
+            name: 'log-events',
+            description: 'Trigger debug logger',
+            enabled: true,
+            graph: {
+                nodes: [
+                    { id: 'trigger', type: 'trigger.github', position: { x: 60, y: 160 }, config: {} },
+                    { id: 'log', type: 'utility.log', position: { x: 420, y: 160 },
+                      config: { message: 'event {{event.source}}.{{event.event}}', level: 'info' } },
+                ],
+                edges: [
+                    { id: 'e1', from: { node: 'trigger', port: 'event' }, to: { node: 'log', port: 'message' } },
+                ],
+            },
+        }),
+    },
+];
+
+function openRecipePicker() {
+    const el = $('#content');
+    el.innerHTML = `
+        <div class="ge-recipe-page">
+            <div class="ge-recipe-header">
+                <button class="btn btn-ghost btn-sm" onclick="closeGraphEditor()">← Workflows</button>
+                <h1>How do you want to start?</h1>
+                <p>Pick a starter graph — every wire is pre-built. You can rename, edit, and add nodes from there.</p>
+            </div>
+            <div class="ge-recipe-grid">
+                ${RECIPES.map((r) => `
+                    <div class="ge-recipe-card" onclick="pickRecipe('${esc(r.id)}')">
+                        <div class="ge-recipe-icon">${esc(r.icon)}</div>
+                        <h3>${esc(r.title)}</h3>
+                        <p>${esc(r.tagline)}</p>
+                        <ul>${r.bullets.map((b) => `<li>${esc(b)}</li>`).join('')}</ul>
+                    </div>
+                `).join('')}
+                <div class="ge-recipe-card ge-recipe-blank" onclick="pickRecipe('__blank')">
+                    <div class="ge-recipe-icon">📄</div>
+                    <h3>Blank canvas</h3>
+                    <p>Start from an empty graph with just a manual trigger.</p>
+                </div>
+            </div>
+        </div>
+    `;
+}
+
+window.pickRecipe = function (id) {
+    if (id === '__blank') {
+        ge.workflow = blankWorkflow();
+    } else {
+        const r = RECIPES.find((x) => x.id === id);
+        if (!r) return;
+        ge.workflow = r.build();
+    }
+    renderEditor();
 };
 
 function blankWorkflow() {
@@ -337,42 +500,155 @@ function renderNodeCard(node) {
             <div class="ge-node-body">Node type not registered. Delete or replace.</div>
         </div>`;
     }
-    const inputs = def.ports.filter((p) => p.role === 'input' && p.wire);
-    const outputs = def.ports.filter((p) => p.role === 'output' && p.wire);
+
+    // Wire-able ports the user can hook things into. Inputs are static;
+    // outputs may include config-driven additions (manual trigger inputs,
+    // github-event-derived fields).
+    const inputs = wireInputPorts(def);
+    const outputs = wireOutputPorts(def, node);
+
     const selected = ge.selectedNodeId === node.id ? ' selected' : '';
+    const wiring = ge.wiringFrom ? ' wiring' : '';
     const color = def.color || 'var(--accent)';
     const x = node.position?.x ?? 0;
     const y = node.position?.y ?? 0;
+    const titleAttr = `${def.title} — ${def.description}`;
 
-    return `<div class="ge-node ge-node-${esc(def.category)}${selected}" data-id="${esc(node.id)}"
+    return `<div class="ge-node ge-node-${esc(def.category)}${selected}${wiring}" data-id="${esc(node.id)}"
             style="left:${x}px;top:${y}px;--node-color:${esc(color)}"
             onmousedown="onNodeMouseDown(event, '${esc(node.id)}')"
             onclick="selectNode('${esc(node.id)}')">
-        <div class="ge-node-header" title="${esc(def.description)}">
+        <div class="ge-node-header" title="${esc(titleAttr)}">
             <span class="ge-node-icon">${esc(def.icon)}</span>
-            <span class="ge-node-title">${esc(def.title)}</span>
-            <span class="ge-node-id">${esc(node.id)}</span>
+            <div class="ge-node-title-wrap">
+                <div class="ge-node-title">${esc(def.title)}</div>
+                <div class="ge-node-id">${esc(node.id)}</div>
+            </div>
         </div>
         <div class="ge-node-body">
             <div class="ge-ports ge-ports-in">
-                ${inputs.map((p) => portHandle(node.id, p, 'input')).join('')}
+                ${inputs.map((p) => portHandle(node, p, 'input')).join('')}
             </div>
             <div class="ge-ports ge-ports-out">
-                ${outputs.map((p) => portHandle(node.id, p, 'output')).join('')}
+                ${outputs.map((p) => portHandle(node, p, 'output')).join('')}
             </div>
         </div>
     </div>`;
 }
 
-function portHandle(nodeId, port, side) {
+/** Wire-able input ports: declared inputs that the user wires data into. */
+function wireInputPorts(def) {
+    return def.ports.filter((p) => p.role === 'input' && p.wire);
+}
+
+/** Wire-able output ports, including config-driven dynamic ones. */
+function wireOutputPorts(def, node) {
+    const out = def.ports.filter((p) => p.role === 'output' && p.wire !== false);
+    if (!def.dynamicOutputs) return out;
+    const seen = new Set(out.map((p) => p.name));
+    for (const spec of def.dynamicOutputs) {
+        if (spec.kind === 'per-input') {
+            const list = node.config?.[spec.inputsConfigKey];
+            if (!Array.isArray(list)) continue;
+            for (const item of list) {
+                if (!item || !item.name || seen.has(item.name)) continue;
+                seen.add(item.name);
+                out.push({
+                    name: item.name,
+                    label: item.label || item.name,
+                    role: 'output',
+                    wire: true,
+                    type: portTypeForInputType(item.type),
+                    helpText: `User-defined input: ${item.name}`,
+                });
+            }
+        } else if (spec.kind === 'event-conditional') {
+            const events = ensureArr(node.config?.[spec.eventsConfigKey]);
+            for (const rule of spec.rules) {
+                const matches = rule.whenEvents.some((we) => events.some((e) => eventGlobMatch(we, e)));
+                if (!matches) continue;
+                for (const p of rule.ports) {
+                    if (seen.has(p.name)) continue;
+                    seen.add(p.name);
+                    out.push(p);
+                }
+            }
+        }
+    }
+    return out;
+}
+
+function portTypeForInputType(t) {
+    return ({
+        'github-pr': 'pr',
+        'github-issue': 'issue',
+        number: 'number',
+        boolean: 'boolean',
+        'github-branch': 'string',
+        'github-repo': 'string',
+        text: 'string', textarea: 'string', select: 'string',
+    })[t] || 'string';
+}
+
+function eventGlobMatch(pattern, value) {
+    if (pattern === value) return true;
+    if (!pattern.includes('*')) return false;
+    const re = new RegExp('^' + pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*') + '$');
+    return re.test(value);
+}
+
+/** Render one port handle. Includes:
+ *   - required-indicator dot for inputs that have no wire and no config value
+ *   - "compatible" highlight when a wire-in-progress could plug in here
+ *   - type label so the user can see what shape of value flows through
+ */
+function portHandle(node, port, side) {
     const cls = side === 'input' ? 'ge-port ge-port-in' : 'ge-port ge-port-out';
-    return `<div class="${cls}" data-node="${esc(nodeId)}" data-port="${esc(port.name)}"
-        title="${esc(port.label)} (${esc(port.type || 'any')})${port.helpText ? ' — ' + esc(port.helpText) : ''}"
+    const portType = port.type || 'any';
+
+    const status = inputStatus(node, port, side);
+    const statusCls = ` ge-port-${status}`;
+
+    let compatibleCls = '';
+    if (ge.wiringFrom && side === 'input') {
+        const fromDef = ge.nodeDefsByType[
+            ge.workflow.graph.nodes.find((n) => n.id === ge.wiringFrom.nodeId)?.type
+        ];
+        const fromPort = fromDef && wireOutputPorts(fromDef, ge.workflow.graph.nodes.find((n) => n.id === ge.wiringFrom.nodeId))
+            .find((p) => p.name === ge.wiringFrom.port);
+        const compat = fromPort && portsCompatible(fromPort.type, port.type) && ge.wiringFrom.nodeId !== node.id;
+        compatibleCls = compat ? ' ge-port-compat' : ' ge-port-incompat';
+    }
+
+    const tip = `${port.label} · ${portType}${port.required ? ' · required' : ''}${port.helpText ? ' — ' + port.helpText : ''}`;
+    return `<div class="${cls}${statusCls}${compatibleCls}" data-node="${esc(node.id)}" data-port="${esc(port.name)}" data-type="${esc(portType)}"
+        title="${esc(tip)}"
         onmousedown="event.stopPropagation()"
-        onclick="onPortClick(event, '${esc(nodeId)}', '${esc(port.name)}', '${side}')">
+        onclick="onPortClick(event, '${esc(node.id)}', '${esc(port.name)}', '${side}')">
         <span class="ge-port-dot"></span>
-        <span class="ge-port-label">${esc(port.label)}</span>
+        <span class="ge-port-label">${esc(port.label)}${port.required && side === 'input' ? '<span class="ge-port-required">*</span>' : ''}</span>
+        <span class="ge-port-type">${esc(portType)}</span>
     </div>`;
+}
+
+/** "ok" if this port is wired or has a config value; "missing" if required
+ *  and absent; "neutral" otherwise. Used for the dot color. */
+function inputStatus(node, port, side) {
+    if (side !== 'input') return 'ok';
+    const wired = ge.workflow.graph.edges.some((e) => e.to.node === node.id && e.to.port === port.name);
+    const hasConfig = node.config && node.config[port.name] !== undefined && node.config[port.name] !== '';
+    if (wired || hasConfig) return 'ok';
+    return port.required ? 'missing' : 'neutral';
+}
+
+/** Two ports are compatible if either is `any`, both are equal, or one is
+ *  `string` (we accept stringification to/from anything textual). */
+function portsCompatible(a, b) {
+    if (!a || !b || a === 'any' || b === 'any') return true;
+    if (a === b) return true;
+    const stringy = new Set(['string', 'number', 'boolean']);
+    if (stringy.has(a) && stringy.has(b)) return true;
+    return false;
 }
 
 function drawEdges() {
@@ -471,6 +747,11 @@ function renderInspector() {
     }
 
     const configPorts = def.ports.filter((p) => p.role === 'input' && p.config);
+    const wireInputs = wireInputPorts(def);
+    const inputsNeedingHelp = wireInputs.filter((p) => inputStatus(node, p, 'input') === 'missing');
+    const wiredInputs = wireInputs.filter((p) =>
+        ge.workflow.graph.edges.some((e) => e.to.node === node.id && e.to.port === p.name),
+    );
 
     el.innerHTML = `
         <div class="ge-inspector-header" style="--node-color:${esc(def.color || 'var(--accent)')}">
@@ -490,8 +771,10 @@ function renderInspector() {
             </div>
             ${def.description ? `<p class="ge-inspector-desc">${esc(def.description)}</p>` : ''}
 
+            ${renderInputStatusSection(node, def, wireInputs, wiredInputs, inputsNeedingHelp)}
+
             ${configPorts.length === 0
-                ? '<div class="ge-inspector-section-h">No config — wire its inputs from upstream nodes.</div>'
+                ? ''
                 : `<div class="ge-inspector-section-h">Configuration</div>
                    <div class="ge-inspector-fields">
                         ${configPorts.map((p) => renderField(node, p)).join('')}
@@ -520,9 +803,9 @@ function renderInspector() {
                 </div>
             </div>
 
-            <div class="ge-inspector-section-h">Outputs (wire-able)</div>
+            <div class="ge-inspector-section-h">Outputs (wire from these)</div>
             <ul class="ge-port-list">
-                ${def.ports.filter((p) => p.role === 'output' && p.wire).map((p) => `
+                ${wireOutputPorts(def, node).map((p) => `
                     <li><code>{{nodes.${esc(node.id)}.${esc(p.name)}}}</code>
                         <span>${esc(p.label)} <small>(${esc(p.type || 'any')})</small></span></li>
                 `).join('') || '<li>No outputs</li>'}
@@ -530,6 +813,199 @@ function renderInspector() {
         </div>
     `;
 }
+
+/**
+ * The inspector's "Inputs" panel: explicitly enumerates every wire-able
+ * input, shows whether it's connected, and — for missing required ones —
+ * suggests where the value typically comes from with a one-click "add it"
+ * button. This is the answer to "if I want a PR review, how do I know
+ * where to get the diff/PR number from?"
+ */
+function renderInputStatusSection(node, def, wireInputs, wiredInputs, missing) {
+    if (wireInputs.length === 0) return '';
+    const total = wireInputs.length;
+    const ok = total - missing.length;
+    return `<div class="ge-inspector-section-h">
+        Inputs (${ok}/${total} connected)${missing.length ? ` <span style="color:var(--danger)">· ${missing.length} required missing</span>` : ''}
+    </div>
+    <div class="ge-input-status-list">
+        ${wireInputs.map((p) => renderInputStatusRow(node, def, p)).join('')}
+    </div>`;
+}
+
+function renderInputStatusRow(node, def, port) {
+    const wireEdge = ge.workflow.graph.edges.find((e) => e.to.node === node.id && e.to.port === port.name);
+    const hasConfig = node.config && node.config[port.name] !== undefined && node.config[port.name] !== '';
+    const status = inputStatus(node, port, 'input');
+    if (wireEdge) {
+        const fromLabel = `${wireEdge.from.node}.${wireEdge.from.port}`;
+        return `<div class="ge-input-row ge-input-ok">
+            <div class="ge-input-meta">
+                <strong>${esc(port.label)}</strong>
+                <span class="ge-input-type">${esc(port.type || 'any')}</span>
+                ${port.required ? '<span class="ge-input-req">required</span>' : ''}
+            </div>
+            <div class="ge-input-source">
+                🔌 wired from <code>${esc(fromLabel)}</code>
+                <button class="btn btn-ghost btn-sm" onclick="disconnectInput('${esc(node.id)}','${esc(port.name)}')">disconnect</button>
+            </div>
+        </div>`;
+    }
+    if (hasConfig) {
+        return `<div class="ge-input-row ge-input-ok">
+            <div class="ge-input-meta">
+                <strong>${esc(port.label)}</strong>
+                <span class="ge-input-type">${esc(port.type || 'any')}</span>
+                ${port.required ? '<span class="ge-input-req">required</span>' : ''}
+            </div>
+            <div class="ge-input-source">📝 set in config below</div>
+        </div>`;
+    }
+
+    const suggestions = suggestProvidersFor(port);
+    return `<div class="ge-input-row ge-input-${status}">
+        <div class="ge-input-meta">
+            <strong>${esc(port.label)}</strong>
+            <span class="ge-input-type">${esc(port.type || 'any')}</span>
+            ${port.required ? '<span class="ge-input-req">required</span>' : ''}
+        </div>
+        ${port.helpText ? `<div class="ge-input-help">${esc(port.helpText)}</div>` : ''}
+        <div class="ge-input-source ${status === 'missing' ? 'ge-input-source-warn' : ''}">
+            ${status === 'missing' ? '❌ Not connected' : '○ Optional — leave empty or wire it'}
+        </div>
+        ${suggestions.existing.length > 0 ? `<div class="ge-input-suggest">
+            <div class="ge-input-suggest-h">Wire from existing node</div>
+            ${suggestions.existing.map((s) => `
+                <button class="ge-suggest-btn" onclick="wireFromExisting('${esc(node.id)}','${esc(port.name)}','${esc(s.fromNode)}','${esc(s.fromPort)}')">
+                    🔗 <code>${esc(s.fromNode)}.${esc(s.fromPort)}</code>
+                    <small>${esc(s.label)}</small>
+                </button>
+            `).join('')}
+        </div>` : ''}
+        ${suggestions.add.length > 0 ? `<div class="ge-input-suggest">
+            <div class="ge-input-suggest-h">Or add a node that provides this</div>
+            ${suggestions.add.map((s) => `
+                <button class="ge-suggest-btn" onclick="addAndWire('${esc(node.id)}','${esc(port.name)}','${esc(s.type)}','${esc(s.outputPort)}')">
+                    ➕ ${esc(s.icon)} ${esc(s.title)}
+                    <small>${esc(s.reason)}</small>
+                </button>
+            `).join('')}
+        </div>` : ''}
+        ${(port.config !== false) ? `<div class="ge-input-suggest">
+            <div class="ge-input-suggest-h">Or fill in below in Configuration</div>
+        </div>` : ''}
+    </div>`;
+}
+
+/**
+ * Suggest where this input can come from — both nodes already in the
+ * graph (existing wires) and nodes that can be added (whose outputs match
+ * this port's type). Type compatibility uses the same rule as wiring.
+ */
+function suggestProvidersFor(targetPort) {
+    const targetType = targetPort.type || 'any';
+    const targetNode = ge.workflow.graph.nodes.find((n) => n.id === ge.selectedNodeId);
+    const existing = [];
+    for (const candidate of ge.workflow.graph.nodes) {
+        // Don't suggest the node wire itself as a source for its own input.
+        if (candidate.id === ge.selectedNodeId) continue;
+        const cdef = ge.nodeDefsByType[candidate.type];
+        if (!cdef) continue;
+        for (const p of wireOutputPorts(cdef, candidate)) {
+            if (!portsCompatible(p.type, targetType)) continue;
+            // Prefer matches where the port name aligns with the target port.
+            const score = scoreMatch(p, targetPort);
+            existing.push({ score, fromNode: candidate.id, fromPort: p.name, label: p.label });
+        }
+    }
+    existing.sort((a, b) => b.score - a.score);
+
+    const add = [];
+    for (const cdef of ge.nodeDefsList) {
+        if (cdef.category === 'trigger') continue;
+        // Don't suggest adding another instance of the same node type as
+        // the one we're currently editing — that's almost never useful and
+        // produces noise like "AI Code Review needs a Diff → add AI Code Review".
+        if (targetNode && cdef.type === targetNode.type) continue;
+        // Only consider nodes that produce a directly-compatible output.
+        const matches = (cdef.ports || [])
+            .filter((p) => p.role === 'output' && p.wire !== false && portsCompatible(p.type, targetType))
+            .map((p) => ({ port: p, score: scoreMatch(p, targetPort) }))
+            .sort((a, b) => b.score - a.score);
+        if (matches.length === 0) continue;
+        const top = matches[0];
+        if (top.score < 1) continue; // too weak
+        add.push({
+            type: cdef.type,
+            outputPort: top.port.name,
+            title: cdef.title,
+            icon: cdef.icon,
+            reason: `produces ${top.port.label} (${top.port.type || 'any'})`,
+            score: top.score,
+        });
+    }
+    add.sort((a, b) => b.score - a.score);
+
+    return { existing: existing.slice(0, 5), add: add.slice(0, 4) };
+}
+
+function scoreMatch(srcPort, dstPort) {
+    let score = 0;
+    if (srcPort.type && dstPort.type && srcPort.type === dstPort.type) score += 3;
+    else if (srcPort.type === 'any' || dstPort.type === 'any') score += 1;
+    else if (portsCompatible(srcPort.type, dstPort.type)) score += 1;
+    if (srcPort.name === dstPort.name) score += 4;
+    else if (srcPort.name.toLowerCase().includes(dstPort.name.toLowerCase())
+          || dstPort.name.toLowerCase().includes(srcPort.name.toLowerCase())) score += 1;
+    return score;
+}
+
+window.wireFromExisting = function (toNode, toPort, fromNode, fromPort) {
+    ge.workflow.graph.edges = ge.workflow.graph.edges.filter((e) =>
+        !(e.to.node === toNode && e.to.port === toPort),
+    );
+    ge.workflow.graph.edges.push({
+        id: `e${Date.now().toString(36)}`,
+        from: { node: fromNode, port: fromPort },
+        to: { node: toNode, port: toPort },
+    });
+    renderCanvas();
+    renderInspector();
+    updateYamlPanel();
+    toast(`Wired ${fromNode}.${fromPort} → ${toNode}.${toPort}`);
+};
+
+window.addAndWire = function (toNode, toPort, newNodeType, newNodeOutputPort) {
+    const def = ge.nodeDefsByType[newNodeType];
+    if (!def) return;
+    const target = ge.workflow.graph.nodes.find((n) => n.id === toNode);
+    if (!target) return;
+    const newId = uniqueNodeId(suggestId(def));
+    const pos = target.position
+        ? { x: Math.max(20, target.position.x - 320), y: target.position.y }
+        : { x: 80, y: 80 };
+    ge.workflow.graph.nodes.push({
+        id: newId, type: newNodeType, position: pos, config: defaultConfigFor(def),
+    });
+    ge.workflow.graph.edges.push({
+        id: `e${Date.now().toString(36)}`,
+        from: { node: newId, port: newNodeOutputPort },
+        to: { node: toNode, port: toPort },
+    });
+    renderCanvas();
+    renderInspector();
+    updateYamlPanel();
+    toast(`Added ${def.title}, wired ${newId}.${newNodeOutputPort} → ${toNode}.${toPort}`);
+};
+
+window.disconnectInput = function (nodeId, portName) {
+    ge.workflow.graph.edges = ge.workflow.graph.edges.filter((e) =>
+        !(e.to.node === nodeId && e.to.port === portName),
+    );
+    renderCanvas();
+    renderInspector();
+    updateYamlPanel();
+};
 
 function renderField(node, port) {
     const value = node.config?.[port.name];
@@ -636,6 +1112,7 @@ window.toggleMultiselect = function (nodeId, port, value, checked) {
     const next = checked ? [...new Set([...arr, value])] : arr.filter((v) => v !== value);
     node.config = { ...node.config, [port]: next };
     renderInspector();
+    renderCanvas(); // Trigger node ports change with selected events.
     updateYamlPanel();
 };
 
@@ -737,6 +1214,7 @@ window.addManualInput = function () {
     const inputs = [...(node.config?.inputs || []), { name: '', label: '', type: 'text', required: false }];
     node.config = { ...node.config, inputs };
     renderInspector();
+    renderCanvas(); // Each input becomes an output port on the trigger node.
     updateYamlPanel();
 };
 window.updateManualInput = function (i, field, val) {
@@ -746,14 +1224,23 @@ window.updateManualInput = function (i, field, val) {
     if (!inputs[i]) return;
     inputs[i] = { ...inputs[i], [field]: val };
     node.config = { ...node.config, inputs };
+    renderCanvas(); // Renaming/retyping an input changes its derived output port.
     updateYamlPanel();
 };
 window.removeManualInput = function (i) {
     const node = ge.workflow.graph.nodes.find((n) => n.id === ge.selectedNodeId);
     if (!node) return;
+    const removed = (node.config?.inputs || [])[i];
     const inputs = (node.config?.inputs || []).filter((_, j) => j !== i);
     node.config = { ...node.config, inputs };
+    // Drop any wires that referenced the removed input's derived output port.
+    if (removed?.name) {
+        ge.workflow.graph.edges = ge.workflow.graph.edges.filter((e) =>
+            !(e.from.node === node.id && e.from.port === removed.name),
+        );
+    }
     renderInspector();
+    renderCanvas();
     updateYamlPanel();
 };
 
@@ -767,6 +1254,9 @@ window.setNodeField = function (nodeId, port, value) {
         newConfig[port] = value;
     }
     node.config = newConfig;
+    // Trigger nodes' output ports depend on config (events / inputs) —
+    // re-render the canvas so the node card reflects the new port set.
+    renderCanvas();
     updateYamlPanel();
 };
 
@@ -936,39 +1426,59 @@ window.onNodeMouseDown = function (e, nodeId) {
 
 window.onPortClick = function (e, nodeId, port, side) {
     e.stopPropagation();
+    const node = ge.workflow.graph.nodes.find((n) => n.id === nodeId);
+    if (!node) return;
+    const def = ge.nodeDefsByType[node.type];
+
     if (side === 'output') {
-        ge.wiringFrom = { nodeId, port, cursor: null };
+        // Begin wiring from this output. Re-render so input ports can show
+        // their compat highlight against the source type.
+        const portMeta = def && wireOutputPorts(def, node).find((p) => p.name === port);
+        ge.wiringFrom = { nodeId, port, type: portMeta?.type || 'any', cursor: null };
+        renderCanvas();
         updateCanvasHint();
-        drawEdges();
         return;
     }
+
     // side === 'input' — complete the wire if one is in progress.
     if (!ge.wiringFrom) {
-        toast('Click an output port (right side of a node) first', 'error');
+        toast('Click an output port (right side of a node) first to start a wire', 'error');
         return;
     }
     if (ge.wiringFrom.nodeId === nodeId) {
         toast('Cannot wire a node to itself', 'error');
-        ge.wiringFrom = null;
-        updateCanvasHint();
-        drawEdges();
+        cancelWiring();
         return;
     }
-    const exists = ge.workflow.graph.edges.some((edge) =>
-        edge.from.node === ge.wiringFrom.nodeId && edge.from.port === ge.wiringFrom.port
-        && edge.to.node === nodeId && edge.to.port === port);
-    if (!exists) {
-        ge.workflow.graph.edges.push({
-            id: `e${Date.now().toString(36)}`,
-            from: { node: ge.wiringFrom.nodeId, port: ge.wiringFrom.port },
-            to: { node: nodeId, port },
-        });
+
+    const targetPort = def && wireInputPorts(def).find((p) => p.name === port);
+    if (!portsCompatible(ge.wiringFrom.type, targetPort?.type)) {
+        toast(`Type mismatch: ${ge.wiringFrom.type || 'any'} → ${targetPort?.type || 'any'}`, 'error');
+        return;
     }
-    ge.wiringFrom = null;
-    updateCanvasHint();
-    drawEdges();
+
+    // Replace any existing wire into this input — most actions only want
+    // one source per port, and an accidental fan-in is more confusing than
+    // an automatic replacement.
+    ge.workflow.graph.edges = ge.workflow.graph.edges.filter((edge) =>
+        !(edge.to.node === nodeId && edge.to.port === port),
+    );
+    ge.workflow.graph.edges.push({
+        id: `e${Date.now().toString(36)}${Math.floor(Math.random() * 1000)}`,
+        from: { node: ge.wiringFrom.nodeId, port: ge.wiringFrom.port },
+        to: { node: nodeId, port },
+    });
+    cancelWiring();
+    renderCanvas();
+    renderInspector();
     updateYamlPanel();
 };
+
+function cancelWiring() {
+    ge.wiringFrom = null;
+    updateCanvasHint();
+    renderCanvas();
+}
 
 function onDocMouseMove(e) {
     const drag = ge.drag;

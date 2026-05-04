@@ -2646,3 +2646,107 @@ tr:hover td {
 }
 .ge-yaml-header { display: flex; align-items: center; justify-content: space-between; padding: 10px 14px; border-bottom: 1px solid var(--border-color); font-size: 12px; color: var(--text-secondary); }
 .ge-yaml-pre { flex: 1; padding: 16px; overflow: auto; font-family: var(--mono); font-size: 11px; color: var(--text-primary); white-space: pre; line-height: 1.5; }
+
+/* ─── Editor v2 polish ─────────────────────────────────────────────────── */
+
+/* Wider node card so titles like "Manual (run from dashboard)" fit. */
+.ge-node { width: 280px; }
+.ge-node-trigger { width: 290px; }
+
+/* Header: icon + stacked title/id, no truncation. */
+.ge-node-header { padding: 10px 12px; gap: 10px; align-items: center; }
+.ge-node-title-wrap { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.ge-node-title { font-size: 13px; font-weight: 600; color: var(--text-primary); line-height: 1.2; white-space: normal; overflow: visible; text-overflow: clip; }
+.ge-node-id { font-family: var(--mono); font-size: 10px; color: var(--text-muted); }
+
+/* Tighter port rows so a 5-output trigger doesn't go 200px tall. */
+.ge-node-body { padding: 8px 0; gap: 12px; }
+.ge-ports { gap: 6px; min-width: 0; flex: 1; }
+.ge-port { padding: 3px 8px; font-size: 11px; max-width: 140px; gap: 6px; }
+.ge-port-label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ge-port-required { color: var(--danger); font-weight: 700; margin-left: 2px; }
+.ge-port-type {
+    margin-left: auto; font-size: 9px; font-family: var(--mono); color: var(--text-muted);
+    background: rgba(99, 102, 241, 0.06); padding: 1px 5px; border-radius: 3px;
+}
+.ge-port-out .ge-port-type { margin-left: 0; margin-right: auto; }
+
+/* Required-input dots: red until satisfied, green when wired/configured. */
+.ge-port-missing .ge-port-dot {
+    border-color: var(--danger);
+    box-shadow: 0 0 6px rgba(239, 68, 68, 0.45);
+    background: rgba(239, 68, 68, 0.18);
+}
+.ge-port-ok .ge-port-dot {
+    border-color: var(--success);
+    box-shadow: 0 0 6px rgba(34, 197, 94, 0.35);
+}
+
+/* Wiring-in-progress: dim incompatible inputs, pulse compatible ones. */
+.ge-node.wiring .ge-port-incompat { opacity: 0.25; pointer-events: none; }
+.ge-node.wiring .ge-port-compat .ge-port-dot {
+    background: var(--success);
+    border-color: var(--success);
+    animation: ge-pulse 1s ease-in-out infinite;
+}
+@keyframes ge-pulse {
+    0%, 100% { box-shadow: 0 0 6px rgba(34, 197, 94, 0.45); }
+    50% { box-shadow: 0 0 14px rgba(34, 197, 94, 0.85); }
+}
+
+/* Inspector input-status panel: tells the user which inputs are connected,
+   which are missing, and how to satisfy them. */
+.ge-input-status-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 10px; }
+.ge-input-row {
+    background: var(--bg-input);
+    border: 1px solid var(--border-color);
+    border-left: 3px solid var(--text-muted);
+    border-radius: var(--radius-sm);
+    padding: 10px 12px;
+}
+.ge-input-row.ge-input-ok { border-left-color: var(--success); }
+.ge-input-row.ge-input-missing { border-left-color: var(--danger); }
+.ge-input-meta { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.ge-input-meta strong { color: var(--text-primary); }
+.ge-input-type { font-family: var(--mono); font-size: 10px; color: var(--text-muted); background: rgba(99,102,241,0.08); padding: 1px 6px; border-radius: 3px; }
+.ge-input-req { font-size: 10px; color: var(--danger); font-weight: 600; text-transform: uppercase; }
+.ge-input-help { font-size: 11px; color: var(--text-muted); margin-top: 4px; line-height: 1.4; }
+.ge-input-source { font-size: 11px; color: var(--text-secondary); margin-top: 6px; display: flex; align-items: center; gap: 6px; }
+.ge-input-source-warn { color: var(--danger); }
+.ge-input-source code { background: var(--bg-elevated); padding: 1px 5px; border-radius: 3px; font-size: 10px; color: var(--accent-hover); }
+.ge-input-suggest { margin-top: 8px; }
+.ge-input-suggest-h { font-size: 10px; text-transform: uppercase; color: var(--text-muted); letter-spacing: 0.5px; margin-bottom: 4px; }
+.ge-suggest-btn {
+    display: flex; align-items: center; gap: 8px; width: 100%;
+    background: var(--bg-card); border: 1px solid var(--border-color);
+    border-radius: var(--radius-xs); padding: 6px 10px; margin-bottom: 4px;
+    cursor: pointer; color: var(--text-primary); font-size: 11px;
+    text-align: left; transition: all 0.12s;
+}
+.ge-suggest-btn:hover { background: var(--bg-card-hover); border-color: var(--accent); }
+.ge-suggest-btn code { font-size: 10px; color: var(--accent-hover); }
+.ge-suggest-btn small { color: var(--text-muted); margin-left: auto; font-size: 10px; }
+
+/* Recipe picker (shown when creating a brand-new workflow). */
+.ge-recipe-page { padding: 60px 40px; max-width: 1200px; margin: 0 auto; }
+.ge-recipe-header { margin-bottom: 32px; }
+.ge-recipe-header button { margin-bottom: 24px; }
+.ge-recipe-header h1 { font-size: 28px; font-weight: 700; color: var(--text-primary); margin-bottom: 8px; }
+.ge-recipe-header p { color: var(--text-secondary); font-size: 14px; max-width: 600px; }
+.ge-recipe-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px; }
+.ge-recipe-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius);
+    padding: 22px;
+    cursor: pointer;
+    transition: all 0.15s;
+}
+.ge-recipe-card:hover { border-color: var(--accent); transform: translateY(-2px); box-shadow: var(--shadow-lg); }
+.ge-recipe-card.ge-recipe-blank { border-style: dashed; opacity: 0.85; }
+.ge-recipe-icon { font-size: 32px; margin-bottom: 12px; }
+.ge-recipe-card h3 { font-size: 16px; font-weight: 600; color: var(--text-primary); margin-bottom: 6px; }
+.ge-recipe-card p { font-size: 12px; color: var(--text-secondary); line-height: 1.5; margin-bottom: 12px; }
+.ge-recipe-card ul { font-size: 11px; color: var(--text-muted); list-style: none; padding-left: 0; }
+.ge-recipe-card ul li { padding: 2px 0; padding-left: 14px; position: relative; }
+.ge-recipe-card ul li::before { content: '·'; position: absolute; left: 4px; color: var(--accent); font-weight: bold; }
