@@ -38,6 +38,59 @@ describe('GitHubApiClient — error body truncation (L2)', () => {
             expect(msg).not.toContain('truncated');
         }
     });
+
+    it('compacts pretty-printed JSON so the message field survives the truncation budget (L6)', async () => {
+        // Pretty-printed JSON with leading whitespace and outer braces would
+        // otherwise eat the first ~50 chars. Compact form puts the "message"
+        // field within the budget.
+        const pretty = JSON.stringify({
+            message: 'Validation Failed',
+            errors: [{ resource: 'PullRequest', field: 'title', code: 'missing_field' }],
+            documentation_url: 'https://docs.github.com/...',
+        }, null, 2); // 2-space indent
+        vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+            new Response(pretty, { status: 422, statusText: 'Unprocessable' }),
+        );
+        const client = new GitHubApiClient('tok');
+        try {
+            await client.createComment('o', 'r', 1, 'hi');
+            throw new Error('should have thrown');
+        } catch (err) {
+            const msg = (err as Error).message;
+            expect(msg).toContain('Validation Failed');
+            expect(msg).toContain('missing_field');
+            // Compact form has no leading newlines or 2-space indents
+            expect(msg).not.toContain('\n  ');
+        }
+    });
+});
+
+describe('updatePullRequest — empty-string field guards (L7)', () => {
+    it('rejects empty-string title without making an HTTP call', async () => {
+        const spy = vi.spyOn(globalThis, 'fetch');
+        const client = new GitHubApiClient('tok');
+        await expect(client.updatePullRequest('o', 'r', 1, { title: '' })).rejects.toThrow(/title must not be empty/);
+        expect(spy).not.toHaveBeenCalled();
+    });
+
+    it('rejects empty-string base without making an HTTP call', async () => {
+        const spy = vi.spyOn(globalThis, 'fetch');
+        const client = new GitHubApiClient('tok');
+        await expect(client.updatePullRequest('o', 'r', 1, { base: '' })).rejects.toThrow(/base must not be empty/);
+        expect(spy).not.toHaveBeenCalled();
+    });
+
+    it('allows empty-string body (GitHub accepts blank PR descriptions)', async () => {
+        const spy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+            new Response(JSON.stringify({ html_url: 'x' }), { status: 200 }),
+        );
+        const client = new GitHubApiClient('tok');
+        await client.updatePullRequest('o', 'r', 1, { body: '' });
+        expect(spy).toHaveBeenCalledTimes(1);
+        const init = spy.mock.calls[0][1] as RequestInit;
+        const body = JSON.parse(String(init?.body ?? '{}'));
+        expect(body).toEqual({ body: '' });
+    });
 });
 
 describe('GitHubApiClient — getCheckRuns pagination cap (M8)', () => {

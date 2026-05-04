@@ -11,10 +11,23 @@ const ERROR_BODY_MAX_CHARS = 500;
 
 /** Truncate API response bodies before they land in error messages — they
  *  can carry sensitive context (PR titles from private repos) and propagate
- *  to downstream loggers. */
+ *  to downstream loggers.
+ *
+ *  GitHub returns errors as JSON like
+ *      {"message":"Validation Failed","errors":[{"resource":"...","field":"..."}]}
+ *  Pretty-printed wire formats waste the truncation budget on whitespace,
+ *  so we try to JSON.parse first and re-emit compact JSON. Falls back to the
+ *  raw body for non-JSON responses (HTML 5xx pages, plain text, etc). */
 function truncateErrorBody(body: string): string {
-    if (body.length <= ERROR_BODY_MAX_CHARS) return body;
-    return body.slice(0, ERROR_BODY_MAX_CHARS) + `… [truncated, ${body.length} chars total]`;
+    let formatted = body;
+    try {
+        const parsed = JSON.parse(body);
+        formatted = JSON.stringify(parsed);
+    } catch {
+        // Not JSON — keep the raw body.
+    }
+    if (formatted.length <= ERROR_BODY_MAX_CHARS) return formatted;
+    return formatted.slice(0, ERROR_BODY_MAX_CHARS) + `… [truncated, ${formatted.length} chars total]`;
 }
 
 async function fetchWithTimeout(
@@ -324,7 +337,12 @@ export class GitHubApiClient {
 
     /** PATCH a pull request — title, body, state, base. Any subset works,
      *  but at least one field must be supplied (sending {} would burn an
-     *  authenticated round-trip for a no-op). */
+     *  authenticated round-trip for a no-op).
+     *
+     *  Empty-string title/base are also rejected: GitHub returns 422 for
+     *  blank titles and rejects empty base branches outright, so we'd burn
+     *  the round-trip just to surface a confusing API error. (Empty body
+     *  IS legal — GitHub accepts blank PR descriptions.) */
     async updatePullRequest(
         owner: string,
         repo: string,
@@ -332,6 +350,12 @@ export class GitHubApiClient {
         options: { title?: string; body?: string; state?: 'open' | 'closed'; base?: string },
     ): Promise<Record<string, unknown>> {
         const url = `${this.baseUrl}/repos/${owner}/${repo}/pulls/${prNumber}`;
+        if (options.title !== undefined && options.title === '') {
+            throw new Error('updatePullRequest: title must not be empty (GitHub returns 422). Omit the field to keep the existing title.');
+        }
+        if (options.base !== undefined && options.base === '') {
+            throw new Error('updatePullRequest: base must not be empty. Omit the field to keep the existing base.');
+        }
         const payload: Record<string, unknown> = {};
         if (options.title !== undefined) payload.title = options.title;
         if (options.body !== undefined) payload.body = options.body;
