@@ -206,9 +206,12 @@ function renderEditor() {
                 <aside class="ge-palette" id="ge-palette"></aside>
                 <main class="ge-canvas-wrap" id="ge-canvas-wrap">
                     <div class="ge-canvas" id="ge-canvas">
-                        <svg class="ge-edges" id="ge-edges" xmlns="http://www.w3.org/2000/svg"></svg>
                         <div class="ge-nodes" id="ge-nodes"></div>
                     </div>
+                    <!-- SVG is a sibling of the transformed canvas so wire
+                         endpoints live in viewport-relative pixel space and
+                         never get double-transformed by pan/zoom. -->
+                    <svg class="ge-edges" id="ge-edges" xmlns="http://www.w3.org/2000/svg"></svg>
                     <div class="ge-canvas-hint" id="ge-canvas-hint"></div>
                 </main>
                 <aside class="ge-inspector" id="ge-inspector"></aside>

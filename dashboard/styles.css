@@ -2456,13 +2456,20 @@ tr:hover td {
     height: 4000px;
     transform-origin: 0 0;
     pointer-events: none;
+    z-index: 1;
 }
 .ge-canvas > * { pointer-events: auto; }
 .ge-edges {
+    /* Sibling of .ge-canvas, NOT a child — coordinates here are in viewport
+       pixel space relative to .ge-canvas-wrap, so wires line up with the
+       on-screen position of port handles regardless of pan/zoom. */
     position: absolute;
     top: 0; left: 0;
+    width: 100%;
+    height: 100%;
     pointer-events: none;
     overflow: visible;
+    z-index: 2;
 }
 .ge-edges g { pointer-events: auto; }
 .ge-canvas-hint {
