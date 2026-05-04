@@ -1,9 +1,9 @@
-import { spawn } from 'node:child_process';
 import { mkdtemp, mkdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { ActionHandler } from '../../../core/types.js';
+import { execGit, execGitOutput } from '../git-helpers.js';
 
 const DEFAULT_DEPTH = 50;
 const DEFAULT_NON_PR_DEPTH = 1;
@@ -62,37 +62,7 @@ export const githubCloneRepoAction: ActionHandler = async (params, context) => {
         'Repository cloned',
     );
 
-    return { path: tempDir, repo, ref: effectiveRef, sha };
+    // Re-emit `repo` and `branch` so downstream nodes can wire from this
+    // single source instead of also wiring back to the trigger / config.
+    return { path: tempDir, repo, branch: effectiveRef, ref: effectiveRef, sha };
 };
-
-// ─── Git helpers ────────────────────────────────────────────────────────────
-
-function execGit(cwd: string, args: string[]): Promise<void> {
-    return new Promise((resolve, reject) => {
-        const child = spawn('git', args, { cwd, stdio: ['pipe', 'pipe', 'pipe'] });
-        const stderrChunks: Buffer[] = [];
-        child.stderr.on('data', (c: Buffer) => stderrChunks.push(c));
-        child.on('close', (code) => {
-            if (code !== 0) {
-                const stderr = Buffer.concat(stderrChunks).toString();
-                reject(new Error(`git ${args[0]} failed (code ${code}): ${stderr}`));
-            } else {
-                resolve();
-            }
-        });
-        child.on('error', reject);
-    });
-}
-
-function execGitOutput(cwd: string, args: string[]): Promise<string> {
-    return new Promise((resolve, reject) => {
-        const child = spawn('git', args, { cwd, stdio: ['pipe', 'pipe', 'pipe'] });
-        const chunks: Buffer[] = [];
-        child.stdout.on('data', (c: Buffer) => chunks.push(c));
-        child.on('close', (code) => {
-            if (code !== 0) reject(new Error(`git ${args[0]} failed (code ${code})`));
-            else resolve(Buffer.concat(chunks).toString());
-        });
-        child.on('error', reject);
-    });
-}
