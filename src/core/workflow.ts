@@ -12,6 +12,9 @@ import type {
 import type { AIProviderRegistry } from './ai-providers.js';
 import { loadAIProviders } from './ai-providers.js';
 import { toArray } from './types.js';
+import { executeGraph } from './nodes/runtime.js';
+import { getNodeRegistry } from './nodes/registry.js';
+import { extractTriggerFromGraph, isGraphWorkflow } from './nodes/graph-trigger.js';
 
 /**
  * Determines whether a workflow's trigger matches an incoming event.
@@ -34,7 +37,13 @@ export function matchesTrigger(
     // Disabled workflows never match
     if (workflow.enabled === false) return false;
 
-    const { trigger } = workflow;
+    // Graph workflows store trigger config inside a trigger.<source> node;
+    // bridge that to the legacy TriggerDefinition shape so the matching
+    // logic below stays unchanged.
+    const trigger = isGraphWorkflow(workflow) && workflow.graph
+        ? (extractTriggerFromGraph(workflow.graph) ?? workflow.trigger)
+        : workflow.trigger;
+    if (!trigger) return false;
 
     // ─── Source matching (any of the trigger sources) ────────────────────
     // Each source is distinct: github (webhooks), github-poll (token polling),
@@ -268,16 +277,42 @@ export async function executeWorkflow(
     recordWebhookDelivery?: import('./types.js').ActionContext['recordWebhookDelivery'],
     extras?: MakeContextExtras,
 ): Promise<WorkflowExecutionResult> {
+    const aiRegistry: AIProviderRegistry = ai ?? loadAIProviders(undefined);
+
+    // ── Graph-form workflows go through the node runtime ───────────────
+    if (isGraphWorkflow(workflow)) {
+        const graphTempPaths: string[] = [];
+        try {
+            const graphResult = await executeGraph(
+                workflow.graph!, event, actionRegistry, getNodeRegistry(), logger,
+                {
+                    workflowName: workflow.name,
+                    integrationConfigs,
+                    ai: aiRegistry,
+                    recordWebhookDelivery,
+                    workdirManager: extras?.workdirManager,
+                    getConfig: extras?.getConfig,
+                    signal: _signal,
+                },
+            );
+            for (const out of Object.values(graphResult.nodeOutputs)) {
+                collectTempPath(out, graphTempPaths);
+            }
+            return { results: graphResult.results, steps: graphResult.steps };
+        } finally {
+            await cleanupTempDirs(graphTempPaths, logger);
+        }
+    }
+
+    // ── Legacy steps form ──────────────────────────────────────────────
     const results: Record<number, unknown> = {};
     const steps: Record<string, unknown> = {};
     const tempPaths: string[] = [];
 
-    const aiRegistry: AIProviderRegistry = ai ?? loadAIProviders(undefined);
-
     logger.info({ workflow: workflow.name }, 'Executing workflow');
 
     try {
-        const groups = groupSteps(workflow.steps);
+        const groups = groupSteps(workflow.steps ?? []);
 
         for (const group of groups) {
             if (_signal?.aborted) {

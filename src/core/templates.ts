@@ -133,15 +133,26 @@ export async function normalizeWorkflow(
         }
     }
 
-    if (!trigger) {
+    // Graph-form workflows store their executable definition under
+    // `graph:` instead of `steps:`. Accept either; treat them as
+    // mutually-sufficient alternatives.
+    const graph = raw.graph as WorkflowDefinition['graph'] | undefined;
+    const hasGraph = !!graph && Array.isArray(graph.nodes) && graph.nodes.length > 0;
+
+    if (!trigger && !hasGraph) {
         throw new Error(`Workflow "${raw.name}" must have a trigger`);
     }
-    if (!steps || steps.length === 0) {
-        throw new Error(`Workflow "${raw.name}" must have steps (or use a template)`);
+    if ((!steps || steps.length === 0) && !hasGraph) {
+        throw new Error(`Workflow "${raw.name}" must have steps, a template, or a graph`);
     }
 
     // ─── Shorthand resolution ────────────────────────────────────────────
-    const resolvedTrigger = resolveShorthands(trigger);
+    // Graph workflows can omit a top-level trigger — the runtime derives
+    // matching info from the graph's trigger node. Provide a placeholder
+    // here so downstream code that accesses `wf.trigger` doesn't blow up.
+    const resolvedTrigger = trigger
+        ? resolveShorthands(trigger)
+        : { source: 'manual', event: [] };
 
     return {
         name: raw.name as string,
@@ -150,6 +161,7 @@ export async function normalizeWorkflow(
         template: templateName,
         trigger: resolvedTrigger,
         steps,
+        graph,
         inputs: raw.inputs as WorkflowDefinition['inputs'],
         queue: raw.queue as WorkflowDefinition['queue'],
         ai: raw.ai as WorkflowDefinition['ai'],

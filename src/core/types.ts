@@ -89,7 +89,11 @@ export interface WorkflowDefinition {
     /** Use a built-in template instead of defining steps (e.g. "ai-pr-review") */
     template?: string;
     trigger: TriggerDefinition;
-    steps: WorkflowStepDefinition[];
+    /** Linear step list (legacy form). Either `steps` or `graph` must be set. */
+    steps?: WorkflowStepDefinition[];
+    /** Visual node-graph form. When present, wins over `steps` at runtime.
+     *  See src/core/nodes/types.ts for the schema. */
+    graph?: import('./nodes/types.js').NodeGraph;
     /** Input definitions for manual triggers — the dashboard renders a form from these */
     inputs?: WorkflowInput[];
     /** Inline queue overrides for this workflow (highest priority). */
