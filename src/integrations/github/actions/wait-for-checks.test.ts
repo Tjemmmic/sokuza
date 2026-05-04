@@ -142,4 +142,93 @@ describe('github-wait-for-checks', () => {
         const ctx: ActionContext = makeContext({ pull_request: { number: 1 } });
         await expect(githubWaitForChecksAction({}, ctx)).rejects.toThrow(/no commit SHA/);
     });
+
+    // ── Bug-fix regression coverage ────────────────────────────────────────
+    it('keeps polling when combined-status rollup is "pending" even with all check-runs complete (H1)', async () => {
+        const seq: ApiResponses[] = [
+            // first poll: no check-runs pending, but combined-status state=pending (queued context not posted)
+            { checkRuns: [{ name: 'lint', status: 'completed', conclusion: 'success' }], statuses: { state: 'pending', statuses: [] } },
+            // second poll: now resolved
+            { checkRuns: [{ name: 'lint', status: 'completed', conclusion: 'success' }], statuses: { state: 'success', statuses: [] } },
+        ];
+        mockSequence(seq);
+        const promise = githubWaitForChecksAction({ sha: 'abc', interval: 1 }, makeContext());
+        await vi.runAllTimersAsync();
+        const result = await promise;
+        expect(result.success).toBe(true);
+        expect(result.state).toBe('success');
+        expect(result.timedOut).toBe(false);
+    });
+
+    it('does not return success=true when combined state is "pending" (H1 negative case)', async () => {
+        // If we time out with a still-pending state, success must be false.
+        mockSequence([{ checkRuns: [], statuses: { state: 'pending', statuses: [] } }]);
+        const promise = githubWaitForChecksAction({ sha: 'abc', timeout: 0.1, interval: 0.05 }, makeContext());
+        await vi.runAllTimersAsync();
+        const result = await promise;
+        expect(result.success).toBe(false);
+        expect(result.timedOut).toBe(true);
+    });
+
+    it('dedupes combined-status entries by context, keeping the most recent (H2)', async () => {
+        mockSequence([{
+            checkRuns: [],
+            statuses: {
+                state: 'failure',
+                statuses: [
+                    { context: 'travis-ci', state: 'failure', updated_at: '2026-05-04T12:00:00Z' },
+                    // Older posting for the same context — must not double-count
+                    { context: 'travis-ci', state: 'failure', updated_at: '2026-05-04T11:00:00Z' },
+                    { context: 'circleci', state: 'success', updated_at: '2026-05-04T12:00:00Z' },
+                ],
+            },
+        }]);
+        const promise = githubWaitForChecksAction({ sha: 'abc' }, makeContext());
+        await vi.runAllTimersAsync();
+        const result = await promise;
+        expect(result.failedChecks).toEqual(['travis-ci']); // not duplicated
+        expect(result.totalChecks).toBe(2); // travis-ci + circleci, deduped
+    });
+
+    it('a newer success posting for the same context wins over an older failure (H2)', async () => {
+        mockSequence([{
+            checkRuns: [],
+            statuses: {
+                state: 'success',
+                statuses: [
+                    { context: 'flaky-ci', state: 'failure', updated_at: '2026-05-04T11:00:00Z' },
+                    { context: 'flaky-ci', state: 'success', updated_at: '2026-05-04T12:00:00Z' },
+                ],
+            },
+        }]);
+        const promise = githubWaitForChecksAction({ sha: 'abc' }, makeContext());
+        await vi.runAllTimersAsync();
+        const result = await promise;
+        expect(result.success).toBe(true);
+        expect(result.failedChecks).toEqual([]);
+    });
+
+    it('marks "stale" conclusion as failed (M3 — was missing from FAILED set)', async () => {
+        mockSequence([{
+            checkRuns: [{ name: 'snyk', status: 'completed', conclusion: 'stale' }],
+            statuses: { state: 'success', statuses: [] },
+        }]);
+        const promise = githubWaitForChecksAction({ sha: 'abc' }, makeContext());
+        await vi.runAllTimersAsync();
+        const result = await promise;
+        expect(result.failedChecks).toEqual(['snyk']);
+        expect(result.success).toBe(false);
+    });
+
+    it('rejects NaN / negative / zero timeout values (M3)', async () => {
+        const ctx = makeContext();
+        await expect(githubWaitForChecksAction({ sha: 'abc', timeout: -1 }, ctx)).rejects.toThrow(/timeout must be a positive/);
+        await expect(githubWaitForChecksAction({ sha: 'abc', timeout: 'not-a-number' as unknown as number }, ctx)).rejects.toThrow(/timeout must be a positive/);
+    });
+
+    it('rejects NaN / zero interval (M3)', async () => {
+        const ctx = makeContext();
+        await expect(githubWaitForChecksAction({ sha: 'abc', interval: 0 }, ctx)).rejects.toThrow(/interval must be a positive/);
+        await expect(githubWaitForChecksAction({ sha: 'abc', interval: -1 }, ctx)).rejects.toThrow(/interval must be a positive/);
+    });
 });
