@@ -67,7 +67,7 @@ describe('resolveRepoTarget — H3 empty-string precedence', () => {
 });
 
 describe('resolveRepoTarget — M5 split validation', () => {
-    it('rejects "owner/repo/extra" rather than silently dropping the trailing segment', () => {
+    it('rejects "owner/repo/extra" when no other source provides owner/repo', () => {
         expect(() => resolveRepoTarget(
             { repo: 'octo/r/extra', pr_number: 7 },
             ctx(),
@@ -83,7 +83,7 @@ describe('resolveRepoTarget — M5 split validation', () => {
         )).toThrow(/params\.repo must be "owner\/name"/);
     });
 
-    it('rejects bare "octo" (no slash)', () => {
+    it('rejects bare "octo" (no slash) when nothing else resolves', () => {
         expect(() => resolveRepoTarget(
             { repo: 'octo', pr_number: 7 },
             ctx(),
@@ -97,6 +97,35 @@ describe('resolveRepoTarget — M5 split validation', () => {
             ctx(),
             'test',
         )).toThrow(/could not resolve owner\/repo/);
+    });
+
+    // ── H6: malformed-params.repo must NOT block other sources ─────────────
+    it('falls back to params.owner+repo_name when params.repo is malformed (H6)', () => {
+        const result = resolveRepoTarget(
+            { repo: 'octo/r/extra', owner: 'octo', repo_name: 'r', pr_number: 7 },
+            ctx(),
+            'test',
+        );
+        expect(result).toEqual({ owner: 'octo', repo: 'r', number: 7 });
+    });
+
+    it('falls back to event metadata when params.repo is malformed (H6)', () => {
+        const result = resolveRepoTarget(
+            { repo: 'pasted/url/fragment', pr_number: 7 },
+            ctx({ metadata: { repo: 'octo/r' } }),
+            'test',
+        );
+        expect(result).toEqual({ owner: 'octo', repo: 'r', number: 7 });
+    });
+
+    it('only surfaces the "owner/name" message when no source resolved AND params.repo was malformed', () => {
+        // params.repo malformed AND no other source → the malformed message
+        // (helps the user understand WHY resolution failed).
+        expect(() => resolveRepoTarget(
+            { repo: 'pasted/url/fragment', pr_number: 7 },
+            ctx(),
+            'test',
+        )).toThrow(/params\.repo must be "owner\/name"/);
     });
 });
 

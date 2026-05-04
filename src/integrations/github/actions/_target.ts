@@ -78,11 +78,6 @@ export function resolveRepoTarget(params: Params, context: ActionContext, caller
 
     const paramsRepoSplit = splitRepo(firstNonEmpty(params.repo as string | undefined));
     const metaRepoSplit = splitRepo(firstNonEmpty(meta.repo as string | undefined));
-    if (!paramsRepoSplit && typeof params.repo === 'string' && params.repo.length > 0) {
-        // The user did pass a repo string, but it isn't in the expected shape.
-        // Fail loudly rather than silently fall through to event metadata.
-        throw new Error(`${callerName}: params.repo must be "owner/name" (got "${params.repo}")`);
-    }
 
     const owner = firstNonEmpty(
         params.owner as string | undefined,
@@ -107,7 +102,14 @@ export function resolveRepoTarget(params: Params, context: ActionContext, caller
         typeof issue?.number === 'number' ? issue.number : undefined,
     );
 
+    // Only complain about a malformed params.repo when *no* other source
+    // resolved owner+repo. A workflow that supplies params.owner+repo_name
+    // alongside an accidentally-bad params.repo (e.g. URL paste) would
+    // otherwise fail loudly even though we have everything we need.
     if (!owner || !repo) {
+        if (typeof params.repo === 'string' && params.repo.length > 0 && !paramsRepoSplit) {
+            throw new Error(`${callerName}: params.repo must be "owner/name" (got "${params.repo}")`);
+        }
         throw new Error(`${callerName}: could not resolve owner/repo (provide params.repo as "owner/name" or fire from a GitHub event)`);
     }
     if (!number) {
