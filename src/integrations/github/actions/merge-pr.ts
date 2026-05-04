@@ -21,10 +21,15 @@ export const githubMergePrAction: ActionHandler = async (params, context) => {
         sha: params.sha as string | undefined,
     });
     // GitHub's documented contract is that 200 on /merge means the merge
-    // happened. But proxies, future API behaviour, or unexpected response
-    // bodies could surface { merged: false } with a 200 — treat that as a
-    // failure rather than a silent success so downstream nodes' branches
-    // on `merged` are meaningful.
+    // happened. Two failure modes the previous version conflated:
+    //   1. merged: false       — GitHub explicitly said the merge didn't happen
+    //   2. merged: undefined   — response shape changed (proxy, API revision)
+    // Distinct messages let an operator triage the right thing.
+    if (!result.mergedFieldPresent) {
+        throw new Error(
+            `github-merge-pr: GitHub returned 200 but the response is missing the "merged" field — possible API shape change (${result.message || 'no message'})`,
+        );
+    }
     if (!result.merged) {
         throw new Error(`github-merge-pr: GitHub returned 200 but merged=false (${result.message || 'no message'})`);
     }

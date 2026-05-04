@@ -367,7 +367,7 @@ export class GitHubApiClient {
             commit_message?: string;
             sha?: string;
         } = {},
-    ): Promise<{ merged: boolean; sha: string; message: string }> {
+    ): Promise<{ merged: boolean; sha: string; message: string; mergedFieldPresent: boolean }> {
         const url = `${this.baseUrl}/repos/${owner}/${repo}/pulls/${prNumber}/merge`;
         const payload: Record<string, unknown> = { merge_method: options.method ?? 'merge' };
         if (options.commit_title) payload.commit_title = options.commit_title;
@@ -386,6 +386,10 @@ export class GitHubApiClient {
         }
         const json = (await res.json()) as { merged?: boolean; sha?: string; message?: string };
         return {
+            // mergedFieldPresent lets the caller distinguish "GitHub said
+            // merged=false" (an actual merge failure) from "the response was
+            // missing the field" (an unexpected API shape change).
+            mergedFieldPresent: typeof json.merged === 'boolean',
             merged: json.merged === true,
             sha: typeof json.sha === 'string' ? json.sha : '',
             message: typeof json.message === 'string' ? json.message : '',

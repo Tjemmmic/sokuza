@@ -114,6 +114,16 @@ describe('github-merge-pr', () => {
             githubMergePrAction({ pr_number: 42, repo: 'octo/r' }, makeContext()),
         ).rejects.toThrow(/200 but merged=false.*not mergeable/);
     });
+
+    it('throws a distinct error when the response is missing the "merged" field (M10 — API shape change)', async () => {
+        mockFetch([
+            // Response shape an unexpected proxy or API revision could produce.
+            () => new Response(JSON.stringify({ sha: 'abc123', message: 'ok' }), { status: 200 }),
+        ]);
+        await expect(
+            githubMergePrAction({ pr_number: 42, repo: 'octo/r' }, makeContext()),
+        ).rejects.toThrow(/missing the "merged" field.*possible API shape change/);
+    });
 });
 
 describe('github-update-pr', () => {
