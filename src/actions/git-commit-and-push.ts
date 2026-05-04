@@ -33,6 +33,7 @@ export const gitCommitAndPushAction: ActionHandler = async (params, context) => 
     const paths = parsePaths(params.paths);
 
     if (branchOverride) {
+        validateBranchName(branchOverride);
         await switchToBranch(workdir, branchOverride, remote);
     }
 
@@ -61,19 +62,20 @@ export const gitCommitAndPushAction: ActionHandler = async (params, context) => 
 
 /**
  * Validate + normalise the user-supplied `paths` param. Returns:
- *   - null if the user didn't supply paths (caller falls through to add -A)
+ *   - null if the user didn't supply paths at all (caller falls through to add -A)
  *   - string[] of validated relative paths if they did
  *
- * Throws on invalid input rather than silently sanitising — callers should
- * fix their workflow. An empty list is treated as a misconfiguration too,
- * since silently doing nothing or staging everything would both surprise.
+ * Empty array AND empty/whitespace-only string both throw, so "the user
+ * said nothing" has consistent semantics: only `undefined`/`null` (the
+ * field genuinely wasn't supplied) opt into add -A.
  */
 function parsePaths(raw: unknown): string[] | null {
     if (raw === undefined || raw === null) return null;
     if (typeof raw === 'string') {
-        // Allow comma-separated input from a text field. Empty after split → []
         const list = raw.split(',').map((s) => s.trim()).filter((s) => s.length > 0);
-        if (list.length === 0) return null;
+        if (list.length === 0) {
+            throw new Error('git-commit-and-push: paths string was empty after trimming — refusing to fall back to add -A silently. Omit the param entirely to stage everything.');
+        }
         return list.map((p) => validatePath(p));
     }
     if (!Array.isArray(raw)) {
@@ -81,7 +83,7 @@ function parsePaths(raw: unknown): string[] | null {
     }
     const cleaned = raw.filter((p): p is string => typeof p === 'string' && p.length > 0);
     if (cleaned.length === 0) {
-        throw new Error('git-commit-and-push: paths array was empty after dropping non-string entries — refusing to fall back to add -A silently');
+        throw new Error('git-commit-and-push: paths array was empty after dropping non-string entries — refusing to fall back to add -A silently. Omit the param entirely to stage everything.');
     }
     return cleaned.map((p) => validatePath(p));
 }
@@ -90,15 +92,41 @@ function validatePath(p: string): string {
     if (p.includes('\0')) {
         throw new Error(`git-commit-and-push: path contains NUL character (got ${JSON.stringify(p)})`);
     }
-    if (isAbsolute(p)) {
+    // Normalise Windows-style backslashes to forward slashes BEFORE the
+    // traversal check. On Linux, Node's path.normalize doesn't treat \ as
+    // a separator, so '..\\escape' would slip through and reach git as a
+    // literal filename — fine on Linux, real sandbox escape on Windows.
+    const unified = p.replace(/\\/g, '/');
+    if (isAbsolute(unified) || unified.startsWith('/')) {
         throw new Error(`git-commit-and-push: absolute paths are not allowed (got ${JSON.stringify(p)})`);
     }
-    const normalised = normalize(p);
-    // Reject any path that escapes workdir via .. — both literal and after normalisation.
+    const normalised = normalize(unified);
     if (normalised === '..' || normalised.startsWith('../') || normalised.includes('/../')) {
         throw new Error(`git-commit-and-push: path escapes workdir (got ${JSON.stringify(p)})`);
     }
     return p;
+}
+
+/**
+ * Reject branch names that would confuse git (leading -, named HEAD,
+ * whitespace, control chars). We don't try to replicate every rule from
+ * git-check-ref-format — we just catch the cases that produce confusing
+ * downstream errors. Git itself will reject the rest at checkout time.
+ */
+function validateBranchName(name: string): void {
+    if (name.startsWith('-')) {
+        throw new Error(`git-commit-and-push: branch name must not start with "-" (got ${JSON.stringify(name)})`);
+    }
+    if (name === 'HEAD' || name === 'head') {
+        throw new Error(`git-commit-and-push: branch name "HEAD" is reserved — pick a different name`);
+    }
+    if (/\s/.test(name)) {
+        throw new Error(`git-commit-and-push: branch name must not contain whitespace (got ${JSON.stringify(name)})`);
+    }
+    // Disallow control chars (including NUL).
+    if (/[\x00-\x1f\x7f]/.test(name)) {
+        throw new Error(`git-commit-and-push: branch name contains control characters (got ${JSON.stringify(name)})`);
+    }
 }
 
 /**

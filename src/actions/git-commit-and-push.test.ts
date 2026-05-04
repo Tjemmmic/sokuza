@@ -157,6 +157,69 @@ describe('git-commit-and-push', () => {
         )).rejects.toThrow(/paths array was empty/);
     });
 
+    it('rejects a path containing backslash that would escape on Windows (H7)', async () => {
+        // Plain "..\escape" → normalises to "../escape" → escapes.
+        await expect(gitCommitAndPushAction(
+            { workdir, message: 'm', paths: ['..\\escape'] },
+            ctx(),
+        )).rejects.toThrow(/escapes workdir/);
+        // Two parents up — "sub\..\..\escape" reduces to "../escape" → escapes.
+        await expect(gitCommitAndPushAction(
+            { workdir, message: 'm', paths: ['sub\\..\\..\\escape'] },
+            ctx(),
+        )).rejects.toThrow(/escapes workdir/);
+    });
+
+    it('rejects an absolute Windows-style path (H7)', async () => {
+        // C:\... is absolute on Windows; on Linux Node sees it as relative,
+        // but our backslash normalisation should still flag it.
+        await expect(gitCommitAndPushAction(
+            { workdir, message: 'm', paths: ['/etc\\passwd'] },
+            ctx(),
+        )).rejects.toThrow(/absolute paths are not allowed/);
+    });
+
+    // ── M9: branch name validation ─────────────────────────────────────────
+    it('rejects a branch name starting with "-" (would be parsed as a flag) (M9)', async () => {
+        await expect(gitCommitAndPushAction(
+            { workdir, message: 'm', branch: '-foo' },
+            ctx(),
+        )).rejects.toThrow(/must not start with "-"/);
+    });
+
+    it('rejects a branch literally named HEAD (M9)', async () => {
+        await expect(gitCommitAndPushAction(
+            { workdir, message: 'm', branch: 'HEAD' },
+            ctx(),
+        )).rejects.toThrow(/"HEAD" is reserved/);
+    });
+
+    it('rejects a branch name containing whitespace (M9)', async () => {
+        await expect(gitCommitAndPushAction(
+            { workdir, message: 'm', branch: 'feat with space' },
+            ctx(),
+        )).rejects.toThrow(/whitespace/);
+    });
+
+    it('rejects a branch name with control characters (M9)', async () => {
+        await expect(gitCommitAndPushAction(
+            { workdir, message: 'm', branch: 'feat\x01x' },
+            ctx(),
+        )).rejects.toThrow(/control characters/);
+    });
+
+    // ── L8: paths='' / paths=[] consistency ───────────────────────────────
+    it('rejects empty/whitespace-only paths string (L8 — consistent with [])', async () => {
+        await expect(gitCommitAndPushAction(
+            { workdir, message: 'm', paths: '' },
+            ctx(),
+        )).rejects.toThrow(/string was empty/);
+        await expect(gitCommitAndPushAction(
+            { workdir, message: 'm', paths: '   ,  ' },
+            ctx(),
+        )).rejects.toThrow(/string was empty/);
+    });
+
     it('accepts a comma-separated string for paths (M4)', async () => {
         await writeFile(join(workdir, 'a.txt'), 'a\n');
         await writeFile(join(workdir, 'b.txt'), 'b\n');
