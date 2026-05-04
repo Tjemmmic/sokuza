@@ -139,6 +139,69 @@ describe('data.pr-fields', () => {
         expect(out.title).toBe('');
         expect(out.labels).toEqual([]);
     });
+
+    // ── M7: cross-repo / fork PR support ───────────────────────────────────
+    it('exposes headRepo separately for fork PRs and flags isCrossRepo', async () => {
+        const graph = dataGraph('data.pr-fields');
+        graph.edges.push({ from: { node: 'trig', port: 'pr' }, to: { node: 'x', port: 'pr' } });
+        const event = evt({
+            payload: {
+                pull_request: {
+                    number: 5,
+                    head: { ref: 'feature', repo: { full_name: 'forkuser/fork' } },
+                    base: { ref: 'main', repo: { full_name: 'octo/r' } },
+                    user: { login: 'forkuser' },
+                },
+            },
+        });
+        const result = await executeGraph(graph, event, actions, registry, noopLogger);
+        const out = result.nodeOutputs.x;
+        expect(out.repo).toBe('octo/r');
+        expect(out.headRepo).toBe('forkuser/fork');
+        expect(out.isCrossRepo).toBe(true);
+        // headFullRef is the GitHub canonical owner:branch form for fork PRs.
+        expect(out.headFullRef).toBe('forkuser:feature');
+    });
+
+    it('headRepo === repo and isCrossRepo === false for in-repo PRs', async () => {
+        const graph = dataGraph('data.pr-fields');
+        graph.edges.push({ from: { node: 'trig', port: 'pr' }, to: { node: 'x', port: 'pr' } });
+        const event = evt({
+            payload: {
+                pull_request: {
+                    number: 1,
+                    head: { ref: 'feature', repo: { full_name: 'octo/r' } },
+                    base: { ref: 'main', repo: { full_name: 'octo/r' } },
+                },
+            },
+        });
+        const result = await executeGraph(graph, event, actions, registry, noopLogger);
+        const out = result.nodeOutputs.x;
+        expect(out.headRepo).toBe('octo/r');
+        expect(out.isCrossRepo).toBe(false);
+        expect(out.headFullRef).toBe('feature');
+    });
+
+    it('handles deleted-fork PRs (head.repo missing) gracefully', async () => {
+        const graph = dataGraph('data.pr-fields');
+        graph.edges.push({ from: { node: 'trig', port: 'pr' }, to: { node: 'x', port: 'pr' } });
+        const event = evt({
+            payload: {
+                pull_request: {
+                    number: 1,
+                    // GitHub returns head.repo: null when the fork has been deleted.
+                    head: { ref: 'feature', repo: null },
+                    base: { ref: 'main', repo: { full_name: 'octo/r' } },
+                },
+            },
+        });
+        const result = await executeGraph(graph, event, actions, registry, noopLogger);
+        const out = result.nodeOutputs.x;
+        expect(out.repo).toBe('octo/r');
+        // Falls back to baseRepo so downstream nodes still have something usable.
+        expect(out.headRepo).toBe('octo/r');
+        expect(out.isCrossRepo).toBe(false);
+    });
 });
 
 describe('data.issue-fields', () => {
