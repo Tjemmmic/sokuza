@@ -46,7 +46,7 @@ export const githubAddLabelAction: ActionHandler = async (params, context) => {
     if (cleaned.length === 0) throw new Error('github-add-label: at least one label required');
     const client = new GitHubApiClient(token);
     await client.addLabels(owner, repo, number, cleaned);
-    return { added: cleaned, owner, repo, number };
+    return { success: true, appliedLabels: cleaned, owner, repo, number };
 };
 
 export const githubRemoveLabelAction: ActionHandler = async (params, context) => {
@@ -55,5 +55,5 @@ export const githubRemoveLabelAction: ActionHandler = async (params, context) =>
     if (!label) throw new Error('github-remove-label: label required');
     const client = new GitHubApiClient(token);
     await client.removeLabel(owner, repo, number, label);
-    return { removed: label, owner, repo, number };
+    return { success: true, removedLabel: label, owner, repo, number };
 };

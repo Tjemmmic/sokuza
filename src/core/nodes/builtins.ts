@@ -278,7 +278,7 @@ const aiReviewNode = actionNode({
     ports: [
         { name: 'diff', label: 'Diff', role: 'input', wire: true, type: 'diff', helpText: 'Wire from a github-fetch-diff node, or paste raw diff' },
         { name: 'pr_number', label: 'PR Number', role: 'input', wire: true, config: true, control: 'number', type: 'number' },
-        { name: 'repo', label: 'Repository', role: 'input', wire: true, config: true, control: 'text', placeholder: 'org/repo' },
+        { name: 'repo', label: 'Repository', role: 'input', wire: true, config: true, control: 'text', type: 'string', placeholder: 'org/repo' },
         { name: 'prompt', label: 'System Prompt (optional override)', role: 'input', config: true, control: 'textarea' },
         { name: 'provider', label: 'AI Provider', role: 'input', config: true, control: 'text', placeholder: 'claude-code, anthropic, opencode…' },
         { name: 'model', label: 'Model', role: 'input', config: true, control: 'text', placeholder: 'opus, sonnet…' },
@@ -304,9 +304,9 @@ const aiAgentNode = actionNode({
     icon: '🛠️',
     color: COLOR_AI,
     ports: [
-        { name: 'prompt', label: 'Prompt', role: 'input', wire: true, config: true, control: 'textarea', required: true },
+        { name: 'prompt', label: 'Prompt', role: 'input', wire: true, config: true, control: 'textarea', type: 'string', required: true },
         { name: 'workdir', label: 'Workdir', role: 'input', wire: true, type: 'string', helpText: 'From github-clone-repo' },
-        { name: 'context', label: 'Extra Context', role: 'input', wire: true, config: true, control: 'textarea' },
+        { name: 'context', label: 'Extra Context', role: 'input', wire: true, config: true, control: 'textarea', type: 'string' },
         { name: 'output_format', label: 'Output Format', role: 'input', config: true, control: 'select', options: [
             { value: 'text', label: 'Text' },
             { value: 'json', label: 'JSON' },
@@ -336,7 +336,7 @@ const addressReviewNode = actionNode({
         { name: 'review_run_id', label: 'Review Run Id', role: 'input', wire: true, type: 'string' },
         { name: 'structured', label: 'Structured Review', role: 'input', wire: true, type: 'review' },
         { name: 'pr_number', label: 'PR Number', role: 'input', wire: true, config: true, control: 'number', type: 'number' },
-        { name: 'repo', label: 'Repository', role: 'input', wire: true, config: true, control: 'text' },
+        { name: 'repo', label: 'Repository', role: 'input', wire: true, config: true, control: 'text', type: 'string' },
         { name: 'max_iterations', label: 'Max Iterations', role: 'input', config: true, control: 'number', type: 'number' },
         { name: 'cooldown_seconds', label: 'Cooldown (s)', role: 'input', config: true, control: 'number', type: 'number' },
         { name: 'provider', label: 'AI Provider', role: 'input', config: true, control: 'text' },
@@ -358,7 +358,7 @@ const githubFetchDiff = actionNode({
     color: COLOR_GITHUB,
     ports: [
         { name: 'pr_number', label: 'PR Number', role: 'input', wire: true, config: true, control: 'number', type: 'number' },
-        { name: 'repo', label: 'Repository', role: 'input', wire: true, config: true, control: 'text' },
+        { name: 'repo', label: 'Repository', role: 'input', wire: true, config: true, control: 'text', type: 'string' },
         { name: 'max_diff_chars', label: 'Max Chars', role: 'input', config: true, control: 'number', type: 'number' },
         { name: 'token', label: 'GitHub Token (optional override)', role: 'input', config: true, control: 'text' },
         { name: 'diff', label: 'Diff', role: 'output', wire: true, type: 'diff' },
@@ -376,9 +376,9 @@ const githubComment = actionNode({
     icon: '💬',
     color: COLOR_GITHUB,
     ports: [
-        { name: 'body', label: 'Body', role: 'input', wire: true, config: true, control: 'code-md', required: true },
+        { name: 'body', label: 'Body', role: 'input', wire: true, config: true, control: 'code-md', type: 'string', required: true },
         { name: 'pr_number', label: 'PR/Issue Number', role: 'input', wire: true, config: true, control: 'number', type: 'number' },
-        { name: 'repo', label: 'Repository', role: 'input', wire: true, config: true, control: 'text' },
+        { name: 'repo', label: 'Repository', role: 'input', wire: true, config: true, control: 'text', type: 'string' },
         { name: 'token', label: 'GitHub Token (optional override)', role: 'input', config: true, control: 'text' },
         { name: 'commentId', label: 'Comment Id', role: 'output', wire: true, type: 'string' },
         { name: 'url', label: 'Comment URL', role: 'output', wire: true, type: 'string' },
@@ -394,12 +394,15 @@ const githubCloneRepo = actionNode({
     icon: '📁',
     color: COLOR_GITHUB,
     ports: [
-        { name: 'repo', label: 'Repository', role: 'input', wire: true, config: true, control: 'text', required: true },
-        { name: 'ref', label: 'Ref / Branch', role: 'input', wire: true, config: true, control: 'text' },
+        { name: 'repo', label: 'Repository', role: 'input', wire: true, config: true, control: 'text', type: 'string', required: true },
+        { name: 'ref', label: 'Ref / Branch', role: 'input', wire: true, config: true, control: 'text', type: 'string' },
         { name: 'depth', label: 'Clone Depth', role: 'input', config: true, control: 'number', type: 'number' },
         { name: 'destDir', label: 'Destination Dir (optional)', role: 'input', config: true, control: 'text' },
         { name: 'path', label: 'Workdir Path', role: 'output', wire: true, type: 'string' },
         { name: 'sha', label: 'Cloned SHA', role: 'output', wire: true, type: 'string' },
+        // Re-emit so downstream nodes don't have to re-wire from the trigger.
+        { name: 'repo', label: 'Repository', role: 'output', wire: true, type: 'string' },
+        { name: 'branch', label: 'Branch / Ref', role: 'output', wire: true, type: 'string' },
     ],
 });
 
@@ -413,14 +416,19 @@ const githubCreatePr = actionNode({
     color: COLOR_GITHUB,
     ports: [
         { name: 'workdir', label: 'Workdir', role: 'input', wire: true, type: 'string', required: true },
-        { name: 'repo', label: 'Repository', role: 'input', wire: true, config: true, control: 'text', required: true },
+        { name: 'repo', label: 'Repository', role: 'input', wire: true, config: true, control: 'text', type: 'string', required: true },
         { name: 'branch', label: 'Branch', role: 'input', config: true, control: 'text' },
         { name: 'base', label: 'Base Branch', role: 'input', config: true, control: 'text', default: 'main' },
-        { name: 'title', label: 'Title', role: 'input', wire: true, config: true, control: 'text' },
-        { name: 'body', label: 'Body', role: 'input', wire: true, config: true, control: 'code-md' },
+        { name: 'title', label: 'Title', role: 'input', wire: true, config: true, control: 'text', type: 'string' },
+        { name: 'body', label: 'Body', role: 'input', wire: true, config: true, control: 'code-md', type: 'string' },
         { name: 'commit_message', label: 'Commit Message', role: 'input', config: true, control: 'text' },
         { name: 'number', label: 'PR Number', role: 'output', wire: true, type: 'number' },
         { name: 'url', label: 'PR URL', role: 'output', wire: true, type: 'string' },
+        // Re-emit construction-time fields so downstream PR-acting nodes can
+        // be wired from this single source instead of also wiring back to
+        // the trigger / clone-repo.
+        { name: 'repo', label: 'Repository', role: 'output', wire: true, type: 'string' },
+        { name: 'branch', label: 'Branch', role: 'output', wire: true, type: 'string' },
     ],
 });
 
@@ -433,9 +441,9 @@ const githubCreateReview = actionNode({
     icon: '✅',
     color: COLOR_GITHUB,
     ports: [
-        { name: 'body', label: 'Body', role: 'input', wire: true, config: true, control: 'code-md', required: true },
+        { name: 'body', label: 'Body', role: 'input', wire: true, config: true, control: 'code-md', type: 'string', required: true },
         { name: 'pr_number', label: 'PR Number', role: 'input', wire: true, config: true, control: 'number', type: 'number' },
-        { name: 'repo', label: 'Repository', role: 'input', wire: true, config: true, control: 'text' },
+        { name: 'repo', label: 'Repository', role: 'input', wire: true, config: true, control: 'text', type: 'string' },
         { name: 'event', label: 'Review Event', role: 'input', config: true, control: 'select', options: [
             { value: 'COMMENT', label: 'Comment' },
             { value: 'APPROVE', label: 'Approve' },
@@ -456,7 +464,7 @@ const githubFetchReviews = actionNode({
     color: COLOR_GITHUB,
     ports: [
         { name: 'pr_number', label: 'PR Number', role: 'input', wire: true, config: true, control: 'number', type: 'number' },
-        { name: 'repo', label: 'Repository', role: 'input', wire: true, config: true, control: 'text' },
+        { name: 'repo', label: 'Repository', role: 'input', wire: true, config: true, control: 'text', type: 'string' },
         { name: 'reviews', label: 'Reviews', role: 'output', wire: true, type: 'json' },
     ],
 });
@@ -470,9 +478,11 @@ const githubAddLabel = actionNode({
     icon: '🏷️',
     color: COLOR_GITHUB,
     ports: [
-        { name: 'label', label: 'Label(s)', role: 'input', wire: true, config: true, control: 'text', required: true, helpText: 'Comma-separated for multiple' },
+        { name: 'label', label: 'Label(s)', role: 'input', wire: true, config: true, control: 'text', type: 'string', required: true, helpText: 'Comma-separated for multiple' },
         { name: 'pr_number', label: 'PR/Issue Number', role: 'input', wire: true, config: true, control: 'number', type: 'number' },
-        { name: 'repo', label: 'Repository', role: 'input', wire: true, config: true, control: 'text' },
+        { name: 'repo', label: 'Repository', role: 'input', wire: true, config: true, control: 'text', type: 'string' },
+        { name: 'success', label: 'Success', role: 'output', wire: true, type: 'boolean' },
+        { name: 'appliedLabels', label: 'Applied Labels', role: 'output', wire: true, type: 'json' },
     ],
 });
 
@@ -485,9 +495,11 @@ const githubRemoveLabel = actionNode({
     icon: '🗑️',
     color: COLOR_GITHUB,
     ports: [
-        { name: 'label', label: 'Label', role: 'input', wire: true, config: true, control: 'text', required: true },
+        { name: 'label', label: 'Label', role: 'input', wire: true, config: true, control: 'text', type: 'string', required: true },
         { name: 'pr_number', label: 'PR/Issue Number', role: 'input', wire: true, config: true, control: 'number', type: 'number' },
-        { name: 'repo', label: 'Repository', role: 'input', wire: true, config: true, control: 'text' },
+        { name: 'repo', label: 'Repository', role: 'input', wire: true, config: true, control: 'text', type: 'string' },
+        { name: 'success', label: 'Success', role: 'output', wire: true, type: 'boolean' },
+        { name: 'removedLabel', label: 'Removed Label', role: 'output', wire: true, type: 'string' },
     ],
 });
 
@@ -502,10 +514,13 @@ const slackSend = actionNode({
     icon: '💬',
     color: COLOR_NOTIFY,
     ports: [
-        { name: 'channel', label: 'Channel', role: 'input', wire: true, config: true, control: 'text', required: true },
-        { name: 'text', label: 'Text', role: 'input', wire: true, config: true, control: 'textarea', required: true },
+        { name: 'channel', label: 'Channel', role: 'input', wire: true, config: true, control: 'text', type: 'string', required: true },
+        { name: 'text', label: 'Text', role: 'input', wire: true, config: true, control: 'textarea', type: 'string', required: true },
         { name: 'token', label: 'Slack Token (optional override)', role: 'input', config: true, control: 'text' },
-        { name: 'ts', label: 'Message Timestamp', role: 'output', wire: true, type: 'string' },
+        // Symmetry: slack.react expects `timestamp`. Using the same name here
+        // means the obvious wire just works.
+        { name: 'timestamp', label: 'Message Timestamp', role: 'output', wire: true, type: 'string' },
+        { name: 'channel', label: 'Channel', role: 'output', wire: true, type: 'string' },
     ],
 });
 
@@ -518,9 +533,9 @@ const slackReact = actionNode({
     icon: '👍',
     color: COLOR_NOTIFY,
     ports: [
-        { name: 'channel', label: 'Channel', role: 'input', wire: true, config: true, control: 'text', required: true },
-        { name: 'timestamp', label: 'Message Timestamp', role: 'input', wire: true, config: true, control: 'text', required: true },
-        { name: 'emoji', label: 'Emoji', role: 'input', wire: true, config: true, control: 'text', required: true, placeholder: 'thumbsup' },
+        { name: 'channel', label: 'Channel', role: 'input', wire: true, config: true, control: 'text', type: 'string', required: true },
+        { name: 'timestamp', label: 'Message Timestamp', role: 'input', wire: true, config: true, control: 'text', type: 'string', required: true },
+        { name: 'emoji', label: 'Emoji', role: 'input', wire: true, config: true, control: 'text', type: 'string', required: true, placeholder: 'thumbsup' },
     ],
 });
 
@@ -554,7 +569,7 @@ const webhookNode = actionNode({
     icon: '🌐',
     color: COLOR_UTILITY,
     ports: [
-        { name: 'url', label: 'URL', role: 'input', wire: true, config: true, control: 'text', required: true },
+        { name: 'url', label: 'URL', role: 'input', wire: true, config: true, control: 'text', type: 'string', required: true },
         { name: 'method', label: 'Method', role: 'input', config: true, control: 'select', options: [
             { value: 'POST', label: 'POST' },
             { value: 'PUT', label: 'PUT' },
@@ -562,7 +577,7 @@ const webhookNode = actionNode({
             { value: 'DELETE', label: 'DELETE' },
             { value: 'GET', label: 'GET' },
         ], default: 'POST' },
-        { name: 'body', label: 'Body (JSON)', role: 'input', wire: true, config: true, control: 'textarea' },
+        { name: 'body', label: 'Body (JSON)', role: 'input', wire: true, config: true, control: 'textarea', type: 'string' },
         { name: 'headers', label: 'Headers', role: 'input', config: true, control: 'kv' },
         { name: 'status', label: 'Status', role: 'output', wire: true, type: 'number' },
         { name: 'ok', label: 'OK?', role: 'output', wire: true, type: 'boolean' },

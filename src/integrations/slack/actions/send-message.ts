@@ -48,7 +48,7 @@ export const slackSendMessageAction: ActionHandler = async (params, context) => 
     );
 
     return {
-        ts: result.ts,
+        timestamp: result.ts,
         channel: result.channel,
     };
 };
