@@ -304,7 +304,9 @@ export class GitHubApiClient {
         return (await res.json()) as Record<string, unknown>;
     }
 
-    /** PATCH a pull request — title, body, state, base. Any subset works. */
+    /** PATCH a pull request — title, body, state, base. Any subset works,
+     *  but at least one field must be supplied (sending {} would burn an
+     *  authenticated round-trip for a no-op). */
     async updatePullRequest(
         owner: string,
         repo: string,
@@ -317,6 +319,9 @@ export class GitHubApiClient {
         if (options.body !== undefined) payload.body = options.body;
         if (options.state !== undefined) payload.state = options.state;
         if (options.base !== undefined) payload.base = options.base;
+        if (Object.keys(payload).length === 0) {
+            throw new Error('updatePullRequest: at least one of title/body/state/base must be supplied');
+        }
         const res = await fetchWithTimeout(url, {
             method: 'PATCH',
             headers: this.headers(),

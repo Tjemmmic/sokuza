@@ -105,6 +105,15 @@ describe('github-merge-pr', () => {
             githubMergePrAction({ pr_number: 42, repo: 'octo/r' }, makeContext()),
         ).rejects.toThrow(/error merging PR: 405/);
     });
+
+    it('throws on a 200 response with merged=false (M1 — silent-failure guard)', async () => {
+        mockFetch([
+            () => new Response(JSON.stringify({ merged: false, message: 'Pull Request is not mergeable' }), { status: 200 }),
+        ]);
+        await expect(
+            githubMergePrAction({ pr_number: 42, repo: 'octo/r' }, makeContext()),
+        ).rejects.toThrow(/200 but merged=false.*not mergeable/);
+    });
 });
 
 describe('github-update-pr', () => {
@@ -130,5 +139,14 @@ describe('github-update-pr', () => {
         const init = spy.mock.calls[0][1] as RequestInit;
         const body = JSON.parse(String(init?.body ?? '{}'));
         expect(body).toEqual({ title: 'New title' });
+    });
+
+    it('throws when no field is supplied (M2 — empty-body guard)', async () => {
+        // No fetch should happen — the guard fires before the API call.
+        const spy = mockFetch([() => new Response('{}', { status: 200 })]);
+        await expect(
+            githubUpdatePrAction({ pr_number: 42, repo: 'octo/r' }, makeContext()),
+        ).rejects.toThrow(/at least one of title\/body\/state\/base/);
+        expect(spy).not.toHaveBeenCalled();
     });
 });
