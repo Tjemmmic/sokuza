@@ -182,7 +182,7 @@ describe('data.pr-fields', () => {
         expect(out.headFullRef).toBe('feature');
     });
 
-    it('handles deleted-fork PRs (head.repo missing) gracefully', async () => {
+    it('flags deleted-fork PRs as cross-repo and exposes headRepoDeleted (M11)', async () => {
         const graph = dataGraph('data.pr-fields');
         graph.edges.push({ from: { node: 'trig', port: 'pr' }, to: { node: 'x', port: 'pr' } });
         const event = evt({
@@ -198,8 +198,30 @@ describe('data.pr-fields', () => {
         const result = await executeGraph(graph, event, actions, registry, noopLogger);
         const out = result.nodeOutputs.x;
         expect(out.repo).toBe('octo/r');
-        // Falls back to baseRepo so downstream nodes still have something usable.
-        expect(out.headRepo).toBe('octo/r');
+        // Critical: headRepo is empty (not silently coerced to base). A
+        // downstream clone-repo wired to headRepo will fail loudly instead
+        // of cloning the wrong place.
+        expect(out.headRepo).toBe('');
+        expect(out.headRepoDeleted).toBe(true);
+        // The PR was originally cross-repo even though the fork is gone now.
+        expect(out.isCrossRepo).toBe(true);
+    });
+
+    it('headRepoDeleted=false for normal in-repo PRs (M11)', async () => {
+        const graph = dataGraph('data.pr-fields');
+        graph.edges.push({ from: { node: 'trig', port: 'pr' }, to: { node: 'x', port: 'pr' } });
+        const event = evt({
+            payload: {
+                pull_request: {
+                    number: 1,
+                    head: { ref: 'feature', repo: { full_name: 'octo/r' } },
+                    base: { ref: 'main', repo: { full_name: 'octo/r' } },
+                },
+            },
+        });
+        const result = await executeGraph(graph, event, actions, registry, noopLogger);
+        const out = result.nodeOutputs.x;
+        expect(out.headRepoDeleted).toBe(false);
         expect(out.isCrossRepo).toBe(false);
     });
 });

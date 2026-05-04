@@ -940,9 +940,10 @@ const prFieldsNode: NodeDefinition = {
         { name: 'number', label: 'Number', role: 'output', wire: true, type: 'number' },
         // `repo` is the base (target) repo. For fork PRs the head lives
         // elsewhere — see `headRepo` below.
-        { name: 'repo', label: 'Repository (base)', role: 'output', wire: true, type: 'string' },
-        { name: 'headRepo', label: 'Head Repository', role: 'output', wire: true, type: 'string', helpText: 'Same as repo for in-repo PRs; the fork "owner/name" for fork PRs' },
+        { name: 'repo', label: 'Repository', role: 'output', wire: true, type: 'string' },
+        { name: 'headRepo', label: 'Head Repository', role: 'output', wire: true, type: 'string', helpText: 'Same as repo for in-repo PRs; the fork "owner/name" for fork PRs. Empty when the fork has been deleted.' },
         { name: 'isCrossRepo', label: 'Cross-Repo / Fork PR?', role: 'output', wire: true, type: 'boolean' },
+        { name: 'headRepoDeleted', label: 'Head Repo Deleted?', role: 'output', wire: true, type: 'boolean', helpText: 'True when the head fork has been removed — clone/checkout from headRepo will fail.' },
         { name: 'branch', label: 'Head Branch', role: 'output', wire: true, type: 'string' },
         // `headFullRef` is the GitHub-canonical "owner:branch" form needed
         // for create-pr from a fork; identical to branch for in-repo PRs.
@@ -964,17 +965,34 @@ const prFieldsNode: NodeDefinition = {
         const base = (pr.base as Record<string, unknown>) ?? {};
         const user = (pr.user as Record<string, unknown>) ?? {};
         const baseRepo = deriveRepoFromPr(pr);
-        const headRepo = deriveRepoFromHead(head) || baseRepo;
+        // GitHub returns head.repo === null when the fork has been deleted.
+        // Detect that explicitly so we can distinguish "in-repo PR" (head ===
+        // base) from "deleted-fork PR" (head was different but is now gone).
+        const headRepoRaw = head.repo as Record<string, unknown> | null | undefined;
+        const headRepoDeleted = headRepoRaw === null;
+        const headRepoFromPayload = typeof headRepoRaw === 'object' && headRepoRaw !== null && typeof headRepoRaw.full_name === 'string'
+            ? headRepoRaw.full_name
+            : '';
+        // For in-repo PRs head.repo.full_name === base.repo.full_name; users
+        // wiring downstream clone-repo expect a non-empty headRepo, so for
+        // deleted forks we expose the empty string (NOT a fallback to base —
+        // that would silently misclassify the PR as same-repo).
+        const headRepo = headRepoFromPayload;
         const branch = typeof head.ref === 'string' ? head.ref : '';
-        // Cross-repo PRs need owner:branch; same-repo PRs just need branch.
+        // isCrossRepo is true whenever the head was different from base —
+        // including the deleted-fork case, since downstream nodes need to
+        // know the PR isn't safe to clone from the local repo.
+        const isCrossRepo = headRepoDeleted || (headRepo !== '' && baseRepo !== '' && headRepo !== baseRepo);
+        // headFullRef ("owner:branch") is only meaningful when we know the
+        // owner — falls back to bare branch otherwise.
         const headOwner = headRepo.includes('/') ? headRepo.split('/')[0] : '';
-        const isCrossRepo = headRepo !== '' && baseRepo !== '' && headRepo !== baseRepo;
         const headFullRef = isCrossRepo && branch && headOwner ? `${headOwner}:${branch}` : branch;
         return {
             number: typeof pr.number === 'number' ? pr.number : undefined,
             repo: baseRepo,
             headRepo,
             isCrossRepo,
+            headRepoDeleted,
             branch,
             headFullRef,
             baseBranch: typeof base.ref === 'string' ? base.ref : '',
@@ -990,13 +1008,6 @@ const prFieldsNode: NodeDefinition = {
         };
     },
 };
-
-/** "owner/name" of head.repo, or '' if not present (e.g. fork was deleted). */
-function deriveRepoFromHead(head: Record<string, unknown>): string {
-    const headRepo = head.repo as Record<string, unknown> | undefined;
-    if (typeof headRepo?.full_name === 'string') return headRepo.full_name;
-    return '';
-}
 
 const issueFieldsNode: NodeDefinition = {
     type: 'data.issue-fields',
