@@ -7,6 +7,15 @@ import { assembleDiffFromFiles } from '../../core/diff-assembler.js';
 
 const GITHUB_API_BASE = 'https://api.github.com';
 const DEFAULT_FETCH_TIMEOUT_MS = 30_000;
+const ERROR_BODY_MAX_CHARS = 500;
+
+/** Truncate API response bodies before they land in error messages — they
+ *  can carry sensitive context (PR titles from private repos) and propagate
+ *  to downstream loggers. */
+function truncateErrorBody(body: string): string {
+    if (body.length <= ERROR_BODY_MAX_CHARS) return body;
+    return body.slice(0, ERROR_BODY_MAX_CHARS) + `… [truncated, ${body.length} chars total]`;
+}
 
 async function fetchWithTimeout(
     url: string | URL,
@@ -131,15 +140,24 @@ export class GitHubApiClient {
         repo: string,
         prNumber: number,
     ): Promise<DiffResult> {
-        try {
-            const diff = await this.getPullRequestDiff(owner, repo, prNumber);
+        // Inline the bulk-diff fetch so we can branch on the actual HTTP
+        // status code instead of substring-matching '406' in an error
+        // message (which would also match '/pulls/4060', SHA fragments, etc).
+        const url = `${this.baseUrl}/repos/${owner}/${repo}/pulls/${prNumber}`;
+        const res = await fetchWithTimeout(url, {
+            headers: this.headers('application/vnd.github.diff'),
+        });
+        if (res.ok) {
+            const diff = await res.text();
             return { diff, source: 'bulk', incompleteFiles: [] };
-        } catch (err) {
-            const msg = err instanceof Error ? err.message : String(err);
-            const isTooLarge = msg.includes('406') || msg.toLowerCase().includes('too large');
-            if (!isTooLarge) throw err;
+        }
+        if (res.status !== 406) {
+            throw new Error(
+                `GitHub API error fetching diff: ${res.status} ${res.statusText}`,
+            );
         }
 
+        // 406 = diff too large — fall back to per-file assembly.
         const files = await this.getPullRequestFiles(owner, repo, prNumber);
         const fileEntries = files.map((f) => ({
             filename: f.filename as string,
@@ -177,7 +195,7 @@ export class GitHubApiClient {
         if (!res.ok) {
             const errorBody = await res.text();
             throw new Error(
-                `GitHub API error creating comment: ${res.status} ${res.statusText} — ${errorBody}`,
+                `GitHub API error creating comment: ${res.status} ${res.statusText} — ${truncateErrorBody(errorBody)}`,
             );
         }
 
@@ -223,7 +241,7 @@ export class GitHubApiClient {
         if (!res.ok) {
             const errorBody = await res.text();
             throw new Error(
-                `GitHub API error creating review: ${res.status} ${res.statusText} — ${errorBody}`,
+                `GitHub API error creating review: ${res.status} ${res.statusText} — ${truncateErrorBody(errorBody)}`,
             );
         }
 
@@ -245,7 +263,7 @@ export class GitHubApiClient {
         });
         if (!res.ok) {
             const body = await res.text();
-            throw new Error(`GitHub API error adding labels: ${res.status} — ${body}`);
+            throw new Error(`GitHub API error adding labels: ${res.status} — ${truncateErrorBody(body)}`);
         }
     }
 
@@ -263,7 +281,7 @@ export class GitHubApiClient {
         // 404 means "label wasn't on the issue" — same desired end state.
         if (!res.ok && res.status !== 404) {
             const body = await res.text();
-            throw new Error(`GitHub API error removing label: ${res.status} — ${body}`);
+            throw new Error(`GitHub API error removing label: ${res.status} — ${truncateErrorBody(body)}`);
         }
     }
 
@@ -276,7 +294,7 @@ export class GitHubApiClient {
         const res = await fetchWithTimeout(url, { headers: this.headers() });
         if (!res.ok) {
             const body = await res.text();
-            throw new Error(`GitHub API error listing labels: ${res.status} — ${body}`);
+            throw new Error(`GitHub API error listing labels: ${res.status} — ${truncateErrorBody(body)}`);
         }
         const json = (await res.json()) as Array<{ name: string }>;
         return json.map((l) => l.name);
@@ -297,7 +315,7 @@ export class GitHubApiClient {
         if (!res.ok) {
             const errorBody = await res.text();
             throw new Error(
-                `GitHub API error creating PR: ${res.status} ${res.statusText} — ${errorBody}`,
+                `GitHub API error creating PR: ${res.status} ${res.statusText} — ${truncateErrorBody(errorBody)}`,
             );
         }
 
@@ -330,7 +348,7 @@ export class GitHubApiClient {
         if (!res.ok) {
             const errorBody = await res.text();
             throw new Error(
-                `GitHub API error updating PR: ${res.status} ${res.statusText} — ${errorBody}`,
+                `GitHub API error updating PR: ${res.status} ${res.statusText} — ${truncateErrorBody(errorBody)}`,
             );
         }
         return (await res.json()) as Record<string, unknown>;
@@ -363,7 +381,7 @@ export class GitHubApiClient {
         if (!res.ok) {
             const errorBody = await res.text();
             throw new Error(
-                `GitHub API error merging PR: ${res.status} ${res.statusText} — ${errorBody}`,
+                `GitHub API error merging PR: ${res.status} ${res.statusText} — ${truncateErrorBody(errorBody)}`,
             );
         }
         const json = (await res.json()) as { merged?: boolean; sha?: string; message?: string };
