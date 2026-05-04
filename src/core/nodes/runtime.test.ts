@@ -217,4 +217,42 @@ describe('executeGraph', () => {
         await expect(executeGraph(graph, evt(), actions, registry, noopLogger))
             .rejects.toThrow(/unknown type "no.such.type"/);
     });
+
+    it('manual-trigger inputs surface as top-level output values', async () => {
+        const graph: NodeGraph = {
+            nodes: [{ id: 'trig', type: 'trigger.github' }],
+            edges: [],
+        };
+        const event = evt({
+            source: 'manual',
+            payload: { inputs: { pr: { number: 42, title: 'WIP' }, note: 'urgent' } },
+        });
+        const result = await executeGraph(graph, event, actions, registry, noopLogger);
+        expect(result.nodeOutputs.trig.pr).toEqual({ number: 42, title: 'WIP' });
+        expect(result.nodeOutputs.trig.note).toBe('urgent');
+        // The fallback `inputs` bag is also still present.
+        expect(result.nodeOutputs.trig.inputs).toMatchObject({ pr: { number: 42 } });
+    });
+
+    it('github PR events synthesize prNumber/branch/author/repo/pr', async () => {
+        const graph: NodeGraph = {
+            nodes: [{ id: 'trig', type: 'trigger.github' }],
+            edges: [],
+        };
+        const event = evt({
+            payload: {
+                pull_request: {
+                    number: 7,
+                    head: { ref: 'feature-x' },
+                    user: { login: 'octocat' },
+                },
+            },
+            metadata: { repo: 'org/r' },
+        });
+        const result = await executeGraph(graph, event, actions, registry, noopLogger);
+        expect(result.nodeOutputs.trig.prNumber).toBe(7);
+        expect(result.nodeOutputs.trig.branch).toBe('feature-x');
+        expect(result.nodeOutputs.trig.author).toBe('octocat');
+        expect(result.nodeOutputs.trig.repo).toBe('org/r');
+    });
 });

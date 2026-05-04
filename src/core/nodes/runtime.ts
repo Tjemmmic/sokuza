@@ -188,7 +188,7 @@ async function runNode(node: GraphNode, deps: RunNodeDeps): Promise<NodeRuntimeO
         // Trigger nodes don't execute — their outputs come from the event.
         const synth = def.synthesizeFromEvent
             ? def.synthesizeFromEvent(node, baseCtx)
-            : defaultTriggerOutputs(deps.event);
+            : defaultTriggerOutputs(node, deps.event);
         return synth;
     }
 
@@ -208,18 +208,55 @@ async function runNode(node: GraphNode, deps: RunNodeDeps): Promise<NodeRuntimeO
     return result ?? {};
 }
 
-function defaultTriggerOutputs(event: EventPayload): NodeRuntimeOutputs {
+/**
+ * Synthesize the output bag a trigger node exposes to downstream wires.
+ * Returns the always-present base outputs plus values matching the node's
+ * dynamic output ports (per-input fan-out for the manual trigger,
+ * event-derived fields for github triggers, etc.) so a wire that targets
+ * a derived port resolves to a real value at execution time.
+ */
+function defaultTriggerOutputs(node: import('./types.js').GraphNode, event: EventPayload): NodeRuntimeOutputs {
     const payload = (event.payload ?? {}) as Record<string, unknown>;
-    return {
-        event,
-        payload,
-        metadata: event.metadata ?? {},
-        inputs: (payload.inputs as Record<string, unknown>) ?? {},
-        pr: payload.pull_request,
-        issue: payload.issue,
-        comment: payload.comment,
-        review: payload.review,
-    };
+    const meta = (event.metadata ?? {}) as Record<string, unknown>;
+    const out: NodeRuntimeOutputs = { event, payload, metadata: meta };
+
+    // Manual triggers: spread user inputs onto top-level output ports.
+    const inputs = (payload.inputs as Record<string, unknown>) ?? {};
+    out.inputs = inputs;
+    for (const [k, v] of Object.entries(inputs)) {
+        if (out[k] === undefined) out[k] = v;
+    }
+
+    // GitHub-flavored derivations.
+    const pr = payload.pull_request as Record<string, unknown> | undefined;
+    if (pr) {
+        out.pr = pr;
+        if (pr.number !== undefined) out.prNumber = pr.number;
+        const head = pr.head as Record<string, unknown> | undefined;
+        if (head?.ref) out.branch = head.ref;
+        const user = pr.user as Record<string, unknown> | undefined;
+        if (user?.login) out.author = user.login;
+    }
+    const issue = payload.issue as Record<string, unknown> | undefined;
+    if (issue) {
+        out.issue = issue;
+        if (issue.number !== undefined) out.issueNumber = issue.number;
+        const user = issue.user as Record<string, unknown> | undefined;
+        if (user?.login && out.author === undefined) out.author = user.login;
+    }
+    const comment = payload.comment as Record<string, unknown> | undefined;
+    if (comment) {
+        out.comment = comment;
+        if (typeof comment.body === 'string') out.commentBody = comment.body;
+    }
+    const review = payload.review as Record<string, unknown> | undefined;
+    if (review) out.review = review;
+
+    if (typeof meta.repo === 'string') out.repo = meta.repo;
+
+    // Manual-trigger output names should win when a user has picked a name
+    // that collides with a synthesized field — keep the explicit input value.
+    return out;
 }
 
 function withTimeout<T>(promise: Promise<T>, seconds: number | undefined, message: string): Promise<T> {

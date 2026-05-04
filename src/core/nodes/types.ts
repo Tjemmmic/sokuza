@@ -104,6 +104,21 @@ export type NodeExecutor = (
     ctx: NodeRuntimeContext,
 ) => Promise<NodeRuntimeOutputs>;
 
+/**
+ * Declarative recipe for adding extra output ports based on node config.
+ * Lives in the serialized definition so the dashboard can render the
+ * right ports without re-implementing trigger-specific logic. Two kinds:
+ *
+ *   - 'per-input': for the manual trigger. Reads `node.config.inputs` (a
+ *     list of {name,label,type}) and adds one output port per entry.
+ *
+ *   - 'event-conditional': for source triggers. Adds the listed ports
+ *     when *any* event in `node.config.events` matches one of `whenEvents`.
+ */
+export type DynamicOutputSpec =
+    | { kind: 'per-input'; inputsConfigKey: string }
+    | { kind: 'event-conditional'; eventsConfigKey: string; rules: Array<{ whenEvents: string[]; ports: NodePort[] }> };
+
 export interface NodeDefinition {
     /** Unique node type, e.g. "github.fetch-diff" or "ai.review". */
     type: string;
@@ -120,6 +135,8 @@ export interface NodeDefinition {
     color?: string;
     /** All ports — both wired (data) and form (config). */
     ports: NodePort[];
+    /** Optional config-driven additional output ports (see above). */
+    dynamicOutputs?: DynamicOutputSpec[];
     /**
      * Runtime execution. May be omitted for trigger nodes — those have
      * their outputs synthesized from the inbound event by the runtime.
@@ -146,6 +163,7 @@ export interface SerializedNodeDefinition {
     icon: string;
     color?: string;
     ports: NodePort[];
+    dynamicOutputs?: DynamicOutputSpec[];
 }
 
 export function serializeNodeDefinition(def: NodeDefinition): SerializedNodeDefinition {
@@ -158,5 +176,77 @@ export function serializeNodeDefinition(def: NodeDefinition): SerializedNodeDefi
         icon: def.icon,
         color: def.color,
         ports: def.ports,
+        dynamicOutputs: def.dynamicOutputs,
     };
+}
+
+/**
+ * Runtime helper: resolve all output ports for a node — the static ones
+ * declared in its definition plus any dynamic ports its config has unlocked.
+ * The dashboard mirrors this logic for rendering.
+ */
+export function resolveOutputPorts(def: NodeDefinition, nodeConfig: Record<string, unknown> | undefined): NodePort[] {
+    const ports: NodePort[] = [];
+    for (const p of def.ports) {
+        if (p.role === 'output') ports.push(p);
+    }
+    if (!def.dynamicOutputs || !nodeConfig) return ports;
+
+    for (const spec of def.dynamicOutputs) {
+        if (spec.kind === 'per-input') {
+            const list = nodeConfig[spec.inputsConfigKey];
+            if (Array.isArray(list)) {
+                for (const item of list) {
+                    if (!item || typeof item !== 'object') continue;
+                    const entry = item as Record<string, unknown>;
+                    const name = typeof entry.name === 'string' ? entry.name : '';
+                    if (!name) continue;
+                    if (ports.some((p) => p.name === name)) continue;
+                    ports.push({
+                        name,
+                        label: typeof entry.label === 'string' && entry.label ? entry.label : name,
+                        role: 'output',
+                        wire: true,
+                        type: portTypeForInputType(entry.type as string | undefined),
+                        helpText: `User-defined input: ${name}`,
+                    });
+                }
+            }
+        } else if (spec.kind === 'event-conditional') {
+            const events = nodeConfig[spec.eventsConfigKey];
+            const eventList = Array.isArray(events) ? events.filter((e) => typeof e === 'string') as string[] : [];
+            for (const rule of spec.rules) {
+                if (!rule.whenEvents.some((we) => eventList.some((e) => matchEventGlob(we, e)))) continue;
+                for (const p of rule.ports) {
+                    if (ports.some((existing) => existing.name === p.name)) continue;
+                    ports.push(p);
+                }
+            }
+        }
+    }
+    return ports;
+}
+
+function portTypeForInputType(t: string | undefined): NodePort['type'] {
+    switch (t) {
+        case 'github-pr': return 'pr';
+        case 'github-issue': return 'issue';
+        case 'number': return 'number';
+        case 'boolean': return 'boolean';
+        case 'github-branch':
+        case 'github-repo':
+        case 'text':
+        case 'textarea':
+        case 'select':
+        default:
+            return 'string';
+    }
+}
+
+/** "pull_request.*" matches "pull_request.opened" / "pull_request.closed" etc. */
+function matchEventGlob(pattern: string, value: string): boolean {
+    if (pattern === value) return true;
+    if (!pattern.includes('*')) return false;
+    const re = new RegExp('^' + pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*') + '$');
+    return re.test(value);
 }

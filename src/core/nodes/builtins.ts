@@ -1,4 +1,4 @@
-import type { NodeDefinition, NodePort } from './types.js';
+import type { NodeDefinition, NodePort, DynamicOutputSpec } from './types.js';
 import type { NodeRegistry } from './registry.js';
 
 // ─── Built-in node definitions ───────────────────────────────────────────────
@@ -82,16 +82,70 @@ function wrapResult(result: unknown): Record<string, unknown> {
 // config is parsed by the engine when matching events to graphs (see
 // extractTriggerFromGraph in workflow.ts).
 
-const TRIGGER_OUTPUT_PORTS: NodePort[] = [
+// Trigger nodes have *dynamic* output ports — the editor and runtime both
+// derive the visible port list from the node's config. We expose the
+// derivation rules in the serialized definition so the dashboard can render
+// the right ports without hard-coding logic. Built-in helpers below.
+
+/** Always-present trigger outputs — useful escape hatches even when more
+ *  specific event-derived ports exist. */
+const TRIGGER_BASE_OUTPUTS: NodePort[] = [
     { name: 'event', label: 'Event', role: 'output', wire: true, type: 'event', helpText: 'The full canonical event object' },
     { name: 'payload', label: 'Payload', role: 'output', wire: true, type: 'json', helpText: 'event.payload — provider-specific raw payload' },
-    { name: 'metadata', label: 'Metadata', role: 'output', wire: true, type: 'json', helpText: 'event.metadata (repo, channel, etc.)' },
-    { name: 'pr', label: 'Pull Request', role: 'output', wire: true, type: 'pr', helpText: 'event.payload.pull_request when present' },
-    { name: 'issue', label: 'Issue', role: 'output', wire: true, type: 'issue', helpText: 'event.payload.issue when present' },
-    { name: 'comment', label: 'Comment', role: 'output', wire: true, type: 'json', helpText: 'event.payload.comment when present' },
-    { name: 'review', label: 'Review', role: 'output', wire: true, type: 'review', helpText: 'event.payload.review when present' },
-    { name: 'inputs', label: 'Manual Inputs', role: 'output', wire: true, type: 'json', helpText: 'event.payload.inputs (manual triggers)' },
 ];
+
+// Event-conditional output rules used by every github-flavored trigger.
+// When the user selects, e.g. `pull_request.opened`, the trigger node
+// grows `pr`/`prNumber`/`repo`/`branch`/`author` ports — the same fields
+// the runtime synthesizes onto the event so wires resolve to real values.
+const GITHUB_EVENT_RULES: DynamicOutputSpec = {
+    kind: 'event-conditional',
+    eventsConfigKey: 'events',
+    rules: [
+        {
+            whenEvents: ['pull_request.*', 'pull_request_review.*', 'pull_request_review_comment.*'],
+            ports: [
+                { name: 'pr', label: 'Pull Request', role: 'output', wire: true, type: 'pr' },
+                { name: 'prNumber', label: 'PR Number', role: 'output', wire: true, type: 'number' },
+                { name: 'repo', label: 'Repository', role: 'output', wire: true, type: 'string' },
+                { name: 'branch', label: 'Head Branch', role: 'output', wire: true, type: 'string' },
+                { name: 'author', label: 'PR Author', role: 'output', wire: true, type: 'string' },
+            ],
+        },
+        {
+            whenEvents: ['pull_request_review.*'],
+            ports: [
+                { name: 'review', label: 'Review', role: 'output', wire: true, type: 'review' },
+            ],
+        },
+        {
+            whenEvents: ['issues.*'],
+            ports: [
+                { name: 'issue', label: 'Issue', role: 'output', wire: true, type: 'issue' },
+                { name: 'issueNumber', label: 'Issue Number', role: 'output', wire: true, type: 'number' },
+                { name: 'repo', label: 'Repository', role: 'output', wire: true, type: 'string' },
+                { name: 'author', label: 'Issue Author', role: 'output', wire: true, type: 'string' },
+            ],
+        },
+        {
+            whenEvents: ['issue_comment.*'],
+            ports: [
+                { name: 'comment', label: 'Comment', role: 'output', wire: true, type: 'json' },
+                { name: 'commentBody', label: 'Comment Body', role: 'output', wire: true, type: 'string' },
+                { name: 'issueNumber', label: 'Issue/PR Number', role: 'output', wire: true, type: 'number' },
+                { name: 'repo', label: 'Repository', role: 'output', wire: true, type: 'string' },
+            ],
+        },
+        {
+            whenEvents: ['push'],
+            ports: [
+                { name: 'branch', label: 'Branch', role: 'output', wire: true, type: 'string' },
+                { name: 'repo', label: 'Repository', role: 'output', wire: true, type: 'string' },
+                { name: 'commits', label: 'Commits', role: 'output', wire: true, type: 'commits' },
+            ],
+        },
+    ],
+};
 
 const githubTrigger: NodeDefinition = {
     type: 'trigger.github',
@@ -102,13 +156,14 @@ const githubTrigger: NodeDefinition = {
     icon: '🐙',
     color: COLOR_TRIGGER,
     ports: [
-        { name: 'events', label: 'Events', role: 'input', config: true, control: 'multiselect', helpText: 'pull_request.opened, issues.opened, review.submitted, …' },
+        { name: 'events', label: 'Events', role: 'input', config: true, control: 'multiselect', required: true, helpText: 'pull_request.opened, issues.opened, review.submitted, …' },
         { name: 'repos', label: 'Repositories', role: 'input', config: true, control: 'text', helpText: 'Comma-separated org/repo names. Empty = all repos.' },
         { name: 'branches', label: 'Branches', role: 'input', config: true, control: 'text', helpText: 'Comma-separated. Empty = all branches.' },
         { name: 'authors', label: 'Authors', role: 'input', config: true, control: 'text', helpText: 'Comma-separated GitHub usernames. Empty = all.' },
         { name: 'labels', label: 'Labels (any of)', role: 'input', config: true, control: 'text' },
-        ...TRIGGER_OUTPUT_PORTS,
+        ...TRIGGER_BASE_OUTPUTS,
     ],
+    dynamicOutputs: [GITHUB_EVENT_RULES],
 };
 
 const githubPollTrigger: NodeDefinition = {
@@ -120,10 +175,11 @@ const githubPollTrigger: NodeDefinition = {
     icon: '🔄',
     color: COLOR_TRIGGER,
     ports: [
-        { name: 'events', label: 'Events', role: 'input', config: true, control: 'multiselect' },
+        { name: 'events', label: 'Events', role: 'input', config: true, control: 'multiselect', required: true },
         { name: 'repos', label: 'Repositories', role: 'input', config: true, control: 'text' },
-        ...TRIGGER_OUTPUT_PORTS,
+        ...TRIGGER_BASE_OUTPUTS,
     ],
+    dynamicOutputs: [GITHUB_EVENT_RULES],
 };
 
 const ghCliTrigger: NodeDefinition = {
@@ -135,10 +191,11 @@ const ghCliTrigger: NodeDefinition = {
     icon: '⚡',
     color: COLOR_TRIGGER,
     ports: [
-        { name: 'events', label: 'Events', role: 'input', config: true, control: 'multiselect' },
+        { name: 'events', label: 'Events', role: 'input', config: true, control: 'multiselect', required: true },
         { name: 'repos', label: 'Repositories', role: 'input', config: true, control: 'text' },
-        ...TRIGGER_OUTPUT_PORTS,
+        ...TRIGGER_BASE_OUTPUTS,
     ],
+    dynamicOutputs: [GITHUB_EVENT_RULES],
 };
 
 const slackTrigger: NodeDefinition = {
@@ -150,9 +207,12 @@ const slackTrigger: NodeDefinition = {
     icon: '💬',
     color: COLOR_TRIGGER,
     ports: [
-        { name: 'events', label: 'Events', role: 'input', config: true, control: 'multiselect' },
+        { name: 'events', label: 'Events', role: 'input', config: true, control: 'multiselect', required: true },
         { name: 'channels', label: 'Channels', role: 'input', config: true, control: 'text', helpText: 'Comma-separated channel ids/names' },
-        ...TRIGGER_OUTPUT_PORTS,
+        ...TRIGGER_BASE_OUTPUTS,
+        { name: 'channel', label: 'Channel', role: 'output', wire: true, type: 'string' },
+        { name: 'user', label: 'User', role: 'output', wire: true, type: 'string' },
+        { name: 'text', label: 'Message Text', role: 'output', wire: true, type: 'string' },
     ],
 };
 
@@ -166,7 +226,7 @@ const webhookTrigger: NodeDefinition = {
     color: COLOR_TRIGGER,
     ports: [
         { name: 'path', label: 'Path', role: 'input', config: true, control: 'text', placeholder: '/webhooks/my-hook' },
-        ...TRIGGER_OUTPUT_PORTS,
+        ...TRIGGER_BASE_OUTPUTS,
     ],
 };
 
@@ -180,7 +240,7 @@ const cronTrigger: NodeDefinition = {
     color: COLOR_TRIGGER,
     ports: [
         { name: 'schedule', label: 'Cron Expression', role: 'input', config: true, control: 'text', placeholder: '0 9 * * *', required: true },
-        ...TRIGGER_OUTPUT_PORTS,
+        ...TRIGGER_BASE_OUTPUTS,
     ],
 };
 
@@ -189,14 +249,19 @@ const manualTrigger: NodeDefinition = {
     category: 'trigger',
     group: 'Triggers',
     title: 'Manual (run from dashboard)',
-    description: 'Adds a "Run" form to the workflow. Form fields become outputs.',
+    description: 'Adds a "Run" form to the workflow. Each input becomes a typed output port you can wire directly.',
     icon: '🎮',
     color: COLOR_TRIGGER,
     ports: [
         // The `inputs` config is a structured list — the inspector renders
-        // a sub-form that lets the user add named inputs with types.
-        { name: 'inputs', label: 'Form Fields', role: 'input', config: true, control: 'kv', helpText: 'Define the fields that appear on the Run form' },
-        ...TRIGGER_OUTPUT_PORTS,
+        // a sub-form that lets the user add named inputs with types. Each
+        // input then materialises as its own typed output port (see
+        // dynamicOutputs below).
+        { name: 'inputs', label: 'Form Fields', role: 'input', config: true, control: 'kv', helpText: 'Define the fields that appear on the Run form. Each field becomes an output port.' },
+        ...TRIGGER_BASE_OUTPUTS,
+    ],
+    dynamicOutputs: [
+        { kind: 'per-input', inputsConfigKey: 'inputs' },
     ],
 };
 
