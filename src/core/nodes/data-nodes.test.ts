@@ -293,6 +293,71 @@ describe('data.template', () => {
     });
 });
 
+describe('flow.filter-list', () => {
+    function filterGraph(config: Record<string, unknown>, list: unknown[] | unknown): NodeGraph {
+        return {
+            nodes: [
+                { id: 'trig', type: 'trigger.github' },
+                { id: 'src', type: 'flow.set', config: { input: list } },
+                { id: 'f', type: 'flow.filter-list', config },
+            ],
+            edges: [{ from: { node: 'src', port: 'value' }, to: { node: 'f', port: 'list' } }],
+        };
+    }
+
+    it('equals: keeps items where field equals value (string-coerced)', async () => {
+        const graph = filterGraph({ path: 'priority', mode: 'equals', value: 'P1' }, [
+            { priority: 'P0' }, { priority: 'P1' }, { priority: 'P2' }, { priority: 'P1' },
+        ]);
+        const result = await executeGraph(graph, evt(), actions, registry, noopLogger);
+        const out = result.nodeOutputs.f;
+        expect(out.count).toBe(2);
+        expect((out.filtered as Array<{ priority: string }>).every((x) => x.priority === 'P1')).toBe(true);
+        expect(out.first).toEqual({ priority: 'P1' });
+    });
+
+    it('not-equals inverts the equals test', async () => {
+        const graph = filterGraph({ path: 'priority', mode: 'not-equals', value: 'P1' }, [
+            { priority: 'P0' }, { priority: 'P1' }, { priority: 'P2' },
+        ]);
+        const result = await executeGraph(graph, evt(), actions, registry, noopLogger);
+        expect(result.nodeOutputs.f.count).toBe(2);
+    });
+
+    it('truthy: keeps items where the field is truthy', async () => {
+        const graph = filterGraph({ path: 'flag', mode: 'truthy' }, [
+            { flag: true }, { flag: false }, { flag: 0 }, { flag: 'yes' },
+        ]);
+        const result = await executeGraph(graph, evt(), actions, registry, noopLogger);
+        expect(result.nodeOutputs.f.count).toBe(2);
+    });
+
+    it('exists: keeps items where the path resolves to a defined value', async () => {
+        const graph = filterGraph({ path: 'name', mode: 'exists' }, [
+            { name: 'a' }, {}, { name: '' }, { name: null },
+        ]);
+        const result = await executeGraph(graph, evt(), actions, registry, noopLogger);
+        // name='' is defined → keep; name=null → drop; missing → drop
+        expect(result.nodeOutputs.f.count).toBe(2);
+    });
+
+    it('contains: substring match on stringified value', async () => {
+        const graph = filterGraph({ path: 'title', mode: 'contains', value: 'WIP' }, [
+            { title: 'WIP: refactor' }, { title: 'Done' }, { title: 'wip lowercase' }, { title: '[WIP] feature' },
+        ]);
+        const result = await executeGraph(graph, evt(), actions, registry, noopLogger);
+        expect(result.nodeOutputs.f.count).toBe(2);
+    });
+
+    it('handles a non-array list input as empty', async () => {
+        const graph = filterGraph({ path: 'x', mode: 'equals', value: 'y' }, 'not-an-array');
+        const result = await executeGraph(graph, evt(), actions, registry, noopLogger);
+        expect(result.nodeOutputs.f.filtered).toEqual([]);
+        expect(result.nodeOutputs.f.count).toBe(0);
+        expect(result.nodeOutputs.f.first).toBeUndefined();
+    });
+});
+
 describe('builtin port-type contract', () => {
     it('every wire-able input carries an explicit type (no silent any-fallback)', () => {
         const def = registry.get('ai.review');
@@ -331,5 +396,27 @@ describe('builtin port-type contract', () => {
         const reactIn = react!.ports.find((p) => p.role === 'input' && p.name === 'timestamp');
         expect(sendOut?.type).toBe('string');
         expect(reactIn?.type).toBe('string');
+    });
+
+    it('round-trip GitHub fetch nodes emit the closed type their decompose counterpart needs', () => {
+        const fetchPr = registry.get('github.fetch-pr');
+        const fetchIssue = registry.get('github.fetch-issue');
+        expect(fetchPr!.ports.find((p) => p.role === 'output' && p.name === 'pr')?.type).toBe('pr');
+        expect(fetchIssue!.ports.find((p) => p.role === 'output' && p.name === 'issue')?.type).toBe('issue');
+    });
+
+    it('git.commit-and-push registers with workdir input and pushed/sha outputs', () => {
+        const node = registry.get('git.commit-and-push');
+        expect(node).toBeDefined();
+        const ports = node!.ports;
+        expect(ports.find((p) => p.role === 'input' && p.name === 'workdir')?.type).toBe('string');
+        expect(ports.find((p) => p.role === 'output' && p.name === 'pushed')?.type).toBe('boolean');
+        expect(ports.find((p) => p.role === 'output' && p.name === 'sha')?.type).toBe('string');
+    });
+
+    it('github.wait-for-checks exposes success boolean and failedChecks json', () => {
+        const node = registry.get('github.wait-for-checks');
+        expect(node!.ports.find((p) => p.role === 'output' && p.name === 'success')?.type).toBe('boolean');
+        expect(node!.ports.find((p) => p.role === 'output' && p.name === 'failedChecks')?.type).toBe('json');
     });
 });
