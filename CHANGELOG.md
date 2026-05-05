@@ -17,10 +17,51 @@ publishes automatically.
 
 ### Added
 
+#### Visual editor and graph runtime
+
 - **Visual node-graph workflow editor.** Workflows can now be authored on a drag-and-drop canvas: drag node types from the palette, wire output ports to input ports, configure each node in the inspector. Supersedes the YAML/form editor as the default surface — the legacy editor is reachable via `openLegacyWorkflowEditor()` for power users. Existing workflows render as auto-laid-out graphs and can be re-wired visually.
 - **Pluggable node registry.** Adding a new feature is now a single `NodeDefinition` object in `src/core/nodes/builtins.ts` (or registered by an integration). The registry drives the palette (via `GET /api/nodes`), the inspector form, and the runtime — no parallel UI/runtime/schema edits.
 - **Graph runtime.** New `executeGraph()` runs node graphs with topo-sort layered parallelism, per-node `condition` / `on_error` / `timeout`, and `{{nodes.<id>.<port>}}` template interpolation alongside the legacy `{{steps.x}}` / `{{event.x}}` / `{{inputs.x}}`. Workflows opt in by setting `graph:` instead of `steps:`; the engine dispatches automatically.
 - **Trigger-as-node.** Each integration source has a `trigger.<source>` node (github, github-poll, gh-cli, slack, webhook, cron, manual). Trigger node config is bridged to the legacy `TriggerDefinition` so event matching keeps working unchanged.
+- **Recipe picker on `+ New Workflow`.** Pre-wired starter graphs for Manual PR Review, Auto PR Review, Auto-Fix Loop, Log Events, plus a Blank canvas. Replaces the empty-canvas onboarding cliff.
+- **Type-validated wiring.** Each port carries a semantic type (`pr`, `issue`, `review`, `diff`, `commits`, `event`, `string`, `number`, `boolean`, `json`, `any`). Incompatible wires are rejected on the canvas with a clear toast; compatible inputs pulse green while wiring. Required-port indicators (red dot when empty, green when wired/configured) plus an `Inputs (X/Y connected)` panel in the inspector.
+- **Per-input guidance.** Inspector lists every wireable input with its status, a "wire from existing node" picker, and a "or add a node that provides this" one-click action. Closes the "how do I get a diff?" question that the type system raised.
+- **Config-driven dynamic output ports.** Trigger nodes grow ports based on their config — selecting `pull_request.opened` on the GitHub trigger reveals `pr`/`prNumber`/`repo`/`branch`/`author`; defining a manual-trigger input creates a typed output port for it.
+
+#### New node groups
+
+- **Data group (7 nodes).** Bridges closed structural types into the scalars action nodes need:
+  - `data.json-pluck` — universal: dot-path into any object/JSON, emits `value` + `valueText` + `exists`. Numeric segments index arrays.
+  - `data.pr-fields` — splits a PR object into `number` / `repo` / `headRepo` / `isCrossRepo` / `headRepoDeleted` / `branch` / `headFullRef` / `baseBranch` / `headSha` / `baseSha` / `author` / `title` / `body` / `state` / `draft` / `url` / `labels`. `headFullRef` emits the GitHub-canonical `owner:branch` form for fork PRs. `headRepoDeleted` flags PRs whose head fork has been removed so downstream clone-repo doesn't silently target the wrong place.
+  - `data.issue-fields` — same shape for issues.
+  - `data.review-fields` — splits a structured AI review into `summary` / `issues` / `mergeReady` plus derived `blockingCount` (P0/P1) / `nonBlockingCount` / `totalCount`.
+  - `data.commits-fields` — pulls `count` / `latestSha` / `latestMessage` / `latestAuthor` / `messages` / `shas` from a push event's commits.
+  - `data.event-fields` — splits the canonical event envelope into `source` / `eventName` / `timestamp` / `payload` / `metadata`.
+  - `data.template` — visible composition node: textarea body with `{{nodes.x.y}}` placeholders, output `text`.
+- **Git group (1 node, provider-agnostic).**
+  - `git.commit-and-push` — stages (with optional `paths`), commits, and pushes from a workdir. Works against GitHub, GitLab, self-hosted git. Supports per-call branch override with explicit-existence detection (no try/catch swallow), validates paths against absolute / `..` / NUL / Windows-style backslash escape, validates branch names against leading `-` / `HEAD` / whitespace / control chars.
+- **GitHub round-trip nodes (5 new).**
+  - `github.fetch-pr` — number → full PR object (pipes into `data.pr-fields`).
+  - `github.fetch-issue` — number → full Issue object.
+  - `github.merge-pr` — merge / squash / rebase via API. Throws on `405` (not mergeable) and on a `200` response with `merged !== true` (silent-failure guard); distinguishes a missing `merged` field from explicit `false` so operators can triage API shape changes.
+  - `github.update-pr` — PATCH a PR's title / body / state / base. Client-side guards against an empty PATCH body and against empty-string title/base.
+  - `github.wait-for-checks` — polls Checks API + legacy combined-status until done or timeout. Dedupes statuses by `context` (keeping latest `updated_at`), folds aggregate combined `state` into the keep-polling decision so a queued context doesn't pass the success gate, validates `interval` ∈ [1s, 10min] and `interval ≤ timeout`, parallelises the two API calls, caps `getCheckRuns` pagination at 5 pages.
+- **Flow group: `flow.filter-list`.** Filter a JSON array by a per-item field test (`equals` / `not-equals` / `truthy` / `exists` / `contains`). Outputs `filtered` / `count` / `first`.
+
+### Changed
+
+- **Type-tagged every wireable input across the builtins.** Closed types (`pr`, `issue`, `review`, `diff`, `commits`) can no longer be silently coerced into a text field. A contract test now iterates every registered builtin and reports any wireable input missing its type tag, so this can never regress.
+- **`clone-repo` and `create-pr` re-emit construction-time fields.** Both now emit `repo` and `branch` so downstream nodes can wire from a single source instead of also wiring back to the trigger.
+- **`slack.send-message` output renamed `ts` → `timestamp`** to match `slack.react`'s input — the obvious wire now works.
+- **Label nodes expose typed success outputs.** `github.add-label` emits `success` + `appliedLabels`; `github.remove-label` emits `success` + `removedLabel`. Workflows can branch on label outcomes without parsing the synthetic `result` bag.
+- **`GitHubApiClient` extended** with `updatePullRequest`, `mergePullRequest`, `getIssue`, `getCheckRuns` (paginated, capped at `maxPages=5`), `getCombinedStatus`. All error responses run through `truncateErrorBody()` (compact-JSON form, 500-char cap, `[truncated, N total]` note) so pretty-printed GitHub errors don't waste the budget on whitespace.
+- **Shared `_target.ts` resolver** for owner/repo/number across all GitHub action handlers. Empty strings (`''`) and zero are treated as "not supplied" so a blank UI form field doesn't overshadow event metadata. Malformed `params.repo` (e.g. URL-paste fragments) is only flagged as an error when no other source resolved owner+repo.
+- **Shared `git-helpers.ts`** module replaces the `execGit` / `execGitOutput` copy-paste between `clone-repo` and `create-pr`.
+
+### Fixed
+
+- **Wire endpoints align at any pan/zoom.** Moved the wire SVG out of the transformed canvas so endpoints render in viewport pixel space.
+- **Workflow templates with `graph:` no longer fail "must have steps".** `templates.ts` now accepts either form; `engine.ts` and `api.ts` use `?? 0` fallbacks when reading `workflow.steps?.length`.
 
 ## [0.1.2] - 2026-04-27
 
