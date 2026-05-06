@@ -404,9 +404,17 @@ function interpolateValue(value: unknown, ctx: InterpolationContext, depth = 0):
 }
 
 function interpolateString(template: string, ctx: InterpolationContext): string {
-    return template.replace(/\{\{(.+?)\}\}/g, (_match, path: string) => {
+    return template.replace(/\{\{(.+?)\}\}/g, (match, path: string) => {
         const trimmed = path.trim();
-        if (!ALLOWED_PREFIXES.some((p) => trimmed.startsWith(p))) return '';
+        // Anything outside the known prefixes is left intact — a typo
+        // like `{{ndoes.review.sha}}` stays visible in logs and downstream
+        // string compares instead of silently becoming "", and literal
+        // `{{...}}` in user-authored content (Markdown handlebars
+        // examples, JSX snippets, doc bodies that legitimately mention
+        // template syntax) round-trips unchanged. Recognised-but-empty
+        // refs still resolve to "" so a missing optional value doesn't
+        // pollute output with placeholder text.
+        if (!ALLOWED_PREFIXES.some((p) => trimmed.startsWith(p))) return match;
         // `inputs.x` is sugar for `event.payload.inputs.x` — same as the
         // legacy executor, so authors can mix node + step references.
         const resolvedPath = trimmed.startsWith('inputs.')

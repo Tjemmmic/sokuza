@@ -505,6 +505,50 @@ describe('executeGraph', () => {
         ).rejects.toThrow(/aborted/i);
     });
 
+    it('preserves {{...}} placeholders whose prefix is not a recognised template root', async () => {
+        // A typo (`ndoes` instead of `nodes`) used to silently become an
+        // empty string, which masked the misconfiguration. Now it round-
+        // trips so the bad reference is visible in logs and downstream
+        // diffs. Literal `{{handlebars}}` text in user content (e.g. doc
+        // bodies) gets the same treatment.
+        actions.set('echo', async (params) => ({ echoed: params.value }));
+        registry.register(actionDef('test.echo', 'echo', [
+            { name: 'value', role: 'input', label: 'Value', wire: true, config: true, control: 'text' },
+            { name: 'echoed', role: 'output', label: 'Echoed', wire: true },
+        ]));
+        const graph: NodeGraph = {
+            nodes: [
+                { id: 'trig', type: 'trigger.github' },
+                { id: 'typo', type: 'test.echo', config: { value: 'before {{ndoes.x.y}} after' } },
+                { id: 'literal', type: 'test.echo', config: { value: 'see {{handlebars}} for syntax' } },
+            ],
+            edges: [],
+        };
+        const result = await executeGraph(graph, evt(), actions, registry, noopLogger);
+        expect(result.nodeOutputs.typo.echoed).toBe('before {{ndoes.x.y}} after');
+        expect(result.nodeOutputs.literal.echoed).toBe('see {{handlebars}} for syntax');
+    });
+
+    it('still resolves recognised-but-empty refs to "" so missing optionals stay clean', async () => {
+        // Regression guard: the unknown-prefix preserve change must NOT
+        // also start preserving `{{nodes.x.y}}` when the path is just
+        // missing — that would surface placeholder text in real outputs.
+        actions.set('echo', async (params) => ({ echoed: params.value }));
+        registry.register(actionDef('test.echo', 'echo', [
+            { name: 'value', role: 'input', label: 'Value', wire: true, config: true, control: 'text' },
+            { name: 'echoed', role: 'output', label: 'Echoed', wire: true },
+        ]));
+        const graph: NodeGraph = {
+            nodes: [
+                { id: 'trig', type: 'trigger.github' },
+                { id: 'e', type: 'test.echo', config: { value: 'pre[{{nodes.missing.gone}}]post' } },
+            ],
+            edges: [],
+        };
+        const result = await executeGraph(graph, evt(), actions, registry, noopLogger);
+        expect(result.nodeOutputs.e.echoed).toBe('pre[]post');
+    });
+
     it('caps interpolation recursion to avoid stack overflow on deep configs', async () => {
         // Build a config nested 100 levels deep. Without the depth
         // guard this would either blow the stack (small node) or just
