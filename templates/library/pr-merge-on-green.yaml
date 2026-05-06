@@ -1,0 +1,101 @@
+# Auto-Merge When CI Passes
+#
+# When a reviewer approves a PR, fetch the PR head SHA, wait for CI checks
+# to finish, and merge the PR if everything is green. Posts a Slack note
+# on a successful merge.
+#
+# The pr / pr_fields / wait_checks chain only runs when the review was
+# approving (gate_approved.then is wired into pr's optional sha port —
+# undefined when the gate skips). The merge node has a condition that
+# requires both gates to be truthy, so pre-merge work happens but the
+# actual merge is gated.
+#
+# Exercises: github.fetch-pr, github.wait-for-checks, github.merge-pr,
+#            data.review-fields, flow.if, slack.send-message
+#
+# Usage:
+#   - name: auto-merge
+#     template: pr-merge-on-green
+#     trigger:
+#       event: pull_request_review.submitted
+
+description: When a review approves a PR, wait for green CI then merge automatically
+icon: 🟣
+
+trigger:
+  source: github
+  event: pull_request_review.submitted
+
+graph:
+  nodes:
+    - id: trigger
+      type: trigger.github
+      position: { x: 60, y: 240 }
+      config:
+        events: [pull_request_review.submitted]
+    - id: review_fields
+      type: data.review-fields
+      position: { x: 360, y: 240 }
+      config: {}
+    - id: gate_approved
+      type: flow.if
+      position: { x: 660, y: 240 }
+      config:
+        condition: "{{nodes.review_fields.mergeReady}}"
+    - id: pr
+      type: github.fetch-pr
+      position: { x: 960, y: 240 }
+      condition: "{{nodes.gate_approved.then}}"
+      config: {}
+    - id: pr_fields
+      type: data.pr-fields
+      position: { x: 1260, y: 240 }
+      config: {}
+    - id: wait_checks
+      type: github.wait-for-checks
+      position: { x: 1560, y: 240 }
+      config:
+        timeout: 1800
+        interval: 30
+    - id: gate_green
+      type: flow.if
+      position: { x: 1860, y: 240 }
+      config:
+        condition: "{{nodes.wait_checks.success}}"
+    - id: merge
+      type: github.merge-pr
+      position: { x: 2160, y: 120 }
+      # Only fire when both gates picked the "then" branch.
+      condition: "{{nodes.gate_green.then}}"
+      config:
+        method: squash
+    - id: notify
+      type: slack.send-message
+      position: { x: 2160, y: 380 }
+      condition: "{{nodes.merge.merged}}"
+      config:
+        channel: "#deploys"
+        text: |
+          ✅ Merged `{{nodes.pr_fields.repo}}#{{nodes.pr_fields.number}}` ({{nodes.pr_fields.title}})
+          via auto-merge after green CI.
+  edges:
+    - from: { node: trigger, port: review }
+      to: { node: review_fields, port: review }
+    - from: { node: review_fields, port: mergeReady }
+      to: { node: gate_approved, port: value }
+    - from: { node: trigger, port: prNumber }
+      to: { node: pr, port: pr_number }
+    - from: { node: trigger, port: repo }
+      to: { node: pr, port: repo }
+    - from: { node: pr, port: pr }
+      to: { node: pr_fields, port: pr }
+    - from: { node: pr_fields, port: headSha }
+      to: { node: wait_checks, port: sha }
+    - from: { node: pr_fields, port: repo }
+      to: { node: wait_checks, port: repo }
+    - from: { node: wait_checks, port: success }
+      to: { node: gate_green, port: value }
+    - from: { node: pr_fields, port: number }
+      to: { node: merge, port: pr_number }
+    - from: { node: pr_fields, port: repo }
+      to: { node: merge, port: repo }

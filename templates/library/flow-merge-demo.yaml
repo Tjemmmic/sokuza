@@ -1,0 +1,72 @@
+# Flow Merge Demo
+#
+# Manual workflow with two inputs. Two flow.set nodes hold each input
+# (so the editor's wires show them as named values), then flow.merge
+# emits the first defined value, which we log.
+#
+# Exercises: flow.set, flow.merge
+#
+# Usage:
+#   - name: flow-merge
+#     template: flow-merge-demo
+
+description: Demo — two flow.set nodes feed flow.merge, first defined wins
+icon: 🔗
+
+trigger:
+  source: manual
+
+inputs:
+  - name: primary
+    label: Primary value (optional)
+    type: text
+  - name: fallback
+    label: Fallback value
+    type: text
+    required: true
+
+graph:
+  nodes:
+    - id: trigger
+      type: trigger.manual
+      position: { x: 60, y: 240 }
+      config:
+        inputs:
+          - name: primary
+            label: Primary value (optional)
+            type: text
+          - name: fallback
+            label: Fallback value
+            type: text
+            required: true
+    - id: set_primary
+      type: flow.set
+      position: { x: 360, y: 120 }
+      config:
+        input: "{{event.payload.inputs.primary}}"
+    - id: set_fallback
+      type: flow.set
+      position: { x: 360, y: 380 }
+      config:
+        input: "{{event.payload.inputs.fallback}}"
+    - id: merge
+      type: flow.merge
+      position: { x: 660, y: 240 }
+      config: {}
+    - id: log
+      type: utility.log
+      position: { x: 960, y: 240 }
+      config:
+        message: "merge winner: {{nodes.merge.value}}"
+        level: info
+  edges:
+    - from: { node: trigger, port: primary }
+      to: { node: set_primary, port: input }
+    - from: { node: trigger, port: fallback }
+      to: { node: set_fallback, port: input }
+    - from: { node: set_primary, port: value }
+      to: { node: merge, port: a }
+    - from: { node: set_fallback, port: value }
+      to: { node: merge, port: b }
+    - from: { node: merge, port: value }
+      to: { node: log, port: __seq }

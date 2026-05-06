@@ -1,0 +1,97 @@
+# Autofix Labeled Issues
+#
+# When an issue is labeled "autofix", fetch the full issue, clone the
+# repo, run an AI agent to write a fix, commit + push it via the
+# provider-agnostic git node, and open a PR.
+#
+# Exercises: github.fetch-issue, data.issue-fields,
+#            git.commit-and-push, github.create-pr
+#
+# Usage:
+#   - name: autofix
+#     template: issue-autofix-pr
+
+description: 'When an issue gets the "autofix" label, agent fixes it and opens a PR'
+icon: 🔧
+
+trigger:
+  source: github
+  event: issues.labeled
+  filters:
+    payload.label.name: autofix
+
+graph:
+  nodes:
+    - id: trigger
+      type: trigger.github
+      position: { x: 60, y: 240 }
+      config:
+        events: [issues.labeled]
+        labels: autofix
+    - id: issue
+      type: github.fetch-issue
+      position: { x: 360, y: 240 }
+      config: {}
+    - id: fields
+      type: data.issue-fields
+      position: { x: 660, y: 240 }
+      config: {}
+    - id: clone
+      type: github.clone-repo
+      position: { x: 960, y: 240 }
+      config: {}
+    - id: agent
+      type: ai.agent
+      position: { x: 1260, y: 240 }
+      config:
+        max_turns: 30
+        allowed_tools: [Read, Edit, Write, Grep, Glob, Bash]
+        prompt: |
+          You're fixing GitHub issue #{{nodes.fields.number}} in {{nodes.fields.repo}}.
+
+          ## Issue title
+          {{nodes.fields.title}}
+
+          ## Issue body
+          {{nodes.fields.body}}
+
+          Read relevant files, design a minimal root-cause fix, and edit
+          the code. Don't commit — Sokuza will commit and push after you
+          finish. Output a short summary of the fix.
+    - id: push
+      type: git.commit-and-push
+      position: { x: 1560, y: 240 }
+      config:
+        message: "fix: address #{{nodes.fields.number}} via Sokuza autofix"
+        branch: "autofix/{{nodes.fields.number}}"
+    - id: pr
+      type: github.create-pr
+      position: { x: 1860, y: 240 }
+      config:
+        title: "fix: address #{{nodes.fields.number}}"
+        body: |
+          Closes #{{nodes.fields.number}}.
+
+          {{nodes.agent.output}}
+
+          ---
+          _Opened automatically by Sokuza autofix_
+  edges:
+    - from: { node: trigger, port: issueNumber }
+      to: { node: issue, port: issue_number }
+    - from: { node: trigger, port: repo }
+      to: { node: issue, port: repo }
+    - from: { node: issue, port: issue }
+      to: { node: fields, port: issue }
+    - from: { node: fields, port: repo }
+      to: { node: clone, port: repo }
+    - from: { node: clone, port: path }
+      to: { node: agent, port: workdir }
+    - from: { node: clone, port: path }
+      to: { node: push, port: workdir }
+    - from: { node: clone, port: path }
+      to: { node: pr, port: workdir }
+    - from: { node: fields, port: repo }
+      to: { node: pr, port: repo }
+    - from: { node: push, port: branch }
+      to: { node: pr, port: branch }

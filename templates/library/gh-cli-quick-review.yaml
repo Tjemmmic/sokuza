@@ -1,0 +1,60 @@
+# gh CLI Quick Review (local-only)
+#
+# Uses the gh CLI trigger so no webhook setup is needed — Sokuza polls
+# your local gh-authenticated repos. Reviews each new PR and posts a
+# real GitHub Review (not just a comment) via github.create-review.
+#
+# Exercises: trigger.gh-cli, github.create-review
+#
+# Usage:
+#   - name: gh-cli-review
+#     template: gh-cli-quick-review
+
+description: Local gh CLI poll → AI review → posted as a real GitHub Review
+icon: ⚡
+
+trigger:
+  source: gh-cli
+  event: pull_request.opened
+
+graph:
+  nodes:
+    - id: trigger
+      type: trigger.gh-cli
+      position: { x: 60, y: 240 }
+      config:
+        events: [pull_request.opened]
+    - id: diff
+      type: github.fetch-diff
+      position: { x: 360, y: 240 }
+      config: {}
+    - id: review
+      type: ai.review
+      position: { x: 660, y: 240 }
+      config: {}
+    - id: post
+      type: github.create-review
+      position: { x: 960, y: 240 }
+      config:
+        event: COMMENT
+        body: |
+          ## 🤖 AI Code Review
+
+          {{nodes.review.markdown}}
+
+          <!-- sokuza:run-id={{nodes.review.runId}} -->
+  edges:
+    - from: { node: trigger, port: prNumber }
+      to: { node: diff, port: pr_number }
+    - from: { node: trigger, port: repo }
+      to: { node: diff, port: repo }
+    - from: { node: diff, port: diff }
+      to: { node: review, port: diff }
+    - from: { node: trigger, port: prNumber }
+      to: { node: review, port: pr_number }
+    - from: { node: trigger, port: repo }
+      to: { node: review, port: repo }
+    - from: { node: trigger, port: prNumber }
+      to: { node: post, port: pr_number }
+    - from: { node: trigger, port: repo }
+      to: { node: post, port: repo }

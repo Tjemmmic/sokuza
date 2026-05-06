@@ -1,0 +1,36 @@
+# GitHub Poll Watch
+#
+# Demonstrates the trigger.github-poll trigger — for environments where
+# inbound webhooks aren't possible (corporate firewalls, local dev).
+# Just logs every event picked up by the poller. Drop additional nodes
+# downstream if you want to act on what the poller finds.
+#
+# Exercises: trigger.github-poll
+#
+# Usage:
+#   - name: poll-watch
+#     template: github-poll-watch
+
+description: Poll-mode GitHub trigger — log every event picked up
+icon: 🔄
+
+trigger:
+  source: github-poll
+  event: pull_request.opened
+
+graph:
+  nodes:
+    - id: trigger
+      type: trigger.github-poll
+      position: { x: 60, y: 240 }
+      config:
+        events: [pull_request.opened, pull_request.synchronize, issues.opened]
+    - id: log
+      type: utility.log
+      position: { x: 360, y: 240 }
+      config:
+        message: "[poll] {{event.event}} on {{event.metadata.repo}}#{{event.metadata.prNumber}}"
+        level: info
+  edges:
+    - from: { node: trigger, port: event }
+      to: { node: log, port: __seq }

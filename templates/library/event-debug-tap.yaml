@@ -1,0 +1,57 @@
+# Event Debug Tap
+#
+# Wires the canonical event into data.event-fields and logs each scalar
+# separately. Useful when wiring up new triggers — drop this in front of
+# any flow to see exactly what the trigger emits before you build out
+# downstream nodes.
+#
+# Exercises: data.event-fields (no other heavy nodes — minimum-viable)
+#
+# Usage:
+#   - name: debug-events
+#     template: event-debug-tap
+
+description: Inspect every incoming event — dump source/name/payload to the log
+icon: 🩺
+
+trigger:
+  source: github
+  event: ""  # Any event the integration emits
+
+graph:
+  nodes:
+    - id: trigger
+      type: trigger.github
+      position: { x: 60, y: 240 }
+      config: {}
+    - id: fields
+      type: data.event-fields
+      position: { x: 360, y: 240 }
+      config: {}
+    - id: log_source
+      type: utility.log
+      position: { x: 720, y: 100 }
+      config:
+        message: "[debug-tap] source={{nodes.fields.source}} event={{nodes.fields.eventName}}"
+        level: info
+    - id: log_metadata
+      type: utility.log
+      position: { x: 720, y: 240 }
+      config:
+        message: "[debug-tap] metadata={{nodes.fields.metadata}}"
+        level: info
+    - id: log_payload
+      type: utility.log
+      position: { x: 720, y: 380 }
+      config:
+        message: "[debug-tap] payload={{nodes.fields.payload}}"
+        level: debug
+  edges:
+    - from: { node: trigger, port: event }
+      to: { node: fields, port: event }
+    - from: { node: fields, port: source }
+      to: { node: log_source, port: __seq }
+    - from: { node: fields, port: metadata }
+      to: { node: log_metadata, port: __seq }
+    - from: { node: fields, port: payload }
+      to: { node: log_payload, port: __seq }

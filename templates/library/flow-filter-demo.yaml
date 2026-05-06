@@ -1,0 +1,57 @@
+# Flow Filter Demo
+#
+# Manual workflow that holds a fixed JSON array in flow.set, then filters
+# items where `priority == "P1"` via flow.filter-list, and logs the
+# count + first match.
+#
+# Why flow.set instead of a manual input: the trigger.manual textarea
+# delivers a string, but flow.filter-list needs a real array. Putting
+# the array in flow.set's config (which the runtime walks recursively)
+# keeps the demo self-contained and actually exercises the filter.
+#
+# Exercises: flow.filter-list, flow.set
+#
+# Usage:
+#   - name: flow-filter
+#     template: flow-filter-demo
+
+description: Demo — flow.filter-list keeps items matching a per-field test
+icon: ⚗️
+
+trigger:
+  source: manual
+
+graph:
+  nodes:
+    - id: trigger
+      type: trigger.manual
+      position: { x: 60, y: 240 }
+      config:
+        inputs: []
+    - id: source
+      type: flow.set
+      position: { x: 360, y: 240 }
+      config:
+        input:
+          - { priority: P1, title: "Critical bug" }
+          - { priority: P2, title: "Polish" }
+          - { priority: P1, title: "Security issue" }
+          - { priority: P3, title: "Cosmetic" }
+    - id: filter
+      type: flow.filter-list
+      position: { x: 660, y: 240 }
+      config:
+        path: priority
+        mode: equals
+        value: "P1"
+    - id: log
+      type: utility.log
+      position: { x: 960, y: 240 }
+      config:
+        message: "filtered {{nodes.filter.count}} P1 items, first: {{nodes.filter.first}}"
+        level: info
+  edges:
+    - from: { node: source, port: value }
+      to: { node: filter, port: list }
+    - from: { node: filter, port: filtered }
+      to: { node: log, port: __seq }

@@ -1,0 +1,56 @@
+# Rename PR Title to Conventional Commits Format
+#
+# When a PR opens, fetch its full details, decompose them into scalar
+# fields, build a normalized title via data.template, and PATCH the PR
+# with the new title.
+#
+# Exercises: data.pr-fields, data.template, github.update-pr
+#
+# Usage:
+#   - name: rename-prs
+#     template: pr-rename-title
+
+description: 'Rewrite new PR titles into a "type(scope): subject" form'
+icon: ✏️
+
+trigger:
+  source: github
+  event: pull_request.opened
+
+graph:
+  nodes:
+    - id: trigger
+      type: trigger.github
+      position: { x: 60, y: 240 }
+      config:
+        events: [pull_request.opened]
+    - id: pr
+      type: github.fetch-pr
+      position: { x: 360, y: 240 }
+      config: {}
+    - id: fields
+      type: data.pr-fields
+      position: { x: 660, y: 240 }
+      config: {}
+    - id: title_template
+      type: data.template
+      position: { x: 960, y: 240 }
+      config:
+        template: "feat({{nodes.fields.branch}}): {{nodes.fields.title}}"
+    - id: update
+      type: github.update-pr
+      position: { x: 1260, y: 240 }
+      config: {}
+  edges:
+    - from: { node: trigger, port: prNumber }
+      to: { node: pr, port: pr_number }
+    - from: { node: trigger, port: repo }
+      to: { node: pr, port: repo }
+    - from: { node: pr, port: pr }
+      to: { node: fields, port: pr }
+    - from: { node: fields, port: number }
+      to: { node: update, port: pr_number }
+    - from: { node: fields, port: repo }
+      to: { node: update, port: repo }
+    - from: { node: title_template, port: text }
+      to: { node: update, port: title }
