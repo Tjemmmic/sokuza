@@ -51,6 +51,41 @@ describe('extractTriggerFromGraph', () => {
         });
         expect(trigger).toEqual({ source: 'cron', event: ['0 9 * * *'] });
     });
+
+    it('throws when a list-typed config receives a number/boolean — surfaces YAML mistypes', () => {
+        // Without this guard `events: 42` would silently produce a
+        // workflow that registers cleanly but never matches anything,
+        // which is one of the most painful misconfigs to debug.
+        expect(() => extractTriggerFromGraph({
+            nodes: [{ id: 't', type: 'trigger.github', config: { events: 42 as unknown as string[] } }],
+            edges: [],
+        })).toThrow(/trigger node "t" config\.events must be a string or array of strings.*number/);
+
+        expect(() => extractTriggerFromGraph({
+            nodes: [{ id: 't', type: 'trigger.github', config: { events: ['ok'], repos: true as unknown as string[] } }],
+            edges: [],
+        })).toThrow(/config\.repos must be a string or array of strings.*boolean/);
+    });
+
+    it('treats null/undefined list configs as empty (legitimate "no filter")', () => {
+        const trigger = extractTriggerFromGraph({
+            nodes: [
+                {
+                    id: 't',
+                    type: 'trigger.github',
+                    config: {
+                        events: ['pr.opened'],
+                        repos: undefined,
+                        branches: null as unknown as string[],
+                    },
+                },
+            ],
+            edges: [],
+        });
+        expect(trigger?.event).toEqual(['pr.opened']);
+        expect(trigger?.repo).toBeUndefined();
+        expect(trigger?.branch).toBeUndefined();
+    });
 });
 
 describe('normalizeGraphWorkflow', () => {

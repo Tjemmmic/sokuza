@@ -40,11 +40,11 @@ export function extractTriggerFromGraph(graph: NodeGraph): TriggerDefinition | u
     if (!source) return undefined;
 
     const cfg = triggerNode.config ?? {};
-    const events = parseList(cfg.events);
-    const repos = parseList(cfg.repos);
-    const branches = parseList(cfg.branches);
-    const authors = parseList(cfg.authors);
-    const labels = parseList(cfg.labels);
+    const events = parseList(cfg.events, 'events', triggerNode.id);
+    const repos = parseList(cfg.repos, 'repos', triggerNode.id);
+    const branches = parseList(cfg.branches, 'branches', triggerNode.id);
+    const authors = parseList(cfg.authors, 'authors', triggerNode.id);
+    const labels = parseList(cfg.labels, 'labels', triggerNode.id);
 
     const trigger: TriggerDefinition = {
         source,
@@ -63,12 +63,21 @@ export function extractTriggerFromGraph(graph: NodeGraph): TriggerDefinition | u
     return trigger;
 }
 
-function parseList(raw: unknown): string[] {
+/** Coerce a trigger-node list config into a string[].
+ *  Accepts: array of strings, comma-separated string, undefined/null
+ *  (legitimate "no filter" — returns []).
+ *  Rejects: number, boolean, object, anything else — those are almost
+ *  always a YAML mistype (e.g. `events: 42`) and would otherwise silently
+ *  produce a workflow that registers cleanly but never fires. */
+function parseList(raw: unknown, key: string, nodeId: string): string[] {
+    if (raw === undefined || raw === null) return [];
     if (Array.isArray(raw)) return raw.filter((v) => typeof v === 'string' && v).map(String);
     if (typeof raw === 'string') {
         return raw.split(',').map((s) => s.trim()).filter(Boolean);
     }
-    return [];
+    throw new Error(
+        `trigger node "${nodeId}" config.${key} must be a string or array of strings (got ${typeof raw}: ${JSON.stringify(raw)})`,
+    );
 }
 
 /**
