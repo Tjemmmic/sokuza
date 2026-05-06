@@ -27,10 +27,20 @@ const ge = (window._gEditor = {
 });
 
 // Public entrypoint — exposed via window for app.js to call.
-window.openGraphEditor = async function (workflowName) {
-    const isNew = !workflowName;
-    ge.isNew = isNew;
-    ge.originalName = isNew ? null : workflowName;
+//
+// Modes:
+//   - openGraphEditor()                            → recipe picker (new wf)
+//   - openGraphEditor("my-workflow")               → load from /api/workflows
+//   - openGraphEditor(null, { staged: { ... } })   → drop straight into the
+//        editor with a pre-staged workflow shape (used by library "Edit
+//        in Visual Editor" clicks). Save creates a new workflow + (when
+//        opts.libraryItemId is set) flips the library badge to Installed.
+window.openGraphEditor = async function (workflowName, opts = {}) {
+    const staged = opts.staged || null;
+    const isNew = !workflowName && !staged;
+    ge.isNew = isNew || !!staged;
+    ge.originalName = workflowName || null;
+    ge.libraryItemId = opts.libraryItemId || null;
     ge.selectedNodeId = null;
     ge.selectedEdgeId = null;
     ge.viewport = { x: 0, y: 0, scale: 1 };
@@ -43,6 +53,15 @@ window.openGraphEditor = async function (workflowName) {
         const defsRes = await api.get('/api/nodes');
         ge.nodeDefsList = defsRes.nodes || [];
         ge.nodeDefsByType = Object.fromEntries(ge.nodeDefsList.map((d) => [d.type, d]));
+
+        if (staged) {
+            // Library click-to-open: skip the recipe picker, drop the user
+            // straight into the editor with the template's graph already
+            // loaded. They can rename, edit, and save = install.
+            ge.workflow = ensureGraphShape(staged);
+            renderEditor();
+            return;
+        }
 
         if (isNew) {
             // Show the recipe picker first — far less intimidating than
@@ -63,10 +82,17 @@ window.openGraphEditor = async function (workflowName) {
 //
 // Pre-wired starter graphs the user can spawn instead of staring at an
 // empty canvas. Each recipe is a workflow shape (the same JSON we save).
-// The point is to make the "happy path" workflows — review on PR open,
-// auto-fix loop, manual review on demand — discoverable in one click.
+//
+// Sources (in order):
+//   1. YAML graph-form templates from /api/templates/library — the
+//      canonical store. These are authored as full graph: blocks in
+//      templates/library/*.yaml.
+//   2. The hardcoded BUILTIN_RECIPES below — kept as a safety net so the
+//      picker always has *some* options, including in dev environments
+//      where the library directory is empty. YAML-loaded recipes with the
+//      same id win.
 
-const RECIPES = [
+const BUILTIN_RECIPES = [
     {
         id: 'manual-pr-review',
         title: 'Manual PR Review',
@@ -182,8 +208,109 @@ const RECIPES = [
     },
 ];
 
-function openRecipePicker() {
+// Cache of recipes built from /api/templates/library — populated on first
+// open of the picker, refreshed on subsequent opens so newly-authored YAML
+// templates appear without a page reload.
+let _yamlRecipes = null;
+
+async function loadAllRecipes() {
+    // Pull from BOTH locations: templates/library/ (the new graph-form
+    // recipes) AND templates/ (the converted root-level ones like
+    // ai-pr-review). Merge by name so a library/ entry wins on collision.
+    const seen = new Set();
+    let yamlRecipes = [];
+    const sources = ['/api/templates/library', '/api/templates'];
+    for (const url of sources) {
+        try {
+            const res = await api.get(url);
+            const tpls = Array.isArray(res.templates) ? res.templates : [];
+            for (const t of tpls) {
+                if (!t.graph || !Array.isArray(t.graph.nodes) || t.graph.nodes.length === 0) continue;
+                if (seen.has(t.name)) continue;
+                seen.add(t.name);
+                yamlRecipes.push(yamlTemplateToRecipe(t));
+            }
+        } catch (e) {
+            // Network failure / endpoint missing — try next source.
+        }
+    }
+    _yamlRecipes = yamlRecipes;
+
+    // YAML wins on id collision so YAML edits override the builtin shape.
+    const yamlIds = new Set(yamlRecipes.map((r) => r.id));
+    const merged = [
+        ...yamlRecipes,
+        ...BUILTIN_RECIPES.filter((r) => !yamlIds.has(r.id)),
+    ];
+    return merged;
+}
+
+/** YAML template → recipe shape the picker renders. */
+function yamlTemplateToRecipe(t) {
+    const title = t.description ? prettyName(t.name) : prettyName(t.name);
+    const tagline = t.description || `Starter recipe: ${prettyName(t.name)}`;
+    // Derive bullets from the graph's node titles — keeps the card
+    // self-explanatory even when the YAML omits an explicit bullets list.
+    const bullets = (t.graph?.nodes || [])
+        .filter((n) => !n.type?.startsWith('trigger.'))
+        .slice(0, 5)
+        .map((n) => prettyName(n.type.split('.').slice(1).join('.') || n.type));
+    return {
+        id: t.name,
+        title,
+        icon: t.icon || iconForGraph(t.graph),
+        tagline,
+        bullets: bullets.length ? bullets : ['Pre-wired starter graph'],
+        source: 'yaml',
+        build: () => ({
+            name: t.name,
+            description: t.description,
+            enabled: true,
+            graph: cloneGraph(t.graph),
+        }),
+    };
+}
+
+function prettyName(s) {
+    if (!s) return '';
+    return String(s).split(/[-._]/).filter(Boolean)
+        .map((w) => w[0].toUpperCase() + w.slice(1)).join(' ');
+}
+
+function iconForGraph(g) {
+    // Heuristic fallback when the YAML doesn't supply an icon.
+    const types = (g?.nodes || []).map((n) => n.type || '');
+    if (types.some((t) => t.startsWith('trigger.cron'))) return '⏰';
+    if (types.some((t) => t.startsWith('trigger.slack'))) return '💬';
+    if (types.some((t) => t.startsWith('trigger.webhook'))) return '🪝';
+    if (types.some((t) => t.startsWith('trigger.gh-cli'))) return '⚡';
+    if (types.some((t) => t.startsWith('trigger.github-poll'))) return '🔄';
+    if (types.some((t) => t.startsWith('ai.review'))) return '🔍';
+    if (types.some((t) => t.startsWith('ai.agent'))) return '🤖';
+    if (types.some((t) => t.startsWith('flow.'))) return '🔀';
+    if (types.some((t) => t.startsWith('data.'))) return '🧬';
+    return '📄';
+}
+
+function cloneGraph(g) {
+    return JSON.parse(JSON.stringify(g));
+}
+
+async function openRecipePicker() {
     const el = $('#content');
+    // Render a loading shell first so the page doesn't flash blank.
+    el.innerHTML = `
+        <div class="ge-recipe-page">
+            <div class="ge-recipe-header">
+                <button class="btn btn-ghost btn-sm" onclick="closeGraphEditor()">← Workflows</button>
+                <h1>How do you want to start?</h1>
+                <p>Pick a starter graph — every wire is pre-built. You can rename, edit, and add nodes from there.</p>
+            </div>
+            <div class="ge-recipe-grid"><div style="padding:24px;color:var(--text-muted)">Loading recipes…</div></div>
+        </div>
+    `;
+
+    const recipes = await loadAllRecipes();
     el.innerHTML = `
         <div class="ge-recipe-page">
             <div class="ge-recipe-header">
@@ -192,7 +319,7 @@ function openRecipePicker() {
                 <p>Pick a starter graph — every wire is pre-built. You can rename, edit, and add nodes from there.</p>
             </div>
             <div class="ge-recipe-grid">
-                ${RECIPES.map((r) => `
+                ${recipes.map((r) => `
                     <div class="ge-recipe-card" onclick="pickRecipe('${esc(r.id)}')">
                         <div class="ge-recipe-icon">${esc(r.icon)}</div>
                         <h3>${esc(r.title)}</h3>
@@ -210,11 +337,14 @@ function openRecipePicker() {
     `;
 }
 
-window.pickRecipe = function (id) {
+window.pickRecipe = async function (id) {
     if (id === '__blank') {
         ge.workflow = blankWorkflow();
     } else {
-        const r = RECIPES.find((x) => x.id === id);
+        // Recipes may have been loaded into _yamlRecipes; if the user
+        // clicked between loadAllRecipes runs, refetch defensively.
+        const recipes = await loadAllRecipes();
+        const r = recipes.find((x) => x.id === id);
         if (!r) return;
         ge.workflow = r.build();
     }
@@ -1649,10 +1779,22 @@ window.saveGraphWorkflow = async function () {
 
     try {
         if (ge.isNew) {
+            // If we were staged from a library card, mark the saved workflow
+            // with the library item id so the catalog badge flips to
+            // "Installed" and Uninstall can find it later.
+            if (ge.libraryItemId) payload._libraryItem = ge.libraryItemId;
             await api.post('/api/workflows', payload);
             toast(`Created "${wf.name}"`);
             ge.isNew = false;
             ge.originalName = wf.name;
+            // Push the recipe id into the dashboard's deck so the library
+            // page's "✓ Installed" badge flips on first save. app.js
+            // exposes notifyLibraryItemInstalled on window for this.
+            if (ge.libraryItemId && typeof window.notifyLibraryItemInstalled === 'function') {
+                try { await window.notifyLibraryItemInstalled(ge.libraryItemId); }
+                catch { /* best-effort */ }
+            }
+            ge.libraryItemId = null;
         } else {
             await api.put(`/api/workflows/${encodeURIComponent(ge.originalName)}`, payload);
             toast(`Saved "${wf.name}"`);

@@ -19,6 +19,19 @@ let libraryTemplates = [];
 let librarySearchQuery = '';
 let libraryActiveCategory = 'all';
 
+// graph-editor.js needs to flip the library badge when a user saves a
+// workflow that was staged from a library card. Expose a small helper on
+// window so the editor can update the deck without reaching into app.js
+// internals.
+window.notifyLibraryItemInstalled = async function (itemId) {
+    if (!itemId) return;
+    if (!deck.includes(itemId)) {
+        deck.push(itemId);
+        try { await api.post('/api/deck/add', { id: itemId }); }
+        catch { /* deck endpoint optional */ }
+    }
+};
+
 // ─── Event Catalog (source → events with friendly names) ───────────────────
 const eventCatalog = {
     github: [
@@ -3292,14 +3305,67 @@ function renderLibraryCard(item) {
                 <button class="btn btn-ghost btn-sm" disabled>Not Available</button>
             ` : isInstalled ? `
                 <button class="btn btn-ghost btn-sm" style="color:#ef4444" onclick="uninstallLibraryItem('${item.id}')">Uninstall</button>
+                <button class="btn btn-ghost btn-sm" onclick="openLibraryItemInEditor('${item.id}')">✏️ Edit</button>
                 <button class="btn btn-ghost btn-sm" onclick="previewLibraryItem('${item.id}')">Preview</button>
             ` : `
                 <button class="btn btn-primary btn-sm" onclick="installLibraryItem('${item.id}')">⚡ Install</button>
+                <button class="btn btn-ghost btn-sm" onclick="openLibraryItemInEditor('${item.id}')">✏️ Open in Editor</button>
                 <button class="btn btn-ghost btn-sm" onclick="previewLibraryItem('${item.id}')">Preview</button>
             `}
         </div>
     </div>`;
 }
+
+// Library card → Visual Editor. For not-installed items: stage the
+// template's graph in the editor so the user can tweak before saving;
+// Save in the editor creates the workflow + flips the library badge.
+// For installed items: open the actual workflow that backs the card.
+window.openLibraryItemInEditor = async function (itemId) {
+    const item = libraryItems.find(i => i.id === itemId);
+    if (!item) { toast('Library item not found', 'error'); return; }
+
+    // Already installed → open the existing workflow.
+    const installedName = getInstalledWorkflowName(itemId);
+    if (installedName && typeof window.openGraphEditor === 'function') {
+        return window.openGraphEditor(installedName);
+    }
+
+    // Stage from the template. Prefer the graph form when the YAML has
+    // one; fall back to the legacy steps form (the editor's
+    // ensureGraphShape will linearize it).
+    try {
+        const res = await api.get(`/api/templates/library/${encodeURIComponent(item.template)}/graph`);
+        const stagedName = `my-${item.id}`;
+        const stagedShape = {
+            name: stagedName,
+            description: res.description || item.description,
+            enabled: true,
+            graph: res.graph,
+            steps: res.graph ? undefined : res.steps,
+            trigger: res.trigger,
+        };
+        return window.openGraphEditor(null, { staged: stagedShape, libraryItemId: item.id });
+    } catch (err) {
+        // Template not in library/ — fall back to root templates dir.
+        try {
+            const all = await api.get('/api/templates');
+            const tmpl = (all.templates || []).find(t => t.name === item.template);
+            if (!tmpl) throw new Error(`Template "${item.template}" not found`);
+            const stagedName = `my-${item.id}`;
+            const stagedShape = {
+                name: stagedName,
+                description: tmpl.description || item.description,
+                enabled: true,
+                graph: tmpl.graph,
+                steps: tmpl.graph ? undefined : tmpl.steps,
+                trigger: tmpl.trigger,
+            };
+            return window.openGraphEditor(null, { staged: stagedShape, libraryItemId: item.id });
+        } catch (err2) {
+            toast(`Could not load template: ${err2.message}`, 'error');
+        }
+    }
+};
 
 async function renderLibrary(el) {
     // If builder is active, render it instead
