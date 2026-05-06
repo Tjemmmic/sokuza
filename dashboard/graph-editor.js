@@ -320,14 +320,14 @@ async function openRecipePicker() {
             </div>
             <div class="ge-recipe-grid">
                 ${recipes.map((r) => `
-                    <div class="ge-recipe-card" onclick="pickRecipe('${esc(r.id)}')">
+                    <div class="ge-recipe-card" data-recipe-id="${esc(r.id)}">
                         <div class="ge-recipe-icon">${esc(r.icon)}</div>
                         <h3>${esc(r.title)}</h3>
                         <p>${esc(r.tagline)}</p>
                         <ul>${r.bullets.map((b) => `<li>${esc(b)}</li>`).join('')}</ul>
                     </div>
                 `).join('')}
-                <div class="ge-recipe-card ge-recipe-blank" onclick="pickRecipe('__blank')">
+                <div class="ge-recipe-card ge-recipe-blank" data-recipe-id="__blank">
                     <div class="ge-recipe-icon">📄</div>
                     <h3>Blank canvas</h3>
                     <p>Start from an empty graph with just a manual trigger.</p>
@@ -335,6 +335,17 @@ async function openRecipePicker() {
             </div>
         </div>
     `;
+
+    // Recipe ids round-trip through dataset attributes verbatim — no
+    // HTML-entity-decode-then-eval surprise — so an id containing quotes,
+    // angle brackets, or other JS-meaningful characters can never break
+    // out of a quoted string literal in an inline onclick. Future ids
+    // sourced from user input are safe by construction.
+    el.querySelectorAll('.ge-recipe-card[data-recipe-id]').forEach((card) => {
+        card.addEventListener('click', () => {
+            window.pickRecipe(card.dataset.recipeId);
+        });
+    });
 }
 
 window.pickRecipe = async function (id) {
