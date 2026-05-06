@@ -539,6 +539,7 @@ function renderEditor() {
 }
 
 window.closeGraphEditor = function () {
+    unbindCanvasInteractions();
     navigate('workflows');
 };
 
@@ -1492,6 +1493,15 @@ function uniqueNodeId(base) {
 
 // ─── Pointer interactions ─────────────────────────────────────────────────
 
+// Module-level registry of the document-scoped listeners we install when
+// the editor opens. The DOM spec dedupes addEventListener calls with the
+// same (type, callback, capture) triple, so re-binding the editor's
+// stable named handlers is already idempotent — but explicit teardown on
+// close means the listeners aren't sitting attached to the document
+// while the user is on a different page, and a future refactor that
+// switches to closure-based handlers won't silently start leaking.
+let _canvasListenersBound = false;
+
 function bindCanvasInteractions() {
     const wrap = $('#ge-canvas-wrap');
     if (!wrap) return;
@@ -1540,6 +1550,15 @@ function bindCanvasInteractions() {
     document.addEventListener('mousemove', onDocMouseMove);
     document.addEventListener('mouseup', onDocMouseUp);
     document.addEventListener('keydown', onDocKeyDown);
+    _canvasListenersBound = true;
+}
+
+function unbindCanvasInteractions() {
+    if (!_canvasListenersBound) return;
+    document.removeEventListener('mousemove', onDocMouseMove);
+    document.removeEventListener('mouseup', onDocMouseUp);
+    document.removeEventListener('keydown', onDocKeyDown);
+    _canvasListenersBound = false;
 }
 
 function screenToCanvas(sx, sy) {
@@ -1888,7 +1907,12 @@ function pseudoYaml(obj, indent = 0) {
     if (obj === null || obj === undefined) return 'null';
     if (typeof obj === 'string') {
         if (obj.includes('\n') || obj.length > 60) return `|\n${obj.split('\n').map((l) => pad + '  ' + l).join('\n')}`;
-        return /^[a-zA-Z0-9_./@:#-]*$/.test(obj) ? obj : `"${obj.replace(/"/g, '\\"')}"`;
+        // Backslashes must be doubled BEFORE quote-escaping — otherwise
+        // an input like `hello\"` would emit `"hello\\""`, which YAML
+        // parses as the (truncated) scalar "hello\" followed by garbage.
+        // Order matters: double the slashes first, then escape quotes.
+        const escaped = obj.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+        return /^[a-zA-Z0-9_./@:#-]*$/.test(obj) ? obj : `"${escaped}"`;
     }
     if (typeof obj === 'number' || typeof obj === 'boolean') return String(obj);
     if (Array.isArray(obj)) {
