@@ -1,3 +1,20 @@
+// Combined test file for the four GitHub "round-trip" action handlers
+// (fetch-pr, fetch-issue, merge-pr, update-pr). They share the same
+// fetch-mock fixture and ActionContext setup, so co-locating the tests
+// keeps the helpers DRY — splitting per-handler would duplicate the
+// makeContext / mockFetch boilerplate across four files and create
+// drift risk if one copy diverges. The four `describe` blocks below
+// scope the suites by handler:
+//
+//   describe('github-fetch-pr')      — fetch-pr.ts
+//   describe('github-fetch-issue')   — fetch-issue.ts
+//   describe('github-merge-pr')      — merge-pr.ts
+//                                      (incl. merged=false + missing-merged guards)
+//   describe('github-update-pr')     — update-pr.ts
+//                                      (incl. emptyToUndef '' / non-string inputs)
+//
+// wait-for-checks lives in its own file because its fixtures (timer
+// mocks, stage sequencer) are quite different.
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import pino from 'pino';
 import type { ActionContext } from '../../../core/types.js';
@@ -190,5 +207,24 @@ describe('github-update-pr', () => {
             ),
         ).rejects.toThrow(/at least one of title\/body\/state\/base/);
         expect(spy).not.toHaveBeenCalled();
+    });
+
+    it('drops non-string field values (number/boolean/null) instead of forwarding them', async () => {
+        // emptyToUndef has three branches: non-string → undefined,
+        // empty-string → undefined, populated string → value. The first
+        // matters when an upstream wire produces a number or boolean
+        // (e.g. a flow.if `then` output) — without the guard the API
+        // client would coerce 42 to "42" and silently retitle the PR.
+        const spy = mockFetch([
+            () => new Response(JSON.stringify({ html_url: 'x', state: 'open' }), { status: 200 }),
+        ]);
+        await githubUpdatePrAction(
+            // Cast through unknown so the test reflects what could
+            // arrive from a wired upstream port at runtime.
+            { pr_number: 42, repo: 'octo/r', title: 'Real title', body: 42 as unknown as string, state: false as unknown as string, base: null as unknown as string },
+            makeContext(),
+        );
+        const body = JSON.parse(String((spy.mock.calls[0][1] as RequestInit)?.body ?? '{}'));
+        expect(body).toEqual({ title: 'Real title' });
     });
 });
