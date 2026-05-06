@@ -117,7 +117,13 @@ export async function executeGraph(
                         { workflow: opts.workflowName, node: node.id, err: outcome.reason },
                         'Node failed (on_error=continue)',
                     );
-                    nodeOutputs[node.id] = { __error: String(outcome.reason) };
+                    // Preserve the structured Error info so downstream
+                    // nodes that wire from {{nodes.<id>.__error}} get the
+                    // clean message (not "Error: msg"), and a wired
+                    // {{nodes.<id>.__errorStack}} surfaces the stack for
+                    // diagnostics. Falls back to String() for thrown
+                    // non-Error values (strings, plain objects).
+                    nodeOutputs[node.id] = serializeContinueError(outcome.reason);
                     continue;
                 }
                 if (!firstError) firstError = { reason: outcome.reason, node };
@@ -227,6 +233,22 @@ async function runNode(node: GraphNode, deps: RunNodeDeps): Promise<NodeRuntimeO
         `Node ${node.id} (${node.type}) timed out`,
     );
     return result ?? {};
+}
+
+/** Build the output bag for a node that failed under on_error=continue.
+ *  Error objects contribute a clean .message and .stack (and .name when
+ *  it isn't the bare 'Error') so callers can distinguish error classes
+ *  without re-parsing string prefixes. Anything else falls back to
+ *  String() for backward compatibility with handlers that throw plain
+ *  values. */
+function serializeContinueError(reason: unknown): NodeRuntimeOutputs {
+    if (reason instanceof Error) {
+        const out: NodeRuntimeOutputs = { __error: reason.message };
+        if (reason.stack) out.__errorStack = reason.stack;
+        if (reason.name && reason.name !== 'Error') out.__errorName = reason.name;
+        return out;
+    }
+    return { __error: String(reason) };
 }
 
 /**

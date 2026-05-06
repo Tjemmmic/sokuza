@@ -173,7 +173,57 @@ describe('executeGraph', () => {
             edges: [],
         };
         const result = await executeGraph(graph, evt(), actions, registry, noopLogger);
-        expect(result.nodeOutputs.b).toEqual({ __error: expect.stringContaining('kaboom') });
+        expect(result.nodeOutputs.b).toMatchObject({ __error: expect.stringContaining('kaboom') });
+    });
+
+    it('on_error=continue preserves the message, stack, and class name of Error objects', async () => {
+        // String(new TypeError("x")) -> "TypeError: x" — usable but
+        // throws away .stack and .name. Downstream wires that pluck
+        // {{nodes.<id>.__errorStack}} for diagnostics need the structured
+        // form.
+        class MyError extends Error {
+            constructor(msg: string) { super(msg); this.name = 'MyError'; }
+        }
+        actions.set('boom', async () => { throw new MyError('boom-msg'); });
+        registry.register(actionDef('test.boom', 'boom', [
+            { name: 'result', role: 'output', label: 'Result', wire: true },
+        ]));
+        const graph: NodeGraph = {
+            nodes: [
+                { id: 'trig', type: 'trigger.github' },
+                { id: 'b', type: 'test.boom', on_error: 'continue' },
+            ],
+            edges: [],
+        };
+        const result = await executeGraph(graph, evt(), actions, registry, noopLogger);
+        expect(result.nodeOutputs.b.__error).toBe('boom-msg');
+        expect(result.nodeOutputs.b.__errorName).toBe('MyError');
+        expect(result.nodeOutputs.b.__errorStack).toContain('boom-msg');
+    });
+
+    it('on_error=continue still handles non-Error throws (plain string, plain object)', async () => {
+        actions.set('throwString', async () => { throw 'literal-string'; });
+        actions.set('throwObj', async () => { throw { code: 42 }; });
+        registry.register(actionDef('test.t1', 'throwString', [
+            { name: 'r', role: 'output', label: 'r', wire: true },
+        ]));
+        registry.register(actionDef('test.t2', 'throwObj', [
+            { name: 'r', role: 'output', label: 'r', wire: true },
+        ]));
+        const graph: NodeGraph = {
+            nodes: [
+                { id: 'trig', type: 'trigger.github' },
+                { id: 'a', type: 'test.t1', on_error: 'continue' },
+                { id: 'b', type: 'test.t2', on_error: 'continue' },
+            ],
+            edges: [],
+        };
+        const result = await executeGraph(graph, evt(), actions, registry, noopLogger);
+        expect(result.nodeOutputs.a).toEqual({ __error: 'literal-string' });
+        // Plain objects round-trip through String() to "[object Object]" —
+        // not pretty, but stable, and the contract for non-Error throws.
+        expect(result.nodeOutputs.b.__error).toBe('[object Object]');
+        expect(result.nodeOutputs.b.__errorStack).toBeUndefined();
     });
 
     it('fails fast when on_error is the default', async () => {
