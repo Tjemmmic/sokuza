@@ -606,6 +606,8 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
                 name,
                 trigger: parsed.trigger,
                 steps: parsed.steps,
+                graph: parsed.graph,
+                description: parsed.description,
                 raw: content,
             });
         }
@@ -613,7 +615,9 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
         return { templates };
     });
 
-    // Library templates (separate from user templates)
+    // Library templates (separate from user templates). We surface the
+    // parsed graph + trigger so the dashboard's recipe picker can render
+    // graph-form templates as starter recipes without re-parsing YAML.
     server.get('/api/templates/library', async () => {
         const dir = join(deps.getTemplateDir(), 'library');
         let files: string[];
@@ -628,10 +632,48 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
             if (!file.endsWith('.yaml') && !file.endsWith('.yml')) continue;
             const name = basename(file, extname(file));
             const content = await readFile(join(dir, file), 'utf-8');
-            templates.push({ name, content });
+            let parsed: Record<string, unknown> = {};
+            try { parsed = (yaml.load(content) as Record<string, unknown>) || {}; }
+            catch { /* surface as content-only */ }
+            templates.push({
+                name,
+                content,
+                trigger: parsed.trigger,
+                steps: parsed.steps,
+                graph: parsed.graph,
+                description: parsed.description,
+                icon: parsed.icon,
+            });
         }
 
         return { templates };
+    });
+
+    // Single library template lookup — used by library cards' "Edit in
+    // Visual Editor" path. Returns the parsed graph (if any) so the editor
+    // can stage the workflow without round-tripping YAML.
+    server.get('/api/templates/library/:name/graph', async (request, reply) => {
+        const { name } = request.params as { name: string };
+        const safeName = sanitizeFileName(name);
+        const dir = join(deps.getTemplateDir(), 'library');
+        const filePath = join(dir, `${safeName}.yaml`);
+        let content: string;
+        try {
+            content = await readFile(filePath, 'utf-8');
+        } catch {
+            return reply.status(404).send({ error: `Library template "${safeName}" not found` });
+        }
+        let parsed: Record<string, unknown> = {};
+        try { parsed = (yaml.load(content) as Record<string, unknown>) || {}; }
+        catch (e: any) { return reply.status(400).send({ error: `Invalid YAML: ${e.message}` }); }
+        return {
+            name: safeName,
+            description: parsed.description,
+            icon: parsed.icon,
+            trigger: parsed.trigger,
+            graph: parsed.graph,
+            steps: parsed.steps,
+        };
     });
 
     server.post('/api/templates', async (request, reply) => {
