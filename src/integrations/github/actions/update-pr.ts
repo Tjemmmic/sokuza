@@ -19,6 +19,9 @@ export const githubUpdatePrAction: ActionHandler = async (params, context) => {
     });
     return {
         url: updated.html_url,
+        // `newState` is the canonical port name; `state` stays as an alias
+        // so workflows authored before the rename keep resolving.
+        newState: updated.state,
         state: updated.state,
         number: target.number,
     };

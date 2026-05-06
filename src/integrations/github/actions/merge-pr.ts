@@ -35,6 +35,10 @@ export const githubMergePrAction: ActionHandler = async (params, context) => {
     }
     return {
         merged: true,
+        // `mergeSha` is the canonical port name on the github.merge-pr
+        // node; `sha` is kept as an alias so workflows authored before
+        // the rename keep resolving {{nodes.x.sha}} to the merge commit.
+        mergeSha: result.sha,
         sha: result.sha,
         message: result.message,
         method,

@@ -385,6 +385,20 @@ const githubComment = actionNode({
     ],
 });
 
+// Several action nodes deliberately expose an input AND an output that
+// share a name (e.g. clone-repo's `repo`, wait-for-checks's `sha`,
+// create-pr's `repo`/`branch`, fetch-pr's `repo`). This is a re-emit
+// pattern: the output value IS the resolved input, exposed so downstream
+// nodes can wire `clone.repo → fetch.repo` directly without also wiring
+// back to the trigger. Same name communicates "same value".
+//
+// The runtime + editor both filter by role when looking up ports
+// (resolveNodeInputs vs resolveOutputPorts; wireInputPorts vs
+// wireOutputPorts) so the duplicate is unambiguous in code paths.
+//
+// Where the input and output have *different* semantics (merge-pr's
+// guard SHA vs result SHA; update-pr's desired state vs actual state)
+// the names diverge — see githubMergePr / githubUpdatePr above.
 const githubCloneRepo = actionNode({
     type: 'github.clone-repo',
     actionName: 'github-clone-repo',
@@ -400,7 +414,7 @@ const githubCloneRepo = actionNode({
         { name: 'destDir', label: 'Destination Dir (optional)', role: 'input', config: true, control: 'text' },
         { name: 'path', label: 'Workdir Path', role: 'output', wire: true, type: 'string' },
         { name: 'sha', label: 'Cloned SHA', role: 'output', wire: true, type: 'string' },
-        // Re-emit so downstream nodes don't have to re-wire from the trigger.
+        // Re-emit pattern (see comment above): output = the cloned repo.
         { name: 'repo', label: 'Repository', role: 'output', wire: true, type: 'string' },
         { name: 'branch', label: 'Branch / Ref', role: 'output', wire: true, type: 'string' },
     ],
@@ -526,7 +540,12 @@ const githubMergePr = actionNode({
         { name: 'sha', label: 'Required Head SHA (optional)', role: 'input', wire: true, config: true, control: 'text', type: 'string', helpText: 'If supplied, GitHub fails the merge if the PR HEAD has moved' },
         { name: 'token', label: 'GitHub Token (optional override)', role: 'input', config: true, control: 'text' },
         { name: 'merged', label: 'Merged?', role: 'output', wire: true, type: 'boolean' },
-        { name: 'sha', label: 'Merge Commit SHA', role: 'output', wire: true, type: 'string' },
+        // `mergeSha` (the resulting commit SHA) is intentionally distinct
+        // from the input `sha` (the head SHA used as a merge guard) — the
+        // two refer to different commits, so they get different port
+        // names. The action handler also exposes the legacy `sha` alias
+        // for older workflows that referenced {{nodes.x.sha}}.
+        { name: 'mergeSha', label: 'Merge Commit SHA', role: 'output', wire: true, type: 'string' },
         { name: 'message', label: 'API Message', role: 'output', wire: true, type: 'string' },
     ],
 });
@@ -552,7 +571,11 @@ const githubUpdatePr = actionNode({
         { name: 'base', label: 'Base Branch (optional)', role: 'input', config: true, control: 'text' },
         { name: 'token', label: 'GitHub Token (optional override)', role: 'input', config: true, control: 'text' },
         { name: 'url', label: 'PR URL', role: 'output', wire: true, type: 'string' },
-        { name: 'state', label: 'New State', role: 'output', wire: true, type: 'string' },
+        // `newState` (the post-update state, e.g. "closed") is distinct
+        // from the input `state` (the desired state, may be "" for "no
+        // change"). The action handler also exposes the legacy `state`
+        // alias for backward compatibility.
+        { name: 'newState', label: 'New State', role: 'output', wire: true, type: 'string' },
         { name: 'number', label: 'PR Number', role: 'output', wire: true, type: 'number' },
     ],
 });
