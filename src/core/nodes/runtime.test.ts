@@ -623,4 +623,155 @@ describe('executeGraph', () => {
         const result = await executeGraph(graph, evt(), actions, registry, noopLogger);
         expect(result.nodeOutputs.e?.saw).toBeDefined();
     });
+
+    // ── Implicit dependencies from {{nodes.X.Y}} / {{steps.X.Y}} ─────────
+    //
+    // The toposort augments graph.edges with edges inferred from config
+    // (and condition) template references. Without this, hand-authored
+    // YAML where the consumer references a node it isn't explicitly
+    // wired to ran in the wrong layer — interpolation read undefined
+    // and silently substituted ''. Each test below asserts the order
+    // is now correct AND the consumer sees the producer's actual value
+    // rather than ''.
+    it('orders consumers after producers when only the config references them ({{nodes.x.y}})', async () => {
+        actions.set('produce', async () => ({ markdown: 'REAL-CONTENT' }));
+        actions.set('consume', async (params) => ({ saw: params.body }));
+        registry.register(actionDef('test.produce', 'produce', [
+            { name: 'markdown', role: 'output', label: 'Markdown', wire: true },
+        ]));
+        registry.register(actionDef('test.consume', 'consume', [
+            { name: 'body', role: 'input', label: 'Body', wire: true, config: true, control: 'textarea' },
+            { name: 'saw', role: 'output', label: 'Saw', wire: true },
+        ]));
+        const graph: NodeGraph = {
+            nodes: [
+                { id: 'trig', type: 'trigger.github' },
+                { id: 'producer', type: 'test.produce' },
+                {
+                    id: 'consumer',
+                    type: 'test.consume',
+                    // Refers to producer's output but has no edge from it.
+                    config: { body: 'wrap {{nodes.producer.markdown}} end' },
+                },
+            ],
+            edges: [],
+        };
+
+        // 1. Toposort places producer before consumer.
+        const layers = toposortLayers(graph);
+        const layerIndexById = new Map<string, number>();
+        layers.forEach((layer, i) => layer.forEach((n) => layerIndexById.set(n.id, i)));
+        expect(layerIndexById.get('producer')!).toBeLessThan(layerIndexById.get('consumer')!);
+
+        // 2. The consumer interpolates the producer's actual output, not ''.
+        const result = await executeGraph(graph, evt(), actions, registry, noopLogger);
+        expect(result.nodeOutputs.consumer.saw).toBe('wrap REAL-CONTENT end');
+    });
+
+    it('treats {{steps.x.y}} the same as {{nodes.x.y}} for ordering', async () => {
+        actions.set('produce', async () => ({ value: 'XYZ' }));
+        actions.set('consume', async (params) => ({ saw: params.body }));
+        registry.register(actionDef('test.produce', 'produce', [
+            { name: 'value', role: 'output', label: 'V', wire: true },
+        ]));
+        registry.register(actionDef('test.consume', 'consume', [
+            { name: 'body', role: 'input', label: 'B', wire: true, config: true, control: 'text' },
+            { name: 'saw', role: 'output', label: 'Saw', wire: true },
+        ]));
+        const graph: NodeGraph = {
+            nodes: [
+                { id: 'trig', type: 'trigger.github' },
+                { id: 'p', type: 'test.produce' },
+                { id: 'c', type: 'test.consume', config: { body: '{{steps.p.value}}' } },
+            ],
+            edges: [],
+        };
+        const result = await executeGraph(graph, evt(), actions, registry, noopLogger);
+        expect(result.nodeOutputs.c.saw).toBe('XYZ');
+    });
+
+    it('uses node.condition refs for ordering too', async () => {
+        // Without this, a node whose `condition:` reads another node's
+        // output could be evaluated in the wrong layer, with the
+        // condition string interpolating to '' (falsy) and the node
+        // wrongly skipped.
+        const ranC = vi.fn();
+        actions.set('flag', async () => ({ ok: 'yes' }));
+        actions.set('mark', async () => { ranC(); return { done: true }; });
+        registry.register(actionDef('test.flag', 'flag', [
+            { name: 'ok', role: 'output', label: 'OK', wire: true },
+        ]));
+        registry.register(actionDef('test.mark', 'mark', [
+            { name: 'done', role: 'output', label: 'Done', wire: true },
+        ]));
+        const graph: NodeGraph = {
+            nodes: [
+                { id: 'trig', type: 'trigger.github' },
+                { id: 'gate', type: 'test.flag' },
+                { id: 'after', type: 'test.mark', condition: '{{nodes.gate.ok}}' },
+            ],
+            edges: [],
+        };
+        const result = await executeGraph(graph, evt(), actions, registry, noopLogger);
+        expect(ranC).toHaveBeenCalledTimes(1);
+        expect(result.nodeOutputs.after.done).toBe(true);
+    });
+
+    it('does not duplicate ordering when both an explicit edge and a config ref exist', async () => {
+        // Regression guard: the inference shouldn't re-add a (producer,
+        // consumer) implicit edge when the explicit edge already exists.
+        // The layout should match the no-config-ref baseline exactly.
+        actions.set('p', async () => ({ value: 'A' }));
+        actions.set('c', async (params) => ({ saw: params.body }));
+        registry.register(actionDef('test.p', 'p', [
+            { name: 'value', role: 'output', label: 'V', wire: true },
+        ]));
+        registry.register(actionDef('test.c', 'c', [
+            { name: 'body', role: 'input', label: 'B', wire: true, config: true, control: 'text' },
+            { name: 'saw', role: 'output', label: 'Saw', wire: true },
+        ]));
+        const baseGraph: NodeGraph = {
+            nodes: [
+                { id: 'trig', type: 'trigger.github' },
+                { id: 'p', type: 'test.p' },
+                // No config ref here — pure explicit-edge baseline.
+                { id: 'c', type: 'test.c', config: { body: 'static' } },
+            ],
+            edges: [
+                { from: { node: 'p', port: 'value' }, to: { node: 'c', port: 'body' } },
+            ],
+        };
+        const dupGraph: NodeGraph = {
+            ...baseGraph,
+            nodes: [
+                ...baseGraph.nodes.slice(0, 2),
+                // Has an explicit edge AND a {{nodes.p.value}} config ref —
+                // the inferred edge would be a duplicate of the explicit one.
+                { id: 'c', type: 'test.c', config: { body: '{{nodes.p.value}}!' } },
+            ],
+        };
+        const flatten = (g: NodeGraph) => toposortLayers(g).map((l) => l.map((n) => n.id));
+        expect(flatten(dupGraph)).toEqual(flatten(baseGraph));
+    });
+
+    it('ignores implicit refs to non-existent node ids — leaves the existing dangling-edge guard intact', async () => {
+        // A typo `{{nodes.reveiw.markdown}}` (missing 'reveiw' node)
+        // should NOT crash the toposort. The interpolation will resolve
+        // to '' at runtime — the typo-preserving change covers literals,
+        // and missing-but-prefixed refs still return ''.
+        actions.set('echo', async (params) => ({ echoed: params.value }));
+        registry.register(actionDef('test.echo', 'echo', [
+            { name: 'value', role: 'input', label: 'V', wire: true, config: true, control: 'text' },
+            { name: 'echoed', role: 'output', label: 'E', wire: true },
+        ]));
+        const graph: NodeGraph = {
+            nodes: [
+                { id: 'trig', type: 'trigger.github' },
+                { id: 'e', type: 'test.echo', config: { value: '{{nodes.reveiw.x}} fallback' } },
+            ],
+            edges: [],
+        };
+        // Doesn't throw. Doesn't add a phantom edge to a non-existent node.
+        expect(() => toposortLayers(graph)).not.toThrow();
+    });
 });

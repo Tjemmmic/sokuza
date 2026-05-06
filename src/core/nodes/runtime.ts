@@ -510,6 +510,31 @@ export function toposortLayers(graph: NodeGraph): GraphNode[][] {
         childrenOf.get(e.from.node)!.push(e.to.node);
     }
 
+    // ── Implicit dependencies from {{nodes.X.Y}} / {{steps.X.Y}} refs ──
+    //
+    // The toposort needs to know that a node which interpolates
+    // `{{nodes.review.markdown}}` in its config can only run after
+    // `review` produces output. Without this, hand-authored YAML where
+    // the referenced node lacks an explicit edge to the consumer would
+    // run in the wrong layer — interpolation resolves to "" because the
+    // upstream output isn't there yet, and the consumer silently uses
+    // empty values. Explicit edges remain the source of truth for
+    // wiring data into ports; implicit ones only constrain ORDER.
+    const seenEdge = new Set<string>();
+    for (const e of graph.edges) seenEdge.add(`${e.from.node}|${e.to.node}`);
+    for (const node of graph.nodes) {
+        const refs = collectNodeRefs(node);
+        for (const ref of refs) {
+            if (ref === node.id) continue;          // self-ref → ignore
+            if (!nodeById.has(ref)) continue;        // dangling → leave alone
+            const key = `${ref}|${node.id}`;
+            if (seenEdge.has(key)) continue;         // already an explicit edge
+            seenEdge.add(key);
+            inDegree.set(node.id, (inDegree.get(node.id) ?? 0) + 1);
+            childrenOf.get(ref)!.push(node.id);
+        }
+    }
+
     const layers: GraphNode[][] = [];
     let frontier = graph.nodes.filter((n) => (inDegree.get(n.id) ?? 0) === 0);
 
@@ -536,4 +561,40 @@ export function toposortLayers(graph: NodeGraph): GraphNode[][] {
     }
 
     return layers;
+}
+
+/** Find every node id this node references via `{{nodes.<id>.…}}` or
+ *  `{{steps.<id>.…}}` in its config, condition, or any nested string.
+ *  These references are resolved at runtime against the upstream node's
+ *  output bag, so the producing node must run first. Used by the
+ *  toposort to add implicit ordering constraints that the explicit edge
+ *  list might omit. */
+function collectNodeRefs(node: GraphNode): Set<string> {
+    const refs = new Set<string>();
+    collectNodeRefsFromString(node.condition, refs);
+    if (node.config) {
+        for (const v of Object.values(node.config)) collectNodeRefsFromValue(v, refs);
+    }
+    return refs;
+}
+
+function collectNodeRefsFromValue(value: unknown, out: Set<string>): void {
+    if (typeof value === 'string') {
+        collectNodeRefsFromString(value, out);
+    } else if (Array.isArray(value)) {
+        for (const v of value) collectNodeRefsFromValue(v, out);
+    } else if (value && typeof value === 'object') {
+        for (const v of Object.values(value as Record<string, unknown>)) {
+            collectNodeRefsFromValue(v, out);
+        }
+    }
+}
+
+const NODE_REF_RE = /\{\{\s*(?:nodes|steps)\.([A-Za-z0-9_-]+)\b/g;
+
+function collectNodeRefsFromString(value: string | undefined, out: Set<string>): void {
+    if (!value) return;
+    for (const m of value.matchAll(NODE_REF_RE)) {
+        out.add(m[1]);
+    }
 }
