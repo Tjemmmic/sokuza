@@ -485,28 +485,30 @@ async function cleanupTempDirs(paths: string[], logger: Logger): Promise<void> {
 
 /**
  * Recursively resolve `{{event.payload.foo}}` and `{{steps.id.field}}`
- * expressions in params.
+ * expressions in params. Walks strings, arrays, and plain objects so a
+ * config like `params: { items: ['{{steps.a.val}}'] }` resolves the
+ * template inside the array — matches the graph runtime's
+ * interpolateValue (runtime.ts), keeping legacy and graph executors
+ * consistent.
  */
 export function interpolateParams(
     params: Record<string, unknown>,
     context: ActionContext,
 ): Record<string, unknown> {
     const result: Record<string, unknown> = {};
-
     for (const [key, value] of Object.entries(params)) {
-        if (typeof value === 'string') {
-            result[key] = interpolateString(value, context);
-        } else if (value && typeof value === 'object' && !Array.isArray(value)) {
-            result[key] = interpolateParams(
-                value as Record<string, unknown>,
-                context,
-            );
-        } else {
-            result[key] = value;
-        }
+        result[key] = interpolateValue(value, context);
     }
-
     return result;
+}
+
+function interpolateValue(value: unknown, context: ActionContext): unknown {
+    if (typeof value === 'string') return interpolateString(value, context);
+    if (Array.isArray(value)) return value.map((v) => interpolateValue(v, context));
+    if (value && typeof value === 'object') {
+        return interpolateParams(value as Record<string, unknown>, context);
+    }
+    return value;
 }
 
 const ALLOWED_INTERPOLATION_PREFIXES = ['event.', 'results.', 'steps.', 'metadata.', 'inputs.'];

@@ -521,6 +521,20 @@ describe('interpolateParams', () => {
         expect(result.flag).toBe(true);
         expect(result.items).toEqual([1, 2, 3]);
     });
+
+    it('resolves templates inside arrays — same shape as the graph runtime', () => {
+        // Used to silently pass arrays through verbatim, leaving
+        // {{...}} placeholders intact and producing the wrong values
+        // downstream. The graph executor's interpolateValue has always
+        // walked arrays; the legacy executor now matches.
+        const params = {
+            items: ['{{event.metadata.repo}}', '{{steps.analysis.summary}}', 'literal'],
+            nested: [{ ref: '{{event.payload.pull_request.title}}' }],
+        };
+        const result = interpolateParams(params, baseContext);
+        expect(result.items).toEqual(['org/repo', 'Found issue', 'literal']);
+        expect((result.nested as Array<Record<string, unknown>>)[0].ref).toBe('Fix bug');
+    });
 });
 
 // ─── executeWorkflow ────────────────────────────────────────────────────────
