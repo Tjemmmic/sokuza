@@ -5,25 +5,37 @@
 # any flow to see exactly what the trigger emits before you build out
 # downstream nodes.
 #
+# The default events list is `pull_request.opened, push, issues.opened`
+# so the workflow actually fires; broaden it in the trigger node config
+# (or the YAML) to tap whatever you care about. Empty events list never
+# matches in the engine — by design.
+#
 # Exercises: data.event-fields (no other heavy nodes — minimum-viable)
 #
 # Usage:
 #   - name: debug-events
 #     template: event-debug-tap
 
-description: Inspect every incoming event — dump source/name/payload to the log
+description: Tap incoming events — dump source / name / payload to the log
 icon: 🩺
 
 trigger:
   source: github
-  event: ""  # Any event the integration emits
+  event:
+    - pull_request.opened
+    - push
+    - issues.opened
 
 graph:
   nodes:
     - id: trigger
       type: trigger.github
       position: { x: 60, y: 240 }
-      config: {}
+      config:
+        events:
+          - pull_request.opened
+          - push
+          - issues.opened
     - id: fields
       type: data.event-fields
       position: { x: 360, y: 240 }

@@ -22,8 +22,11 @@ graph:
     - id: trigger
       type: trigger.cron
       position: { x: 60, y: 240 }
+      # Sokuza's cron integration takes named schedules (daily, hourly,
+      # every-1m, every-5m, every-15m, every-30m), not crontab expressions.
+      # The trigger node's "Cron Expression" placeholder is misleading.
       config:
-        schedule: "0 9 * * *"
+        schedule: daily
     - id: nudge
       type: ai.agent
       position: { x: 360, y: 240 }

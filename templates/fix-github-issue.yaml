@@ -102,8 +102,6 @@ graph:
           ---
           _Fixed by Sokuza AI_
   edges:
-    - from: { node: trigger, port: issue }
-      to: { node: clone, port: ref }
     - from: { node: clone, port: path }
       to: { node: fix, port: workdir }
     - from: { node: clone, port: path }

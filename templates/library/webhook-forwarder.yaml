@@ -1,9 +1,21 @@
 # Webhook Forwarder
 #
-# Inbound HTTP → outbound HTTP. The trigger receives any POST to its
-# configured path; data.event-fields breaks the canonical envelope down;
-# data.template builds a forwarded body; utility.webhook re-POSTs the
-# event to a downstream service.
+# Inbound HTTP → outbound HTTP. data.event-fields breaks the canonical
+# envelope down; data.template builds a forwarded body; utility.webhook
+# re-POSTs the event to a downstream service.
+#
+# IMPORTANT: the webhook integration emits events named after configured
+# endpoints — POSTs to /webhooks/custom/<name> become event "<name>".
+# Add an endpoint to your sokuza.config.yaml first:
+#
+#   integrations:
+#     webhook:
+#       endpoints:
+#         deploy-hook: {}     # accepts POST /webhooks/custom/deploy-hook
+#
+# Then this workflow's `event: deploy-hook` matches. The `path` field on
+# trigger.webhook is currently informational — wiring a custom path
+# requires the endpoint config above.
 #
 # Exercises: trigger.webhook, data.event-fields, data.template,
 #            utility.webhook
@@ -12,12 +24,12 @@
 #   - name: forward-events
 #     template: webhook-forwarder
 
-description: Forward any inbound webhook to a downstream HTTP endpoint
+description: Forward an inbound webhook to a downstream HTTP endpoint
 icon: 🪝
 
 trigger:
   source: webhook
-  event: incoming
+  event: deploy-hook
 
 graph:
   nodes:
@@ -25,7 +37,7 @@ graph:
       type: trigger.webhook
       position: { x: 60, y: 240 }
       config:
-        path: "/webhooks/forward"
+        path: "/webhooks/custom/deploy-hook"
     - id: fields
       type: data.event-fields
       position: { x: 360, y: 240 }
