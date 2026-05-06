@@ -70,3 +70,8 @@ graph:
       to: { node: post_gh, port: pr_number }
     - from: { node: trigger, port: repo }
       to: { node: post_gh, port: repo }
+    # post_gh and post_slack both interpolate review.markdown in body/text.
+    - from: { node: review, port: markdown }
+      to: { node: post_gh, port: __seq }
+    - from: { node: review, port: markdown }
+      to: { node: post_slack, port: __seq }

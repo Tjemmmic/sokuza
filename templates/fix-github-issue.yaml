@@ -106,3 +106,11 @@ graph:
       to: { node: fix, port: workdir }
     - from: { node: clone, port: path }
       to: { node: create_pr, port: workdir }
+    # Sequencing edges — create_pr's body and notify's body interpolate
+    # earlier nodes' outputs, so they must run after them.
+    - from: { node: fix, port: output }
+      to: { node: create_pr, port: __seq }
+    - from: { node: fix, port: output }
+      to: { node: notify, port: __seq }
+    - from: { node: create_pr, port: url }
+      to: { node: notify, port: __seq }

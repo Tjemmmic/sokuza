@@ -70,3 +70,6 @@ graph:
       to: { node: address, port: repo }
     - from: { node: trigger, port: review }
       to: { node: address, port: structured }
+    # notify's text interpolates address.iterationsRun and finalState.
+    - from: { node: address, port: iterationsRun }
+      to: { node: notify, port: __seq }

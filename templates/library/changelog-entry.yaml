@@ -72,3 +72,6 @@ graph:
       to: { node: post, port: pr_number }
     - from: { node: trigger, port: repo }
       to: { node: post, port: repo }
+    # post's body and condition both interpolate entry.markdown.
+    - from: { node: entry, port: markdown }
+      to: { node: post, port: __seq }

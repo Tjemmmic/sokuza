@@ -54,3 +54,6 @@ graph:
       to: { node: update, port: repo }
     - from: { node: title_template, port: text }
       to: { node: update, port: title }
+    # title_template's config interpolates fields.branch and fields.title.
+    - from: { node: fields, port: branch }
+      to: { node: title_template, port: __seq }

@@ -55,3 +55,11 @@ graph:
       to: { node: commits, port: commits }
     - from: { node: commits, port: shas }
       to: { node: latest_sha, port: from }
+    # header's template interpolates commits.* ; log's message interpolates
+    # both header.text and latest_sha.valueText.
+    - from: { node: commits, port: count }
+      to: { node: header, port: __seq }
+    - from: { node: header, port: text }
+      to: { node: log, port: __seq }
+    - from: { node: latest_sha, port: valueText }
+      to: { node: log, port: __seq }

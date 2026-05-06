@@ -95,3 +95,11 @@ graph:
       to: { node: pr, port: repo }
     - from: { node: push, port: branch }
       to: { node: pr, port: branch }
+    # agent/push/pr all interpolate fields.* in their config; pr's body
+    # also interpolates agent.output.
+    - from: { node: fields, port: number }
+      to: { node: agent, port: __seq }
+    - from: { node: fields, port: number }
+      to: { node: push, port: __seq }
+    - from: { node: agent, port: output }
+      to: { node: pr, port: __seq }

@@ -76,3 +76,11 @@ graph:
       to: { node: remove_large, port: pr_number }
     - from: { node: fields, port: repo }
       to: { node: remove_large, port: repo }
+    # large_check's condition interpolates size_value.value;
+    # add_large / remove_large conditions interpolate large_check branches.
+    - from: { node: size_value, port: value }
+      to: { node: large_check, port: __seq }
+    - from: { node: large_check, port: then }
+      to: { node: add_large, port: __seq }
+    - from: { node: large_check, port: else }
+      to: { node: remove_large, port: __seq }

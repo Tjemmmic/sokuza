@@ -95,3 +95,11 @@ graph:
       to: { node: report, port: pr_number }
     - from: { node: trigger, port: repo }
       to: { node: report, port: repo }
+    # Sequencing edges — fix/open_pr/report all interpolate analysis.output
+    # in either condition or config, so they must run after analysis.
+    - from: { node: analysis, port: output }
+      to: { node: fix, port: __seq }
+    - from: { node: analysis, port: output }
+      to: { node: open_pr, port: __seq }
+    - from: { node: analysis, port: output }
+      to: { node: report, port: __seq }

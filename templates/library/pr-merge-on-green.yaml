@@ -99,3 +99,14 @@ graph:
       to: { node: merge, port: pr_number }
     - from: { node: pr_fields, port: repo }
       to: { node: merge, port: repo }
+    # Sequencing edges — pr's condition references gate_approved.then,
+    # merge's condition references gate_green.then, notify's condition
+    # references merge.merged and its text interpolates pr_fields.* .
+    - from: { node: gate_approved, port: then }
+      to: { node: pr, port: __seq }
+    - from: { node: gate_green, port: then }
+      to: { node: merge, port: __seq }
+    - from: { node: pr_fields, port: number }
+      to: { node: notify, port: __seq }
+    - from: { node: merge, port: merged }
+      to: { node: notify, port: __seq }

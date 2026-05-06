@@ -58,3 +58,6 @@ graph:
       to: { node: post, port: pr_number }
     - from: { node: trigger, port: repo }
       to: { node: post, port: repo }
+    # post's body interpolates review.markdown and review.runId.
+    - from: { node: review, port: markdown }
+      to: { node: post, port: __seq }

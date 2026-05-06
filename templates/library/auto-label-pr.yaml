@@ -86,3 +86,6 @@ graph:
       to: { node: post, port: pr_number }
     - from: { node: trigger, port: repo }
       to: { node: post, port: repo }
+    # post's body interpolates label.output.
+    - from: { node: label, port: output }
+      to: { node: post, port: __seq }

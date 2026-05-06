@@ -66,3 +66,6 @@ graph:
       to: { node: fields, port: event }
     - from: { node: body, port: text }
       to: { node: forward, port: body }
+    # body's template interpolates fields.* .
+    - from: { node: fields, port: source }
+      to: { node: body, port: __seq }

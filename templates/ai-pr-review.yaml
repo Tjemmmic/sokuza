@@ -64,3 +64,9 @@ graph:
       to: { node: post, port: pr_number }
     - from: { node: trigger, port: repo }
       to: { node: post, port: repo }
+    # Sequencing edge — post's body interpolates {{nodes.review.markdown}}
+    # so it must run after review. The runtime would now infer this from
+    # the config ref, but stating it explicitly keeps the dataflow visible
+    # in the editor and self-documents the dependency.
+    - from: { node: review, port: markdown }
+      to: { node: post, port: __seq }
