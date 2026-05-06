@@ -3,11 +3,11 @@ import type { Logger } from 'pino';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import yaml from 'js-yaml';
-import { executeGraph } from '../core/nodes/runtime.js';
+import { executeGraph, toposortLayers } from '../core/nodes/runtime.js';
 import { getNodeRegistry, resetNodeRegistry } from '../core/nodes/registry.js';
 import { registerBuiltinNodes } from '../core/nodes/builtins.js';
 import type { ActionHandler, EventPayload } from '../core/types.js';
-import type { NodeGraph } from '../core/nodes/types.js';
+import type { NodeGraph, GraphNode } from '../core/nodes/types.js';
 
 // Run every library graph template through the runtime with mocked actions
 // to prove the wiring resolves and the runtime accepts the graph shape.
@@ -224,4 +224,61 @@ describe('library template execution', () => {
         // surfaces it before the per-template test even runs.
         expect(templates.length).toBeGreaterThanOrEqual(20);
     });
+
+    // For every node whose config or condition references {{nodes.X.Y}},
+    // toposort must place that node strictly after X. The previous
+    // execution test only checked that the runtime didn't throw — but
+    // the generic mock returned hardcoded outputs regardless of input,
+    // so a consumer running before its producer (with the producer's
+    // {{...}} ref interpolating to '') would still "succeed". This
+    // assertion catches the missing-edge bug class regardless of mock
+    // behaviour, by inspecting the actual layer ordering.
+    it.each(templates)('$name resolves every config/condition node-ref before the consumer runs', (tmpl) => {
+        const layers = toposortLayers(tmpl.graph);
+        const layerOf = new Map<string, number>();
+        layers.forEach((layer, i) => layer.forEach((n) => layerOf.set(n.id, i)));
+
+        const refsByConsumer = collectRefsByConsumer(tmpl.graph.nodes);
+        const violations: string[] = [];
+        for (const [consumerId, refs] of refsByConsumer) {
+            const consumerLayer = layerOf.get(consumerId);
+            if (consumerLayer === undefined) continue; // unreachable / skipped node
+            for (const ref of refs) {
+                if (ref === consumerId) continue;
+                const refLayer = layerOf.get(ref);
+                if (refLayer === undefined) continue; // ref points at a non-existent node
+                if (refLayer >= consumerLayer) {
+                    violations.push(
+                        `node "${consumerId}" references {{nodes.${ref}.…}} but ${ref} is in layer ${refLayer} >= ${consumerLayer}`,
+                    );
+                }
+            }
+        }
+        expect(violations, `Template ${tmpl.name} has out-of-order config refs:\n  ${violations.join('\n  ')}`).toEqual([]);
+    });
 });
+
+/** For each node, collect every other node id it references via
+ *  `{{nodes.<id>.…}}` or `{{steps.<id>.…}}` in its config or condition.
+ *  Mirrors collectNodeRefs in runtime.ts but scoped to a per-consumer
+ *  map so the test can pin who depends on whom. */
+function collectRefsByConsumer(nodes: GraphNode[]): Map<string, Set<string>> {
+    const out = new Map<string, Set<string>>();
+    for (const node of nodes) {
+        const refs = new Set<string>();
+        scan(node.condition, refs);
+        if (node.config) for (const v of Object.values(node.config)) scan(v, refs);
+        if (refs.size > 0) out.set(node.id, refs);
+    }
+    return out;
+}
+
+function scan(value: unknown, out: Set<string>): void {
+    if (typeof value === 'string') {
+        for (const m of value.matchAll(/\{\{\s*(?:nodes|steps)\.([A-Za-z0-9_-]+)\b/g)) out.add(m[1]);
+    } else if (Array.isArray(value)) {
+        for (const v of value) scan(v, out);
+    } else if (value && typeof value === 'object') {
+        for (const v of Object.values(value as Record<string, unknown>)) scan(v, out);
+    }
+}
