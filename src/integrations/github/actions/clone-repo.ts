@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { ActionHandler } from '../../../core/types.js';
 import { execGit, execGitOutput } from '../git-helpers.js';
+import { WORKFLOW_TEMP_PREFIX } from '../../../core/temp-paths.js';
 
 const DEFAULT_DEPTH = 50;
 const DEFAULT_NON_PR_DEPTH = 1;
@@ -44,7 +45,7 @@ export const githubCloneRepoAction: ActionHandler = async (params, context) => {
         }
         tempDir = destDir;
     } else {
-        tempDir = await mkdtemp(join(tmpdir(), 'sokuza-repo-'));
+        tempDir = await mkdtemp(join(tmpdir(), WORKFLOW_TEMP_PREFIX));
     }
 
     context.logger.info(

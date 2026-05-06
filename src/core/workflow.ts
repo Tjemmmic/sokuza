@@ -15,6 +15,7 @@ import { toArray } from './types.js';
 import { executeGraph } from './nodes/runtime.js';
 import { getNodeRegistry } from './nodes/registry.js';
 import { extractTriggerFromGraph, isGraphWorkflow } from './nodes/graph-trigger.js';
+import { isWorkflowTempPath } from './temp-paths.js';
 
 /**
  * Determines whether a workflow's trigger matches an incoming event.
@@ -464,7 +465,7 @@ async function runParallelGroup(
 function collectTempPath(result: unknown, paths: string[]): void {
     if (!result || typeof result !== 'object') return;
     const obj = result as Record<string, unknown>;
-    if (typeof obj.path === 'string' && obj.path.includes('sokuza-repo-')) {
+    if (typeof obj.path === 'string' && isWorkflowTempPath(obj.path)) {
         paths.push(obj.path);
     }
 }
