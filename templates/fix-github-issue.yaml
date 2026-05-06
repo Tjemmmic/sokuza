@@ -9,138 +9,102 @@
 #     template: fix-github-issue
 #     trigger:
 #       source: manual
-#     inputs:
-#       - name: issue
-#         label: Issue
-#         type: github-issue
-#         required: true
+
+description: "Manual: pick an issue and let an AI agent fix it + open a PR"
+icon: 🔧
 
 trigger:
   source: manual
 
-steps:
-  - id: clone
-    action: github-clone-repo
-    params:
-      repo: "{{event.payload.inputs.issue.repo}}"
+inputs:
+  - name: issue
+    label: Issue
+    type: github-issue
+    required: true
 
-  - id: fix
-    action: ai-agent
-    params:
-      workdir: "{{steps.clone.path}}"
-      model: sonnet
-      max_turns: 50
-      allowed_tools:
-        - Read
-        - Write
-        - Edit
-        - MultiEdit
-        - Grep
-        - Glob
-        - LS
-        - Bash
-        - TodoRead
-        - TodoWrite
-      prompt: >
-        You are a senior engineer fixing a bug reported as a GitHub issue.
+graph:
+  nodes:
+    - id: trigger
+      type: trigger.manual
+      position: { x: 60, y: 240 }
+      config:
+        inputs:
+          - name: issue
+            label: Issue
+            type: github-issue
+            required: true
+    - id: clone
+      type: github.clone-repo
+      position: { x: 380, y: 240 }
+      config:
+        repo: "{{event.payload.inputs.issue.repo}}"
+    - id: fix
+      type: ai.agent
+      position: { x: 720, y: 240 }
+      config:
+        model: sonnet
+        max_turns: 50
+        allowed_tools:
+          - Read
+          - Write
+          - Edit
+          - MultiEdit
+          - Grep
+          - Glob
+          - LS
+          - Bash
+          - TodoRead
+          - TodoWrite
+        prompt: >
+          You are a senior engineer fixing a bug reported as a GitHub issue.
 
-        ## Issue Details
+          ## Issue Details
 
-        - **Repository**: {{event.payload.inputs.issue.repo}}
-        - **Issue Number**: #{{event.payload.inputs.issue.number}}
-        - **Issue URL**: {{event.payload.inputs.issue.url}}
+          - **Repository**: {{event.payload.inputs.issue.repo}}
+          - **Issue Number**: #{{event.payload.inputs.issue.number}}
+          - **Issue URL**: {{event.payload.inputs.issue.url}}
 
-        ## Your Task
+          Read the issue, understand the codebase, design and implement a
+          fix at the root cause, add tests, and commit with a conventional
+          `fix(area): description` message.
+    - id: create_pr
+      type: github.create-pr
+      position: { x: 1080, y: 120 }
+      config:
+        title: "fix: resolve #{{event.payload.inputs.issue.number}}"
+        body: |
+          ## Summary
 
-        Follow this disciplined workflow:
+          Automated fix for #{{event.payload.inputs.issue.number}}.
 
-        ### 1. Gather Issue Context
+          {{nodes.fix.output}}
 
-        Run: `gh issue view {{event.payload.inputs.issue.number}} -R {{event.payload.inputs.issue.repo}}`
+          ---
+          _Fixed by Sokuza AI_
+    - id: notify
+      type: github.comment
+      position: { x: 1080, y: 380 }
+      config:
+        pr_number: "{{event.payload.inputs.issue.number}}"
+        repo: "{{event.payload.inputs.issue.repo}}"
+        body: |
+          ## 🔧 Automated Fix Attempted
 
-        Read the title, body, labels, and comments. Identify:
-        - Affected component or subsystem
-        - Reproduction steps
-        - Expected vs actual behavior
-        - Error messages or screenshots
+          A fix has been attempted for this issue via Sokuza AI.
 
-        ### 2. Understand the Codebase
+          **PR**: {{nodes.create_pr.url}}
+          **Branch**: `{{nodes.create_pr.branch}}`
 
-        - Read relevant source files. Trace the code path from entry point to failure.
-        - Map the call chain and identify related tests, configs, and shared modules.
-        - Check for project guidelines (CLAUDE.md, .claude/, docs/, CONTRIBUTING.md).
-        - Do NOT start editing yet. Understanding first, changes second.
+          ### Agent Summary
 
-        ### 3. Design the Fix
+          {{nodes.fix.output}}
 
-        - Identify the root cause. Explain it in plain language.
-        - Propose which files change and why.
-        - Consider edge cases and regression risk.
-        - **Fix the root cause** — do NOT mask symptoms with try/catch wrappers,
-          null guards on data that shouldn't be null, or retry loops.
-
-        ### 4. Implement the Fix
-
-        - Make the minimum necessary changes to fix the root cause.
-        - Match existing code style exactly.
-        - Remove obsolete logic if the fix replaces it.
-        - No AI-generated filler comments, no duplicated logic, no dead code.
-
-        ### 5. Add Tests
-
-        - If the area has existing tests, add a regression test case.
-        - If no tests exist, add focused unit tests.
-        - Tests must validate real behavior.
-
-        ### 6. Validate
-
-        - Run linting, type checking, and tests.
-        - Fix any failures introduced by the change.
-
-        ### 7. Commit
-
-        - Create a clean commit with conventional format:
-          `fix(area): concise description`
-        - Single-line commit message. No co-author trailers.
-
-        ### 8. Summary
-
-        After completing, provide:
-        - Root cause found
-        - Files changed and why
-        - Tests added/updated
-        - Any known limitations or follow-up items
-
-  - id: create_pr
-    action: github-create-pr
-    params:
-      workdir: "{{steps.clone.path}}"
-      title: "fix: resolve #{{event.payload.inputs.issue.number}}"
-      body: |
-        ## Summary
-
-        Automated fix for #{{event.payload.inputs.issue.number}}.
-
-        {{steps.fix.review}}
-
-        ---
-        _Fixed by Sokuza AI ({{steps.fix.model}}, via {{steps.fix.provider}})_
-
-  - action: github-comment
-    params:
-      issue_number: "{{event.payload.inputs.issue.number}}"
-      repo: "{{event.payload.inputs.issue.repo}}"
-      body: |
-        ## 🔧 Automated Fix Attempted
-
-        A fix has been attempted for this issue via Sokuza AI.
-
-        **PR**: {{steps.create_pr.url}}
-        **Branch**: `{{steps.create_pr.branch}}`
-
-        ### Agent Summary
-
-        {{steps.fix.review}}
-
-        ---
-        _Fixed by Sokuza AI ({{steps.fix.model}}, via {{steps.fix.provider}})_
+          ---
+          _Fixed by Sokuza AI_
+  edges:
+    - from: { node: trigger, port: issue }
+      to: { node: clone, port: ref }
+    - from: { node: clone, port: path }
+      to: { node: fix, port: workdir }
+    - from: { node: clone, port: path }
+      to: { node: create_pr, port: workdir }

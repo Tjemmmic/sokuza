@@ -10,44 +10,65 @@
 #     trigger:
 #       event: issues.opened
 
+description: Validate new bug reports for completeness — comment with what's missing
+icon: 📝
+
 trigger:
   source: github
   event: issues.opened
 
-steps:
-  - id: validate
-    action: ai-review
-    params:
-      prompt: |
-        You are validating a bug report for completeness.
+graph:
+  nodes:
+    - id: trigger
+      type: trigger.github
+      position: { x: 60, y: 200 }
+      config:
+        events: [issues.opened]
+    - id: validate
+      type: ai.review
+      position: { x: 360, y: 200 }
+      config:
+        prompt: |
+          You are validating a bug report for completeness.
 
-        Analyze the issue and check for these required elements:
+          Analyze the issue and check for these required elements:
 
-        1. **Description**: Is the problem clearly described?
-        2. **Steps to Reproduce**: Are there specific steps to reproduce?
-        3. **Expected Behavior**: What should happen?
-        4. **Actual Behavior**: What actually happens?
-        5. **Environment**: OS, browser, version, etc.?
-        6. **Error Messages**: Stack traces, console output?
+          1. **Description**: Is the problem clearly described?
+          2. **Steps to Reproduce**: Are there specific steps to reproduce?
+          3. **Expected Behavior**: What should happen?
+          4. **Actual Behavior**: What actually happens?
+          5. **Environment**: OS, browser, version, etc.?
+          6. **Error Messages**: Stack traces, console output?
 
-        ## Rules
-        - If ALL required elements are present: output "COMPLETE"
-        - If elements are missing: list what's missing and provide a
-          friendly template for the reporter to fill in.
-        - Be helpful, not demanding. Acknowledge the report.
-        - If this doesn't look like a bug report (feature request, question),
-          note that and still provide guidance.
+          ## Rules
+          - If ALL required elements are present: output "COMPLETE"
+          - If elements are missing: list what's missing and provide a
+            friendly template for the reporter to fill in.
+          - Be helpful, not demanding. Acknowledge the report.
+          - If this doesn't look like a bug report (feature request, question),
+            note that and still provide guidance.
+    - id: post
+      type: github.comment
+      position: { x: 720, y: 200 }
+      # condition: skip when validate.markdown is empty. Limitation: no
+      # built-in "not contains COMPLETE" — the comment posts even on
+      # COMPLETE responses. Use flow.if + a string check downstream if you
+      # need stricter gating.
+      condition: "{{nodes.validate.markdown}}"
+      config:
+        body: |
+          ## 📝 Bug Report Review
 
-  - action: github-comment
-    condition: "{{steps.validate.review}}"
-    params:
-      skip_if_contains: "COMPLETE"
-      issue_number: "{{event.metadata.issueNumber}}"
-      repo: "{{event.metadata.repo}}"
-      body: |
-        ## 📝 Bug Report Review
+          {{nodes.validate.markdown}}
 
-        {{steps.validate.review}}
-
-        ---
-        _Validated by Sokuza AI_
+          ---
+          _Validated by Sokuza AI_
+  edges:
+    - from: { node: trigger, port: issueNumber }
+      to: { node: validate, port: pr_number }
+    - from: { node: trigger, port: repo }
+      to: { node: validate, port: repo }
+    - from: { node: trigger, port: issueNumber }
+      to: { node: post, port: pr_number }
+    - from: { node: trigger, port: repo }
+      to: { node: post, port: repo }
