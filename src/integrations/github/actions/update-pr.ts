@@ -13,6 +13,22 @@ function emptyToUndef(v: unknown): string | undefined {
     return v.length === 0 ? undefined : v;
 }
 
+const VALID_PR_STATES = ['open', 'closed'] as const;
+type PrState = typeof VALID_PR_STATES[number];
+
+/** Coerce params.state to GitHub's accepted state values. Anything not
+ *  in the whitelist (e.g. 'draft', 'merged', or a typo'd 'opened') is
+ *  rejected up front rather than passed through to GitHub which would
+ *  return an opaque 422. The previous `as 'open' | 'closed' | undefined`
+ *  assertion let invalid values slip past TypeScript. */
+function validateState(raw: string | undefined): PrState | undefined {
+    if (raw === undefined) return undefined;
+    if ((VALID_PR_STATES as readonly string[]).includes(raw)) return raw as PrState;
+    throw new Error(
+        `github-update-pr: state must be one of ${VALID_PR_STATES.join(', ')} (got ${JSON.stringify(raw)})`,
+    );
+}
+
 /**
  * "github-update-pr" — PATCH a PR. Pass any subset of {title, body,
  * state, base} and only those fields are sent. Used for closing PRs
@@ -25,7 +41,7 @@ export const githubUpdatePrAction: ActionHandler = async (params, context) => {
     const updated = await client.updatePullRequest(target.owner, target.repo, target.number, {
         title: emptyToUndef(params.title),
         body: emptyToUndef(params.body),
-        state: emptyToUndef(params.state) as 'open' | 'closed' | undefined,
+        state: validateState(emptyToUndef(params.state)),
         base: emptyToUndef(params.base),
     });
     return {

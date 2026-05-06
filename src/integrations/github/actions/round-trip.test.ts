@@ -113,7 +113,10 @@ describe('github-merge-pr', () => {
         expect(init?.method).toBe('PUT');
         const body = JSON.parse(String(init?.body ?? '{}'));
         expect(body.merge_method).toBe('squash');
-        expect(result).toMatchObject({ merged: true, sha: 'abcdef', method: 'squash' });
+        // Both the canonical `mergeSha` port and the legacy `sha` alias
+        // resolve to the merge commit — pinned together so a future
+        // rename can't drop one without the test catching it.
+        expect(result).toMatchObject({ merged: true, mergeSha: 'abcdef', sha: 'abcdef', method: 'squash' });
     });
 
     it('throws on a 405 (PR not mergeable)', async () => {
@@ -220,11 +223,28 @@ describe('github-update-pr', () => {
         ]);
         await githubUpdatePrAction(
             // Cast through unknown so the test reflects what could
-            // arrive from a wired upstream port at runtime.
+            // arrive from a wired upstream port at runtime. The non-string
+            // state goes through emptyToUndef → undefined before reaching
+            // validateState, so it's dropped, not rejected.
             { pr_number: 42, repo: 'octo/r', title: 'Real title', body: 42 as unknown as string, state: false as unknown as string, base: null as unknown as string },
             makeContext(),
         );
         const body = JSON.parse(String((spy.mock.calls[0][1] as RequestInit)?.body ?? '{}'));
         expect(body).toEqual({ title: 'Real title' });
+    });
+
+    it('rejects an unknown state value with a clear error (not an opaque 422 from GitHub)', async () => {
+        // Previously `params.state` was cast through `as 'open' | 'closed'`,
+        // so a value like 'draft' or a typo'd 'opened' would slip past
+        // TypeScript and only fail at the API call with an opaque 422.
+        // Now we validate against the canonical set up front.
+        const spy = mockFetch([() => new Response('{}', { status: 200 })]);
+        await expect(
+            githubUpdatePrAction(
+                { pr_number: 42, repo: 'octo/r', state: 'draft' },
+                makeContext(),
+            ),
+        ).rejects.toThrow(/state must be one of open, closed.*draft/);
+        expect(spy).not.toHaveBeenCalled();
     });
 });
