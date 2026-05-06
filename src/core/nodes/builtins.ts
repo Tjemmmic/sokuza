@@ -1,5 +1,6 @@
 import type { NodeDefinition, NodePort, DynamicOutputSpec } from './types.js';
 import type { NodeRegistry } from './registry.js';
+import { isStringTruthy } from './truthy.js';
 
 // ─── Built-in node definitions ───────────────────────────────────────────────
 //
@@ -766,7 +767,7 @@ const ifNode: NodeDefinition = {
     ],
     execute: async (inputs) => {
         const cond = String(inputs.condition ?? '').trim();
-        const truthy = cond !== '' && cond !== 'false' && cond !== '0' && cond !== 'undefined' && cond !== 'null';
+        const truthy = isStringTruthy(cond);
         return {
             then: truthy ? (inputs.value ?? true) : undefined,
             else: truthy ? undefined : (inputs.value ?? true),
@@ -820,6 +821,16 @@ const filterListNode: NodeDefinition = {
         const value = inputs.value;
         const valueStr = value === undefined || value === null ? '' : String(value);
 
+        // Validate mode once outside the loop — a typo in hand-authored
+        // YAML (e.g. mode: "eqauls") used to silently filter every item
+        // out, leaving downstream nodes with count: 0 and no signal that
+        // the config was wrong. Throwing surfaces the typo at the first
+        // execution.
+        if (!FILTER_LIST_MODES.has(mode)) {
+            throw new Error(
+                `flow.filter-list: unknown mode "${mode}". Valid modes: ${[...FILTER_LIST_MODES].join(', ')}.`,
+            );
+        }
         const filtered = list.filter((item) => {
             const target = pluckPath(item, path);
             const targetStr = target === undefined || target === null ? '' : String(target);
@@ -829,12 +840,14 @@ const filterListNode: NodeDefinition = {
                 case 'equals': return targetStr === valueStr;
                 case 'not-equals': return targetStr !== valueStr;
                 case 'contains': return targetStr.includes(valueStr);
-                default: return false;
+                default: return false; // unreachable — guarded above
             }
         });
         return { filtered, count: filtered.length, first: filtered[0] };
     },
 };
+
+const FILTER_LIST_MODES = new Set(['truthy', 'exists', 'equals', 'not-equals', 'contains']);
 
 const mergeNode: NodeDefinition = {
     type: 'flow.merge',
@@ -940,13 +953,18 @@ function normalizeLabels(raw: unknown): string[] {
     return out;
 }
 
-/** "github.com/owner/repo/pull/123" or {full_name:"owner/repo"} → "owner/repo". */
+/** "host/owner/repo/pull/123" or {full_name:"owner/repo"} → "owner/repo".
+ *  base.repo.full_name is the primary path; the URL fallback handles odd
+ *  responses where the nested object is missing. We don't anchor on
+ *  github.com — GitHub Enterprise instances use arbitrary domains
+ *  (github.mycorp.com, code.example.org, git.acme.io), and the URL
+ *  shape /<owner>/<repo>/(pull|issues)/<n> is identical across them. */
 function deriveRepoFromPr(pr: Record<string, unknown>): string {
     const base = pr.base as Record<string, unknown> | undefined;
     const baseRepo = base?.repo as Record<string, unknown> | undefined;
     if (typeof baseRepo?.full_name === 'string') return baseRepo.full_name;
     const url = typeof pr.html_url === 'string' ? pr.html_url : '';
-    const m = url.match(/github\.com\/([^/]+\/[^/]+)\//);
+    const m = url.match(/^https?:\/\/[^/]+\/([^/]+\/[^/]+)\/(?:pull|issues)\//);
     return m ? m[1] : '';
 }
 

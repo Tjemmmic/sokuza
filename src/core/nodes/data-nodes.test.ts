@@ -128,6 +128,26 @@ describe('data.pr-fields', () => {
         expect(result.nodeOutputs.x.repo).toBe('foo/bar');
     });
 
+    it('URL fallback works for GitHub Enterprise (any host) and issue URLs', async () => {
+        // GHE installs use arbitrary domains — github.mycorp.com,
+        // code.example.org, git.acme.io. The URL path /<owner>/<repo>/...
+        // is identical, so the regex matches on path structure not host.
+        const cases = [
+            ['https://github.mycorp.com/team-x/svc/pull/9', 'team-x/svc'],
+            ['https://code.example.org/owner/repo/pull/1', 'owner/repo'],
+            ['https://git.acme.io/dept/proj/issues/77', 'dept/proj'],
+        ] as const;
+        for (const [url, expected] of cases) {
+            const graph = dataGraph('data.pr-fields');
+            graph.edges.push({ from: { node: 'trig', port: 'pr' }, to: { node: 'x', port: 'pr' } });
+            const event = evt({
+                payload: { pull_request: { number: 1, html_url: url } },
+            });
+            const result = await executeGraph(graph, event, actions, registry, noopLogger);
+            expect(result.nodeOutputs.x.repo).toBe(expected);
+        }
+    });
+
     it('produces empty strings (not undefined) for missing scalar fields', async () => {
         const graph = dataGraph('data.pr-fields');
         graph.edges.push({ from: { node: 'trig', port: 'pr' }, to: { node: 'x', port: 'pr' } });
@@ -440,6 +460,17 @@ describe('flow.filter-list', () => {
         expect(result.nodeOutputs.f.filtered).toEqual([]);
         expect(result.nodeOutputs.f.count).toBe(0);
         expect(result.nodeOutputs.f.first).toBeUndefined();
+    });
+
+    it('throws on an unknown mode — surfaces typos that used to silently drop every item', async () => {
+        // Without the guard, mode: "eqauls" would filter the whole list
+        // out with no error or log — downstream nodes saw count: 0 and
+        // had no way to tell config from data.
+        const graph = filterGraph({ path: 'priority', mode: 'eqauls', value: 'P1' }, [
+            { priority: 'P1' },
+        ]);
+        await expect(executeGraph(graph, evt(), actions, registry, noopLogger))
+            .rejects.toThrow(/unknown mode "eqauls"\. Valid modes:/);
     });
 });
 

@@ -14,6 +14,7 @@ import type {
     NodeRuntimeOutputs,
 } from './types.js';
 import type { NodeRegistry } from './registry.js';
+import { isStringTruthy } from './truthy.js';
 
 // ─── Graph execution ─────────────────────────────────────────────────────────
 //
@@ -468,7 +469,7 @@ function evalCondition(
         nodes: nodeOutputs,
         inputs: ((ctx.event.payload as Record<string, unknown>)?.inputs as Record<string, unknown>) ?? {},
     });
-    return interpolated !== '' && interpolated !== 'false' && interpolated !== '0' && interpolated !== 'undefined' && interpolated !== 'null';
+    return isStringTruthy(interpolated);
 }
 
 // ─── Topological sort into parallel layers ───────────────────────────────────
