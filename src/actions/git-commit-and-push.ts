@@ -29,6 +29,7 @@ export const gitCommitAndPushAction: ActionHandler = async (params, context) => 
     if (!message) throw new Error('git-commit-and-push: message is required');
 
     const remote = (typeof params.remote === 'string' && params.remote) ? params.remote : 'origin';
+    validateRemoteName(remote);
     const branchOverride = typeof params.branch === 'string' && params.branch ? params.branch : undefined;
     const paths = parsePaths(params.paths);
 
@@ -105,6 +106,26 @@ function validatePath(p: string): string {
         throw new Error(`git-commit-and-push: path escapes workdir (got ${JSON.stringify(p)})`);
     }
     return p;
+}
+
+/**
+ * Reject remote names that git would interpret as flags. `git push` takes
+ * the repository as a positional arg with no `--` end-of-options escape,
+ * so a value like `--upload-pack=/usr/bin/evil` would be parsed as an
+ * option and could execute arbitrary commands during push. The visual
+ * editor exposes this field as freeform text, so we validate at the
+ * action boundary regardless of caller trust.
+ */
+function validateRemoteName(name: string): void {
+    if (name.startsWith('-')) {
+        throw new Error(`git-commit-and-push: remote must not start with "-" (got ${JSON.stringify(name)})`);
+    }
+    if (/\s/.test(name)) {
+        throw new Error(`git-commit-and-push: remote must not contain whitespace (got ${JSON.stringify(name)})`);
+    }
+    if (/[\x00-\x1f\x7f]/.test(name)) {
+        throw new Error(`git-commit-and-push: remote contains control characters (got ${JSON.stringify(name)})`);
+    }
 }
 
 /**

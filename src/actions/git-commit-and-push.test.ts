@@ -233,4 +233,24 @@ describe('git-commit-and-push', () => {
         expect(remoteFiles).toContain('b.txt');
         expect(remoteFiles).not.toContain('c.txt');
     });
+
+    it('rejects a remote name starting with "-" — git push has no -- escape for the repository arg, so a flag-shaped remote could trigger --upload-pack-style RCE', async () => {
+        await writeFile(join(workdir, 'a.txt'), 'a\n');
+        await expect(
+            gitCommitAndPushAction(
+                { workdir, message: 'inj', remote: '--upload-pack=/usr/bin/evil' },
+                ctx(),
+            ),
+        ).rejects.toThrow(/remote must not start with "-"/);
+    });
+
+    it('rejects remote names with whitespace or control characters', async () => {
+        await writeFile(join(workdir, 'a.txt'), 'a\n');
+        await expect(
+            gitCommitAndPushAction({ workdir, message: 'inj', remote: 'origin space' }, ctx()),
+        ).rejects.toThrow(/remote must not contain whitespace/);
+        await expect(
+            gitCommitAndPushAction({ workdir, message: 'inj', remote: 'origin\x07bell' }, ctx()),
+        ).rejects.toThrow(/remote contains control characters/);
+    });
 });
