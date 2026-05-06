@@ -403,4 +403,130 @@ describe('executeGraph', () => {
         const result = await executeGraph(graph, evt(), actions, registry, noopLogger);
         expect(result.nodeOutputs.a).toBeDefined();
     });
+
+    it('toposort throws on an edge referencing a nonexistent source node', () => {
+        const graph: NodeGraph = {
+            nodes: [
+                { id: 'trig', type: 'trigger.github' },
+                { id: 'a', type: 'trigger.github' },
+            ],
+            edges: [
+                // Typo: "triger" instead of "trig"
+                { from: { node: 'triger', port: 'event' }, to: { node: 'a', port: 'event' } },
+            ],
+        };
+        expect(() => toposortLayers(graph)).toThrow(/unknown source node "triger"/);
+    });
+
+    it('toposort throws on an edge referencing a nonexistent destination node', () => {
+        const graph: NodeGraph = {
+            nodes: [
+                { id: 'trig', type: 'trigger.github' },
+                { id: 'a', type: 'trigger.github' },
+            ],
+            edges: [
+                { from: { node: 'a', port: 'event' }, to: { node: 'gone', port: 'event' } },
+            ],
+        };
+        expect(() => toposortLayers(graph)).toThrow(/unknown destination node "gone"/);
+    });
+
+    it('aborts a running node when the workflow signal fires', async () => {
+        // Action sleeps 200ms; abort fires at 30ms; executeGraph must
+        // reject promptly with the abort message rather than waiting
+        // for the sleep to complete.
+        actions.set('slowloris', async () => {
+            await new Promise((r) => setTimeout(r, 200));
+            return { done: true };
+        });
+        registry.register(actionDef('test.slowloris', 'slowloris', [
+            { name: 'done', role: 'output', label: 'Done', wire: true },
+        ]));
+        const graph: NodeGraph = {
+            nodes: [
+                { id: 'trig', type: 'trigger.github' },
+                { id: 'slow', type: 'test.slowloris' },
+            ],
+            edges: [],
+        };
+        const ac = new AbortController();
+        setTimeout(() => ac.abort(), 30);
+        const start = Date.now();
+        await expect(
+            executeGraph(graph, evt(), actions, registry, noopLogger, { signal: ac.signal }),
+        ).rejects.toThrow(/aborted/i);
+        expect(Date.now() - start).toBeLessThan(150);
+    });
+
+    it('still aborts when the only failing node has on_error=continue', async () => {
+        // Without the post-layer signal check, a node that opts into
+        // on_error=continue would swallow the abort rejection and the
+        // workflow would appear to complete successfully.
+        actions.set('slowloris', async () => {
+            await new Promise((r) => setTimeout(r, 200));
+            return { done: true };
+        });
+        registry.register(actionDef('test.slowloris', 'slowloris', [
+            { name: 'done', role: 'output', label: 'Done', wire: true },
+        ]));
+        const graph: NodeGraph = {
+            nodes: [
+                { id: 'trig', type: 'trigger.github' },
+                { id: 'slow', type: 'test.slowloris', on_error: 'continue' },
+            ],
+            edges: [],
+        };
+        const ac = new AbortController();
+        setTimeout(() => ac.abort(), 30);
+        await expect(
+            executeGraph(graph, evt(), actions, registry, noopLogger, { signal: ac.signal }),
+        ).rejects.toThrow(/aborted/i);
+    });
+
+    it('rejects immediately when the signal is already aborted at start', async () => {
+        actions.set('slowloris', async () => {
+            await new Promise((r) => setTimeout(r, 200));
+            return { done: true };
+        });
+        registry.register(actionDef('test.slowloris', 'slowloris', [
+            { name: 'done', role: 'output', label: 'Done', wire: true },
+        ]));
+        const graph: NodeGraph = {
+            nodes: [
+                { id: 'trig', type: 'trigger.github' },
+                { id: 'slow', type: 'test.slowloris' },
+            ],
+            edges: [],
+        };
+        const ac = new AbortController();
+        ac.abort();
+        await expect(
+            executeGraph(graph, evt(), actions, registry, noopLogger, { signal: ac.signal }),
+        ).rejects.toThrow(/aborted/i);
+    });
+
+    it('caps interpolation recursion to avoid stack overflow on deep configs', async () => {
+        // Build a config nested 100 levels deep. Without the depth
+        // guard this would either blow the stack (small node) or just
+        // be needlessly slow. The guard returns the subtree as-is past
+        // the cap so the workflow keeps running.
+        let nested: unknown = 'leaf';
+        for (let i = 0; i < 100; i++) nested = { wrap: nested };
+
+        actions.set('eat', async (params) => ({ saw: params.payload }));
+        registry.register(actionDef('test.eat', 'eat', [
+            { name: 'payload', role: 'input', label: 'Payload', wire: true, config: true, control: 'textarea' },
+            { name: 'saw', role: 'output', label: 'Saw', wire: true },
+        ]));
+        const graph: NodeGraph = {
+            nodes: [
+                { id: 'trig', type: 'trigger.github' },
+                { id: 'e', type: 'test.eat', config: { payload: nested } },
+            ],
+            edges: [],
+        };
+        // Should not throw, should not hang.
+        const result = await executeGraph(graph, evt(), actions, registry, noopLogger);
+        expect(result.nodeOutputs.e?.saw).toBeDefined();
+    });
 });

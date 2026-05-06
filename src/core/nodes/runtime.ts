@@ -97,6 +97,7 @@ export async function executeGraph(
                     integrationConfigs,
                     ai,
                     logger,
+                    signal: opts.signal,
                     workflowName: opts.workflowName,
                     recordWebhookDelivery: opts.recordWebhookDelivery,
                     workdirManager: opts.workdirManager,
@@ -133,6 +134,14 @@ export async function executeGraph(
                 : String(firstError.reason);
             throw new Error(`Node "${firstError.node.id}" (${firstError.node.type}) failed: ${msg}`);
         }
+
+        // A node with on_error=continue swallows its own rejection — even
+        // when that rejection was an abort. Catch the swallow here so an
+        // aborted run can't appear "successful" just because every aborted
+        // node opted into continue-on-failure semantics.
+        if (opts.signal?.aborted) {
+            throw new Error('Workflow aborted');
+        }
     }
 
     logger.info({ workflow: opts.workflowName }, 'Graph workflow completed');
@@ -153,6 +162,7 @@ interface RunNodeDeps {
     recordWebhookDelivery?: ActionContext['recordWebhookDelivery'];
     workdirManager?: ActionContext['workdirManager'];
     getConfig?: ActionContext['getConfig'];
+    signal?: AbortSignal;
 }
 
 async function runNode(node: GraphNode, deps: RunNodeDeps): Promise<NodeRuntimeOutputs> {
@@ -164,6 +174,7 @@ async function runNode(node: GraphNode, deps: RunNodeDeps): Promise<NodeRuntimeO
         integrationConfigs: deps.integrationConfigs,
         ai: deps.ai,
         logger: deps.logger,
+        signal: deps.signal,
         workflowName: deps.workflowName,
         recordWebhookDelivery: deps.recordWebhookDelivery,
         workdirManager: deps.workdirManager,
@@ -204,7 +215,17 @@ async function runNode(node: GraphNode, deps: RunNodeDeps): Promise<NodeRuntimeO
     };
 
     const exec = def.execute(inputs, ctx);
-    const result = await withTimeout(exec, node.timeout, `Node ${node.id} (${node.type}) timed out`);
+    // Race the node against (a) its own timeout and (b) the workflow-level
+    // abort signal. Both produce a rejection that unblocks the workflow
+    // even if the underlying handler keeps doing async work in the
+    // background — we lose the ability to observe its eventual completion
+    // but the workflow no longer hangs.
+    const result = await withTimeoutAndSignal(
+        exec,
+        node.timeout,
+        deps.signal,
+        `Node ${node.id} (${node.type}) timed out`,
+    );
     return result ?? {};
 }
 
@@ -259,13 +280,44 @@ function defaultTriggerOutputs(node: import('./types.js').GraphNode, event: Even
     return out;
 }
 
-function withTimeout<T>(promise: Promise<T>, seconds: number | undefined, message: string): Promise<T> {
-    if (!seconds || seconds <= 0) return promise;
+function withTimeoutAndSignal<T>(
+    promise: Promise<T>,
+    seconds: number | undefined,
+    signal: AbortSignal | undefined,
+    timeoutMessage: string,
+): Promise<T> {
+    const hasTimeout = !!(seconds && seconds > 0);
+    if (!hasTimeout && !signal) return promise;
     return new Promise<T>((resolve, reject) => {
-        const timer = setTimeout(() => reject(new Error(message)), seconds * 1000);
+        let timer: ReturnType<typeof setTimeout> | null = null;
+        // Single cleanup point for both timer + listener — every settle
+        // path (timeout fire, abort fire, underlying promise settle) goes
+        // through finish() exactly once, so there's no listener leak even
+        // when a long-lived workflow signal outlives many nodes.
+        let settled = false;
+        const finish = (cb: () => void) => {
+            if (settled) return;
+            settled = true;
+            if (timer) clearTimeout(timer);
+            if (signal && onAbort) signal.removeEventListener('abort', onAbort);
+            cb();
+        };
+
+        if (hasTimeout) {
+            timer = setTimeout(() => finish(() => reject(new Error(timeoutMessage))), seconds! * 1000);
+        }
+
+        const onAbort = signal
+            ? () => finish(() => reject(new Error('Workflow aborted')))
+            : null;
+        if (signal) {
+            if (signal.aborted) { onAbort!(); return; }
+            signal.addEventListener('abort', onAbort!, { once: true });
+        }
+
         promise.then(
-            (v) => { clearTimeout(timer); resolve(v); },
-            (e) => { clearTimeout(timer); reject(e); },
+            (v) => finish(() => resolve(v)),
+            (e) => finish(() => reject(e)),
         );
     });
 }
@@ -321,17 +373,30 @@ interface InterpolationContext {
 
 const ALLOWED_PREFIXES = ['event.', 'results.', 'steps.', 'nodes.', 'metadata.', 'inputs.'];
 
-function interpolateValue(value: unknown, ctx: InterpolationContext): unknown {
+// Hard cap on interpolation recursion. Real configs are 1–3 levels deep
+// (a KV map, a list of {name,label,type} objects). 16 is well above any
+// legitimate use and protects against pathological / cyclic inputs that
+// could blow the call stack — defense in depth, since node configs are
+// user-authored YAML and we want a defined termination either way.
+const MAX_INTERPOLATION_DEPTH = 16;
+
+function interpolateValue(value: unknown, ctx: InterpolationContext, depth = 0): unknown {
+    // Bail without recursing further. Returning the value as-is leaves
+    // the deeply-nested subtree intact; the workflow keeps running. The
+    // alternative — throwing — would surface the issue more loudly but
+    // also kill the run mid-step, which is worse for legitimate-but-
+    // unusual configs (e.g. a serialized JSON tree mistakenly inlined).
+    if (depth > MAX_INTERPOLATION_DEPTH) return value;
     if (typeof value === 'string') {
         return interpolateString(value, ctx);
     }
     if (Array.isArray(value)) {
-        return value.map((v) => interpolateValue(v, ctx));
+        return value.map((v) => interpolateValue(v, ctx, depth + 1));
     }
     if (value && typeof value === 'object') {
         const out: Record<string, unknown> = {};
         for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-            out[k] = interpolateValue(v, ctx);
+            out[k] = interpolateValue(v, ctx, depth + 1);
         }
         return out;
     }
@@ -393,7 +458,21 @@ export function toposortLayers(graph: NodeGraph): GraphNode[][] {
         nodeById.set(n.id, n);
     }
     for (const e of graph.edges) {
-        if (!nodeById.has(e.from.node) || !nodeById.has(e.to.node)) continue;
+        // Edges pointing at a node id that doesn't exist are almost
+        // always a YAML typo (e.g. {from: {node: "triger", ...}}). The
+        // editor's delete-node path scrubs them, so they only appear in
+        // hand-authored configs — fail loud rather than silently produce
+        // a graph that's missing the wire the author intended.
+        if (!nodeById.has(e.from.node)) {
+            throw new Error(
+                `Edge references unknown source node "${e.from.node}" (port "${e.from.port}" → "${e.to.node}.${e.to.port}"). Check for a typo or a stale edge.`,
+            );
+        }
+        if (!nodeById.has(e.to.node)) {
+            throw new Error(
+                `Edge references unknown destination node "${e.to.node}" (from "${e.from.node}.${e.from.port}" → port "${e.to.port}"). Check for a typo or a stale edge.`,
+            );
+        }
         // Self-loops are silently ignored — they'd deadlock the toposort.
         if (e.from.node === e.to.node) continue;
         inDegree.set(e.to.node, (inDegree.get(e.to.node) ?? 0) + 1);

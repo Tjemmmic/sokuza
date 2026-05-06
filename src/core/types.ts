@@ -177,6 +177,13 @@ export interface ActionContext {
     /** AI provider registry (populated from the config's `ai:` block). */
     ai: import('./ai-providers.js').AIProviderRegistry;
     logger: import('pino').Logger;
+    /** Optional abort signal. Long-running handlers (e.g. wait-for-checks
+     *  polling, ai-agent loops) should periodically check signal.aborted
+     *  to bail out cleanly. The graph runtime races every per-node
+     *  execution against this signal — even handlers that ignore it will
+     *  unblock the workflow when it fires (their unfinished async work is
+     *  abandoned, not awaited). */
+    signal?: AbortSignal;
     /** Name of the workflow being executed */
     workflowName?: string;
     /** Record an outbound webhook delivery for the delivery log */
