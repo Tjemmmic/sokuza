@@ -282,6 +282,31 @@ describe('data.issue-fields', () => {
         });
         expect(out.labels).toEqual(['bug', 'priority/high']);
     });
+
+    it('repo extraction works for GitHub Enterprise URLs (host-agnostic)', async () => {
+        // Same regression as data.pr-fields had — the issue-fields URL
+        // fallback must match on path shape, not the github.com host.
+        const cases = [
+            ['https://github.mycorp.com/team-x/svc/issues/9', 'team-x/svc'],
+            ['https://code.example.org/owner/repo/issues/1', 'owner/repo'],
+            ['https://git.acme.io/dept/proj/issues/77', 'dept/proj'],
+        ] as const;
+        for (const [url, expected] of cases) {
+            const graph: NodeGraph = {
+                nodes: [
+                    { id: 'trig', type: 'trigger.github', config: { events: ['issues.opened'] } },
+                    { id: 'x', type: 'data.issue-fields' },
+                ],
+                edges: [{ from: { node: 'trig', port: 'issue' }, to: { node: 'x', port: 'issue' } }],
+            };
+            const event = evt({
+                event: 'issues.opened',
+                payload: { issue: { number: 1, html_url: url } },
+            });
+            const result = await executeGraph(graph, event, actions, registry, noopLogger);
+            expect(result.nodeOutputs.x.repo).toBe(expected);
+        }
+    });
 });
 
 describe('data.review-fields', () => {

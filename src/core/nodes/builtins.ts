@@ -953,19 +953,25 @@ function normalizeLabels(raw: unknown): string[] {
     return out;
 }
 
+/** Extract `owner/repo` from a GitHub-style html_url. Matches on the
+ *  path shape `/<owner>/<repo>/(pull|issues)/<n>` rather than the host
+ *  so GitHub Enterprise installs (arbitrary domains like
+ *  github.mycorp.com, code.example.org, git.acme.io) round-trip
+ *  identically. Returns '' for unrecognised shapes — callers treat
+ *  empty as "couldn't resolve" and fall back to other sources. */
+function deriveRepoFromUrl(url: string): string {
+    const m = url.match(/^https?:\/\/[^/]+\/([^/]+\/[^/]+)\/(?:pull|issues)\//);
+    return m ? m[1] : '';
+}
+
 /** "host/owner/repo/pull/123" or {full_name:"owner/repo"} → "owner/repo".
- *  base.repo.full_name is the primary path; the URL fallback handles odd
- *  responses where the nested object is missing. We don't anchor on
- *  github.com — GitHub Enterprise instances use arbitrary domains
- *  (github.mycorp.com, code.example.org, git.acme.io), and the URL
- *  shape /<owner>/<repo>/(pull|issues)/<n> is identical across them. */
+ *  base.repo.full_name is the primary path; the URL fallback handles
+ *  odd responses where the nested object is missing. */
 function deriveRepoFromPr(pr: Record<string, unknown>): string {
     const base = pr.base as Record<string, unknown> | undefined;
     const baseRepo = base?.repo as Record<string, unknown> | undefined;
     if (typeof baseRepo?.full_name === 'string') return baseRepo.full_name;
-    const url = typeof pr.html_url === 'string' ? pr.html_url : '';
-    const m = url.match(/^https?:\/\/[^/]+\/([^/]+\/[^/]+)\/(?:pull|issues)\//);
-    return m ? m[1] : '';
+    return deriveRepoFromUrl(typeof pr.html_url === 'string' ? pr.html_url : '');
 }
 
 const prFieldsNode: NodeDefinition = {
@@ -1073,10 +1079,9 @@ const issueFieldsNode: NodeDefinition = {
         const issue = (inputs.issue ?? {}) as Record<string, unknown>;
         const user = (issue.user as Record<string, unknown>) ?? {};
         const url = typeof issue.html_url === 'string' ? issue.html_url : '';
-        const repoMatch = url.match(/github\.com\/([^/]+\/[^/]+)\//);
         return {
             number: typeof issue.number === 'number' ? issue.number : undefined,
-            repo: repoMatch ? repoMatch[1] : '',
+            repo: deriveRepoFromUrl(url),
             author: typeof user.login === 'string' ? user.login : '',
             title: typeof issue.title === 'string' ? issue.title : '',
             body: typeof issue.body === 'string' ? issue.body : '',
