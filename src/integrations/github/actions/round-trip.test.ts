@@ -159,4 +159,36 @@ describe('github-update-pr', () => {
         ).rejects.toThrow(/at least one of title\/body\/state\/base/);
         expect(spy).not.toHaveBeenCalled();
     });
+
+    it('treats empty-string fields as "no change" instead of forwarding them', async () => {
+        // The legacy steps executor doesn't filter empty interpolation
+        // results; defending in the handler protects callers from
+        // silently blanking the PR body when an upstream {{...}} fails
+        // to resolve.
+        const spy = mockFetch([
+            () => new Response(JSON.stringify({ html_url: 'x', state: 'open' }), { status: 200 }),
+        ]);
+        await githubUpdatePrAction(
+            { pr_number: 42, repo: 'octo/r', title: 'Real title', body: '', state: '', base: '' },
+            makeContext(),
+        );
+        const body = JSON.parse(String((spy.mock.calls[0][1] as RequestInit)?.body ?? '{}'));
+        // Only the genuinely populated field should appear in the PATCH.
+        expect(body).toEqual({ title: 'Real title' });
+    });
+
+    it('rejects an all-empty payload with the no-fields error, not the empty-title error', async () => {
+        // After emptyToUndef normalization, every field is undefined →
+        // the API client's "at least one of …" guard fires with the
+        // clearer message instead of the lower-level "title must not be
+        // empty" error.
+        const spy = mockFetch([() => new Response('{}', { status: 200 })]);
+        await expect(
+            githubUpdatePrAction(
+                { pr_number: 42, repo: 'octo/r', title: '', body: '', state: '', base: '' },
+                makeContext(),
+            ),
+        ).rejects.toThrow(/at least one of title\/body\/state\/base/);
+        expect(spy).not.toHaveBeenCalled();
+    });
 });
