@@ -53,6 +53,11 @@ export const githubWaitForChecksAction: ActionHandler = async (params, context) 
     let lastLoggedKey = '';
 
     while (Date.now() < deadline) {
+        // Honour aborts before each poll so a workflow cancelled mid-sleep
+        // doesn't fire one final HTTP call after waking up. The runtime's
+        // outer abort race unblocks the await, but the action itself keeps
+        // running unless we bail here too.
+        if (context.signal?.aborted) throw new Error('Workflow aborted');
         const snapshot = await pollOnce(client, target.owner, target.repo, sha);
         lastSnapshot = snapshot;
 
@@ -75,7 +80,7 @@ export const githubWaitForChecksAction: ActionHandler = async (params, context) 
             );
             lastLoggedKey = key;
         }
-        await sleep(intervalSec * 1000);
+        await sleep(intervalSec * 1000, context.signal);
     }
 
     return {
@@ -168,6 +173,27 @@ function clampPositive(raw: unknown, fallback: number, max: number, name: string
     return Math.min(n, max);
 }
 
-function sleep(ms: number): Promise<void> {
-    return new Promise((resolve) => setTimeout(resolve, ms));
+/** Abort-aware sleep. Resolves on the timer normally; rejects with
+ *  "Workflow aborted" the moment the signal fires (or immediately, if it
+ *  was already aborted on entry). The single cleanup point clears the
+ *  timer and removes the listener regardless of which event wins, so the
+ *  workflow signal — which can outlive many sleeps — never accumulates
+ *  dead listeners. */
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+    if (!signal) return new Promise((resolve) => setTimeout(resolve, ms));
+    return new Promise<void>((resolve, reject) => {
+        let settled = false;
+        let timer: ReturnType<typeof setTimeout> | null = null;
+        const finish = (cb: () => void) => {
+            if (settled) return;
+            settled = true;
+            if (timer) clearTimeout(timer);
+            signal.removeEventListener('abort', onAbort);
+            cb();
+        };
+        const onAbort = () => finish(() => reject(new Error('Workflow aborted')));
+        if (signal.aborted) { onAbort(); return; }
+        signal.addEventListener('abort', onAbort, { once: true });
+        timer = setTimeout(() => finish(() => resolve()), ms);
+    });
 }

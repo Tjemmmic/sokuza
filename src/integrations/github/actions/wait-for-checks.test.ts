@@ -5,7 +5,7 @@ import { githubWaitForChecksAction } from './wait-for-checks.js';
 
 const logger = pino({ level: 'silent' });
 
-function makeContext(payload: Record<string, unknown> = {}): ActionContext {
+function makeContext(payload: Record<string, unknown> = {}, signal?: AbortSignal): ActionContext {
     return {
         event: {
             source: 'github',
@@ -20,6 +20,7 @@ function makeContext(payload: Record<string, unknown> = {}): ActionContext {
         ai: { providers: new Map(), defaultProvider: 'test', fallbackChain: [] },
         logger,
         workflowName: 'test',
+        signal,
     } as unknown as ActionContext;
 }
 
@@ -254,6 +255,50 @@ describe('github-wait-for-checks', () => {
         await vi.runAllTimersAsync();
         const result = await promise;
         expect(result.success).toBe(true);
+    });
+
+    it('aborts mid-sleep when the workflow signal fires (no extra HTTP after abort)', async () => {
+        // First poll returns "still in progress" so the loop enters sleep.
+        // We then abort, expect the action to throw "Workflow aborted",
+        // and assert no second poll was issued (= 2 fetches total, one
+        // pair from the first poll only).
+        const spy = mockSequence([
+            { checkRuns: [{ name: 'lint', status: 'in_progress' }], statuses: { state: 'pending', statuses: [] } },
+        ]);
+        const controller = new AbortController();
+        const promise = githubWaitForChecksAction(
+            { sha: 'abc', interval: 1, timeout: 60 },
+            makeContext({}, controller.signal),
+        );
+        // Let the first poll complete and the loop enter the sleep…
+        await vi.advanceTimersByTimeAsync(0);
+        // …then abort. With the fix, the sleep rejects immediately; the
+        // outer loop never runs another iteration.
+        controller.abort();
+        await expect(promise).rejects.toThrow(/Workflow aborted/);
+        // Exactly the first poll's two HTTP calls (check-runs + status).
+        expect(spy.mock.calls.length).toBe(2);
+    });
+
+    it('throws immediately when the signal is already aborted on entry', async () => {
+        const spy = mockSequence([{
+            checkRuns: [{ name: 'lint', status: 'in_progress' }],
+            statuses: { state: 'pending', statuses: [] },
+        }]);
+        const controller = new AbortController();
+        controller.abort();
+        // The top-of-loop abort guard fires before the very first poll, so
+        // the action throws "Workflow aborted" without issuing any HTTP
+        // calls at all.
+        const expectation = expect(
+            githubWaitForChecksAction(
+                { sha: 'abc', interval: 1, timeout: 60 },
+                makeContext({}, controller.signal),
+            ),
+        ).rejects.toThrow(/Workflow aborted/);
+        await vi.runAllTimersAsync();
+        await expectation;
+        expect(spy).not.toHaveBeenCalled();
     });
 
     it('issues check-runs and combined-status in parallel (H5 — halves wall time)', async () => {
