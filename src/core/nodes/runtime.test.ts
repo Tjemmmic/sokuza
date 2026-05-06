@@ -255,4 +255,152 @@ describe('executeGraph', () => {
         expect(result.nodeOutputs.trig.author).toBe('octocat');
         expect(result.nodeOutputs.trig.repo).toBe('org/r');
     });
+
+    it('aborts a node that exceeds its per-node timeout', async () => {
+        actions.set('slow', async () => {
+            await new Promise((r) => setTimeout(r, 200));
+            return { done: true };
+        });
+        registry.register(actionDef('test.slow', 'slow', [
+            { name: 'done', role: 'output', label: 'Done', wire: true },
+        ]));
+        const graph: NodeGraph = {
+            nodes: [
+                { id: 'trig', type: 'trigger.github' },
+                // 0.05s timeout, action sleeps 0.2s — must reject.
+                { id: 'slow', type: 'test.slow', timeout: 0.05 },
+            ],
+            edges: [],
+        };
+        await expect(executeGraph(graph, evt(), actions, registry, noopLogger))
+            .rejects.toThrow(/timed out/);
+    });
+
+    it('evaluates a condition with a {{nodes.x.y}} template expression', async () => {
+        // The condition string is interpolated before truthiness is
+        // checked — a node should fire when an upstream output makes its
+        // expression resolve to a truthy string.
+        actions.set('producer', async () => ({ flag: 'go' }));
+        actions.set('consumer', async () => ({ ran: true }));
+        registry.register(actionDef('test.producer', 'producer', [
+            { name: 'flag', role: 'output', label: 'Flag', wire: true },
+        ]));
+        registry.register(actionDef('test.consumer', 'consumer', [
+            { name: 'ran', role: 'output', label: 'Ran', wire: true },
+        ]));
+        const graph: NodeGraph = {
+            nodes: [
+                { id: 'trig', type: 'trigger.github' },
+                { id: 'p', type: 'test.producer' },
+                // condition references the upstream output by template
+                { id: 'c', type: 'test.consumer', condition: '{{nodes.p.flag}}' },
+            ],
+            edges: [
+                { from: { node: 'p', port: 'flag' }, to: { node: 'c', port: '__seq' } },
+            ],
+        };
+        const result = await executeGraph(graph, evt(), actions, registry, noopLogger);
+        expect(result.nodeOutputs.c?.ran).toBe(true);
+    });
+
+    it('skips a node when its template-expression condition resolves to empty', async () => {
+        // Producer returns no flag → interpolated condition is "" →
+        // evalCondition returns false → consumer must skip.
+        actions.set('producer', async () => ({}));
+        actions.set('consumer', async () => ({ ran: true }));
+        registry.register(actionDef('test.producer', 'producer', [
+            { name: 'flag', role: 'output', label: 'Flag', wire: true },
+        ]));
+        registry.register(actionDef('test.consumer', 'consumer', [
+            { name: 'ran', role: 'output', label: 'Ran', wire: true },
+        ]));
+        const graph: NodeGraph = {
+            nodes: [
+                { id: 'trig', type: 'trigger.github' },
+                { id: 'p', type: 'test.producer' },
+                { id: 'c', type: 'test.consumer', condition: '{{nodes.p.flag}}' },
+            ],
+            edges: [
+                { from: { node: 'p', port: 'flag' }, to: { node: 'c', port: '__seq' } },
+            ],
+        };
+        const result = await executeGraph(graph, evt(), actions, registry, noopLogger);
+        expect(result.nodeOutputs.c?.ran).toBeUndefined();
+    });
+
+    it('resolves a wire to undefined when the upstream output is absent', async () => {
+        // Wiring to an output port that the upstream action never
+        // produces shouldn't crash — the input just receives undefined
+        // and falls through to the consumer's config or default.
+        actions.set('producer', async () => ({ /* deliberately empty */ }));
+        actions.set('consumer', async (params) => ({ saw: params.value ?? 'fallback' }));
+        registry.register(actionDef('test.producer', 'producer', [
+            { name: 'value', role: 'output', label: 'Value', wire: true },
+        ]));
+        registry.register(actionDef('test.consumer', 'consumer', [
+            { name: 'value', role: 'input', label: 'Value', wire: true },
+            { name: 'saw', role: 'output', label: 'Saw', wire: true },
+        ]));
+        const graph: NodeGraph = {
+            nodes: [
+                { id: 'trig', type: 'trigger.github' },
+                { id: 'p', type: 'test.producer' },
+                { id: 'c', type: 'test.consumer' },
+            ],
+            edges: [
+                { from: { node: 'p', port: 'value' }, to: { node: 'c', port: 'value' } },
+            ],
+        };
+        const result = await executeGraph(graph, evt(), actions, registry, noopLogger);
+        expect(result.nodeOutputs.c?.saw).toBe('fallback');
+    });
+
+    it('runs nodes in the same layer concurrently', async () => {
+        // Two independent nodes in one layer should overlap in wall time.
+        // We measure: each sleeps 80ms; serial would take >=160ms, parallel
+        // ~80ms. Allow generous slack to keep CI noise from flaking.
+        actions.set('sleeper', async () => {
+            await new Promise((r) => setTimeout(r, 80));
+            return { done: true };
+        });
+        registry.register(actionDef('test.sleeper', 'sleeper', [
+            { name: 'done', role: 'output', label: 'Done', wire: true },
+        ]));
+        const graph: NodeGraph = {
+            nodes: [
+                { id: 'trig', type: 'trigger.github' },
+                { id: 'a', type: 'test.sleeper' },
+                { id: 'b', type: 'test.sleeper' },
+            ],
+            edges: [],
+        };
+        const start = Date.now();
+        await executeGraph(graph, evt(), actions, registry, noopLogger);
+        const elapsed = Date.now() - start;
+        // 140ms is well under the serial floor (160ms) but allows for
+        // setTimeout coarseness on CI.
+        expect(elapsed).toBeLessThan(140);
+    });
+
+    it('toposort tolerates a self-loop edge instead of deadlocking', async () => {
+        // The toposort code path explicitly drops self-loops. A graph
+        // with one is still executable; the loop just doesn't add an
+        // in-degree edge.
+        const graph: NodeGraph = {
+            nodes: [
+                { id: 'trig', type: 'trigger.github' },
+                { id: 'a', type: 'trigger.github' },
+            ],
+            edges: [
+                { from: { node: 'a', port: 'event' }, to: { node: 'a', port: 'event' } },
+            ],
+        };
+        const layers = toposortLayers(graph);
+        // Both nodes resolve in a single layer (the self-loop is ignored).
+        expect(layers.length).toBe(1);
+        expect(layers[0].map((n) => n.id).sort()).toEqual(['a', 'trig']);
+        // And the graph still executes without throwing.
+        const result = await executeGraph(graph, evt(), actions, registry, noopLogger);
+        expect(result.nodeOutputs.a).toBeDefined();
+    });
 });
