@@ -56,6 +56,6 @@ graph:
           _Posted automatically by Sokuza_
   edges:
     - from: { node: trigger, port: issueNumber }
-      to: { node: post, port: pr_number }
+      to: { node: post, port: issue_number }
     - from: { node: trigger, port: repo }
       to: { node: post, port: repo }

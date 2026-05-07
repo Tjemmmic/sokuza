@@ -379,6 +379,12 @@ const githubComment = actionNode({
     ports: [
         { name: 'body', label: 'Body', role: 'input', wire: true, config: true, control: 'code-md', type: 'string', required: true },
         { name: 'pr_number', label: 'PR/Issue Number', role: 'input', wire: true, config: true, control: 'number', type: 'number' },
+        // Semantic alias for issue-focused workflows. _target.ts already
+        // resolves params.issue_number to the same internal target as
+        // params.pr_number, so authors can wire `trigger.issueNumber`
+        // into a port named `issue_number` and the graph reads the same
+        // way an issue triage workflow would.
+        { name: 'issue_number', label: 'Issue Number (alias)', role: 'input', wire: true, type: 'number' },
         { name: 'repo', label: 'Repository', role: 'input', wire: true, config: true, control: 'text', type: 'string' },
         { name: 'token', label: 'GitHub Token (optional override)', role: 'input', config: true, control: 'text' },
         { name: 'commentId', label: 'Comment Id', role: 'output', wire: true, type: 'string' },
