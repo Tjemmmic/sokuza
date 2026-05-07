@@ -21,4 +21,24 @@ describe('temp-paths', () => {
         expect(isWorkflowTempPath('/home/user/persistent/workdir')).toBe(false);
         expect(isWorkflowTempPath('')).toBe(false);
     });
+
+    it('rejects user-owned paths that merely contain the prefix mid-segment', () => {
+        // The previous substring match would schedule these for rm -rf.
+        // The anchored regex requires the prefix to start a path segment
+        // and end with mkdtemp's random alphanumeric suffix, so a user
+        // directory like `/home/u/old-sokuza-repo-backup/data` no longer
+        // qualifies even though it contains the literal substring.
+        expect(isWorkflowTempPath('/home/u/old-sokuza-repo-backup/data')).toBe(false);
+        expect(isWorkflowTempPath('/var/sokuza-repo-archived.tar.gz')).toBe(false);
+        // Lacks the random suffix entirely — not from mkdtemp.
+        expect(isWorkflowTempPath('/tmp/sokuza-repo-')).toBe(false);
+    });
+
+    it('matches mkdtemp output even when nested under further path segments', () => {
+        // mkdtemp returns the leaf temp dir, but actions sometimes
+        // re-emit subpaths (e.g. /tmp/sokuza-repo-aB3kZ9/.git). Both
+        // shapes should still match.
+        expect(isWorkflowTempPath('/tmp/sokuza-repo-aB3kZ9')).toBe(true);
+        expect(isWorkflowTempPath('/tmp/sokuza-repo-aB3kZ9/.git/HEAD')).toBe(true);
+    });
 });
