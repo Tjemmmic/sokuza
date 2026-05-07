@@ -15,6 +15,7 @@ import { toArray } from './types.js';
 import { executeGraph } from './nodes/runtime.js';
 import { getNodeRegistry } from './nodes/registry.js';
 import { extractTriggerFromGraph, isGraphWorkflow } from './nodes/graph-trigger.js';
+import { isStringTruthy } from './nodes/truthy.js';
 import { isWorkflowTempPath } from './temp-paths.js';
 
 /**
@@ -245,9 +246,7 @@ function makeContext(
 
 function shouldSkip(step: WorkflowStepDefinition, ctx: ActionContext): boolean {
     if (!step.condition) return false;
-    const condValue = interpolateString(step.condition, ctx);
-    const isTruthy = condValue !== '' && condValue !== 'false' && condValue !== '0' && condValue !== 'undefined' && condValue !== 'null';
-    return !isTruthy;
+    return !isStringTruthy(interpolateString(step.condition, ctx));
 }
 
 /**
