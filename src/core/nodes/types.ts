@@ -183,7 +183,10 @@ export function serializeNodeDefinition(def: NodeDefinition): SerializedNodeDefi
 /**
  * Runtime helper: resolve all output ports for a node — the static ones
  * declared in its definition plus any dynamic ports its config has unlocked.
- * The dashboard mirrors this logic for rendering.
+ *
+ * KEEP IN SYNC WITH dashboard/graph-logic.js resolveWireableOutputPorts /
+ * eventGlobMatch / portTypeForInputType — the editor mirrors this logic for
+ * rendering. src/__tests__/graph-editor-logic.test.ts fails if they diverge.
  */
 export function resolveOutputPorts(def: NodeDefinition, nodeConfig: Record<string, unknown> | undefined): NodePort[] {
     const ports: NodePort[] = [];

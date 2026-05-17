@@ -689,60 +689,15 @@ function wireInputPorts(def) {
     return def.ports.filter((p) => p.role === 'input' && p.wire);
 }
 
-/** Wire-able output ports, including config-driven dynamic ones. */
+/**
+ * Wire-able output ports, including config-driven dynamic ones. The actual
+ * logic lives in graph-logic.js (loaded as a separate <script>) so it can be
+ * parity-tested against the runtime's resolveOutputPorts. See that file's
+ * "KEEP IN SYNC WITH src/core/nodes/types.ts" header before changing port
+ * resolution or event-glob behaviour here.
+ */
 function wireOutputPorts(def, node) {
-    const out = def.ports.filter((p) => p.role === 'output' && p.wire !== false);
-    if (!def.dynamicOutputs) return out;
-    const seen = new Set(out.map((p) => p.name));
-    for (const spec of def.dynamicOutputs) {
-        if (spec.kind === 'per-input') {
-            const list = node.config?.[spec.inputsConfigKey];
-            if (!Array.isArray(list)) continue;
-            for (const item of list) {
-                if (!item || !item.name || seen.has(item.name)) continue;
-                seen.add(item.name);
-                out.push({
-                    name: item.name,
-                    label: item.label || item.name,
-                    role: 'output',
-                    wire: true,
-                    type: portTypeForInputType(item.type),
-                    helpText: `User-defined input: ${item.name}`,
-                });
-            }
-        } else if (spec.kind === 'event-conditional') {
-            const events = ensureArr(node.config?.[spec.eventsConfigKey]);
-            for (const rule of spec.rules) {
-                const matches = rule.whenEvents.some((we) => events.some((e) => eventGlobMatch(we, e)));
-                if (!matches) continue;
-                for (const p of rule.ports) {
-                    if (seen.has(p.name)) continue;
-                    seen.add(p.name);
-                    out.push(p);
-                }
-            }
-        }
-    }
-    return out;
-}
-
-function portTypeForInputType(t) {
-    return ({
-        'github-pr': 'pr',
-        'github-issue': 'issue',
-        number: 'number',
-        boolean: 'boolean',
-        'github-branch': 'string',
-        'github-repo': 'string',
-        text: 'string', textarea: 'string', select: 'string',
-    })[t] || 'string';
-}
-
-function eventGlobMatch(pattern, value) {
-    if (pattern === value) return true;
-    if (!pattern.includes('*')) return false;
-    const re = new RegExp('^' + pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*') + '$');
-    return re.test(value);
+    return graphLogic.resolveWireableOutputPorts(def, node);
 }
 
 /** Render one port handle. Includes:
