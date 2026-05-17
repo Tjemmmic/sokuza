@@ -69,7 +69,25 @@ function actionNode(opts: {
     };
 }
 
-function wrapResult(result: unknown): Record<string, unknown> {
+/**
+ * Builds a node's output bag from an action handler's return value: every
+ * key of the returned object becomes its own port, plus a synthetic `result`
+ * port carrying the whole value (see actionNode's doc comment).
+ *
+ * Precedence is deliberate: the synthetic `result` is written *after* the
+ * spread, so if a handler ever returns its own `result` key it is shadowed
+ * by the whole-object value. This is intentional and load-bearing — graph
+ * chaining relies on `{{nodes.X.result}}` *always* meaning "X's full output",
+ * regardless of which handler produced it. Making it conditional (keep the
+ * handler's `result` when present) would make that port mean different
+ * things for different nodes and silently break chained graphs. The
+ * shadowed field remains reachable at `result.result`. No built-in handler
+ * currently returns a `result` key; this comment exists so a future one
+ * doesn't reintroduce the ambiguity by accident. Pinned by builtins.test.ts.
+ *
+ * Exported for unit testing only.
+ */
+export function wrapResult(result: unknown): Record<string, unknown> {
     if (result && typeof result === 'object' && !Array.isArray(result)) {
         return { ...(result as Record<string, unknown>), result };
     }
