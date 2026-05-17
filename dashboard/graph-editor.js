@@ -6,8 +6,8 @@
 // the registry and /api/workflows for persistence. No bundler — vanilla
 // JS, SVG for the wires, absolutely-positioned divs for node cards.
 //
-// Globals expected from app.js: $, $$, api, esc, toast, navigate, openModal,
-// closeModal, eventCatalog, eventLabelMap.
+// Globals expected from app.js: $, $$, api, esc, jsEsc, toast, navigate,
+// openModal, closeModal, eventCatalog, eventLabelMap.
 
 const ge = (window._gEditor = {
     // populated by openGraphEditor()
@@ -581,7 +581,7 @@ function renderPalette() {
                 const collapsed = ge.palette.collapsedGroups[g];
                 return `
                 <div class="ge-palette-group">
-                    <div class="ge-palette-group-h" onclick="togglePaletteGroup('${esc(g)}')">
+                    <div class="ge-palette-group-h" onclick="togglePaletteGroup('${jsEsc(g)}')">
                         <span>${esc(g)}</span>
                         <span class="ge-palette-group-count">${groups[g].length}</span>
                         <span class="ge-palette-group-caret">${collapsed ? '▶' : '▼'}</span>
@@ -590,8 +590,8 @@ function renderPalette() {
                         ${groups[g].map((d) => `
                             <div class="ge-palette-item" draggable="true"
                                 title="${esc(d.description)}"
-                                ondragstart="onPaletteDragStart(event, '${esc(d.type)}')"
-                                onclick="addNodeOfType('${esc(d.type)}')"
+                                ondragstart="onPaletteDragStart(event, '${jsEsc(d.type)}')"
+                                onclick="addNodeOfType('${jsEsc(d.type)}')"
                                 style="--node-color:${esc(d.color || 'var(--accent)')}">
                                 <span class="ge-palette-icon">${esc(d.icon)}</span>
                                 <div class="ge-palette-meta">
@@ -642,8 +642,8 @@ function renderNodeCard(node) {
     if (!def) {
         return `<div class="ge-node ge-node-broken" data-id="${esc(node.id)}"
             style="left:${node.position?.x ?? 0}px;top:${node.position?.y ?? 0}px"
-            onmousedown="onNodeMouseDown(event, '${esc(node.id)}')"
-            onclick="selectNode('${esc(node.id)}')">
+            onmousedown="onNodeMouseDown(event, '${jsEsc(node.id)}')"
+            onclick="selectNode('${jsEsc(node.id)}')">
             <div class="ge-node-header">⚠️ Unknown: ${esc(node.type)}</div>
             <div class="ge-node-body">Node type not registered. Delete or replace.</div>
         </div>`;
@@ -664,8 +664,8 @@ function renderNodeCard(node) {
 
     return `<div class="ge-node ge-node-${esc(def.category)}${selected}${wiring}" data-id="${esc(node.id)}"
             style="left:${x}px;top:${y}px;--node-color:${esc(color)}"
-            onmousedown="onNodeMouseDown(event, '${esc(node.id)}')"
-            onclick="selectNode('${esc(node.id)}')">
+            onmousedown="onNodeMouseDown(event, '${jsEsc(node.id)}')"
+            onclick="selectNode('${jsEsc(node.id)}')">
         <div class="ge-node-header" title="${esc(titleAttr)}">
             <span class="ge-node-icon">${esc(def.icon)}</span>
             <div class="ge-node-title-wrap">
@@ -727,7 +727,7 @@ function portHandle(node, port, side) {
     return `<div class="${cls}${statusCls}${compatibleCls}" data-node="${esc(node.id)}" data-port="${esc(port.name)}" data-type="${esc(portType)}"
         title="${esc(tip)}"
         onmousedown="event.stopPropagation()"
-        onclick="onPortClick(event, '${esc(node.id)}', '${esc(port.name)}', '${side}')">
+        onclick="onPortClick(event, '${jsEsc(node.id)}', '${jsEsc(port.name)}', '${side}')">
         <span class="ge-port-dot"></span>
         <span class="ge-port-label">${esc(port.label)}${port.required && side === 'input' ? '<span class="ge-port-required">*</span>' : ''}</span>
         <span class="ge-port-type">${esc(portType)}</span>
@@ -803,7 +803,7 @@ function edgePath(a, b, id, selected, dashed) {
     return `
         <g class="ge-edge${selected ? ' selected' : ''}" data-id="${esc(id || '')}">
             <path class="ge-edge-hit" d="${path}" stroke="transparent" stroke-width="14" fill="none"
-                onclick="selectEdge('${esc(id || '')}')"></path>
+                onclick="selectEdge('${jsEsc(id || '')}')"></path>
             <path d="${path}" stroke="${stroke}" stroke-width="2" fill="none" ${dash}></path>
         </g>
     `;
@@ -845,7 +845,7 @@ function renderInspector() {
     if (!def) {
         el.innerHTML = `<div class="ge-inspector-empty"><h3>Broken node</h3>
             <p>Type "<code>${esc(node.type)}</code>" is not registered.</p>
-            <button class="btn btn-danger-outline btn-sm" onclick="deleteNode('${esc(node.id)}')">Delete node</button></div>`;
+            <button class="btn btn-danger-outline btn-sm" onclick="deleteNode('${jsEsc(node.id)}')">Delete node</button></div>`;
         return;
     }
 
@@ -863,13 +863,13 @@ function renderInspector() {
                 <div>${esc(def.title)}</div>
                 <small>${esc(def.type)}</small>
             </div>
-            <button class="btn btn-danger-outline btn-sm" onclick="deleteNode('${esc(node.id)}')">Delete</button>
+            <button class="btn btn-danger-outline btn-sm" onclick="deleteNode('${jsEsc(node.id)}')">Delete</button>
         </div>
         <div class="ge-inspector-body">
             <div class="form-group">
                 <label class="form-label">Node Id</label>
                 <input class="form-input" value="${esc(node.id)}"
-                    onchange="renameNode('${esc(node.id)}', this.value)">
+                    onchange="renameNode('${jsEsc(node.id)}', this.value)">
                 <div class="form-hint">Used in templates: <code>{{nodes.${esc(node.id)}.&lt;port&gt;}}</code></div>
             </div>
             ${def.description ? `<p class="ge-inspector-desc">${esc(def.description)}</p>` : ''}
@@ -888,13 +888,13 @@ function renderInspector() {
                 <label class="form-label">Condition (skip if falsy)</label>
                 <input class="form-input" value="${esc(node.condition || '')}"
                     placeholder="e.g. {{nodes.review.mergeReady}}"
-                    onchange="ge.workflow.graph.nodes.find(n=>n.id==='${esc(node.id)}').condition = this.value || undefined; updateYamlPanel()">
+                    onchange="ge.workflow.graph.nodes.find(n=>n.id==='${jsEsc(node.id)}').condition = this.value || undefined; updateYamlPanel()">
             </div>
             <div class="form-row">
                 <div class="form-group">
                     <label class="form-label">On error</label>
                     <select class="form-select"
-                        onchange="ge.workflow.graph.nodes.find(n=>n.id==='${esc(node.id)}').on_error = this.value === 'stop' ? undefined : this.value; updateYamlPanel()">
+                        onchange="ge.workflow.graph.nodes.find(n=>n.id==='${jsEsc(node.id)}').on_error = this.value === 'stop' ? undefined : this.value; updateYamlPanel()">
                         <option value="stop" ${(node.on_error || 'stop') === 'stop' ? 'selected' : ''}>Stop workflow</option>
                         <option value="continue" ${node.on_error === 'continue' ? 'selected' : ''}>Continue</option>
                     </select>
@@ -902,7 +902,7 @@ function renderInspector() {
                 <div class="form-group">
                     <label class="form-label">Timeout (s)</label>
                     <input class="form-input" type="number" min="0" value="${esc(node.timeout || '')}"
-                        onchange="ge.workflow.graph.nodes.find(n=>n.id==='${esc(node.id)}').timeout = this.value ? Number(this.value) : undefined; updateYamlPanel()">
+                        onchange="ge.workflow.graph.nodes.find(n=>n.id==='${jsEsc(node.id)}').timeout = this.value ? Number(this.value) : undefined; updateYamlPanel()">
                 </div>
             </div>
 
@@ -950,7 +950,7 @@ function renderInputStatusRow(node, def, port) {
             </div>
             <div class="ge-input-source">
                 🔌 wired from <code>${esc(fromLabel)}</code>
-                <button class="btn btn-ghost btn-sm" onclick="disconnectInput('${esc(node.id)}','${esc(port.name)}')">disconnect</button>
+                <button class="btn btn-ghost btn-sm" onclick="disconnectInput('${jsEsc(node.id)}','${jsEsc(port.name)}')">disconnect</button>
             </div>
         </div>`;
     }
@@ -979,7 +979,7 @@ function renderInputStatusRow(node, def, port) {
         ${suggestions.existing.length > 0 ? `<div class="ge-input-suggest">
             <div class="ge-input-suggest-h">Wire from existing node</div>
             ${suggestions.existing.map((s) => `
-                <button class="ge-suggest-btn" onclick="wireFromExisting('${esc(node.id)}','${esc(port.name)}','${esc(s.fromNode)}','${esc(s.fromPort)}')">
+                <button class="ge-suggest-btn" onclick="wireFromExisting('${jsEsc(node.id)}','${jsEsc(port.name)}','${jsEsc(s.fromNode)}','${jsEsc(s.fromPort)}')">
                     🔗 <code>${esc(s.fromNode)}.${esc(s.fromPort)}</code>
                     <small>${esc(s.label)}</small>
                 </button>
@@ -988,7 +988,7 @@ function renderInputStatusRow(node, def, port) {
         ${suggestions.add.length > 0 ? `<div class="ge-input-suggest">
             <div class="ge-input-suggest-h">Or add a node that provides this</div>
             ${suggestions.add.map((s) => `
-                <button class="ge-suggest-btn" onclick="addAndWire('${esc(node.id)}','${esc(port.name)}','${esc(s.type)}','${esc(s.outputPort)}')">
+                <button class="ge-suggest-btn" onclick="addAndWire('${jsEsc(node.id)}','${jsEsc(port.name)}','${jsEsc(s.type)}','${jsEsc(s.outputPort)}')">
                     ➕ ${esc(s.icon)} ${esc(s.title)}
                     <small>${esc(s.reason)}</small>
                 </button>
@@ -1112,7 +1112,7 @@ window.disconnectInput = function (nodeId, portName) {
 
 function renderField(node, port) {
     const value = node.config?.[port.name];
-    const setExpr = `setNodeField('${esc(node.id)}', '${esc(port.name)}', __VAL__)`;
+    const setExpr = `setNodeField('${jsEsc(node.id)}', '${jsEsc(port.name)}', __VAL__)`;
     const onInput = (jsExpr) => setExpr.replace('__VAL__', jsExpr);
     const help = port.helpText ? `<div class="form-hint">${esc(port.helpText)}</div>` : '';
     const required = port.required ? ' <span style="color:var(--danger)">*</span>' : '';
@@ -1192,15 +1192,15 @@ function renderMultiselectField(node, port) {
                 const checked = value.includes(o.value);
                 return `<label class="ge-chip ${checked ? 'checked' : ''}">
                     <input type="checkbox" ${checked ? 'checked' : ''}
-                        onchange="toggleMultiselect('${esc(node.id)}', '${esc(port.name)}', '${esc(o.value)}', this.checked)">
+                        onchange="toggleMultiselect('${jsEsc(node.id)}', '${jsEsc(port.name)}', '${jsEsc(o.value)}', this.checked)">
                     <span>${esc(o.label)}</span>
                 </label>`;
             }).join('') || '<div class="form-hint">No predefined options — type values manually below.</div>'}
             <input class="form-input ge-multiselect-extra" placeholder="Type a custom value and press Enter"
-                onkeydown="if(event.key==='Enter'){event.preventDefault();addMultiselectCustom('${esc(node.id)}','${esc(port.name)}',this.value);this.value='';}">
+                onkeydown="if(event.key==='Enter'){event.preventDefault();addMultiselectCustom('${jsEsc(node.id)}','${jsEsc(port.name)}',this.value);this.value='';}">
             <div class="ge-multiselect-tags">
                 ${value.filter((v) => !options.some((o) => o.value === v)).map((v) => `
-                    <span class="tag-pill">${esc(v)} <button onclick="toggleMultiselect('${esc(node.id)}','${esc(port.name)}','${esc(v)}', false)">×</button></span>
+                    <span class="tag-pill">${esc(v)} <button onclick="toggleMultiselect('${jsEsc(node.id)}','${jsEsc(port.name)}','${jsEsc(v)}', false)">×</button></span>
                 `).join('')}
             </div>
         </div>
@@ -1241,13 +1241,13 @@ function renderKvField(node, port) {
             ${entries.map(([k, v], i) => `
                 <div class="ge-kv-row">
                     <input class="form-input" value="${esc(k)}" placeholder="key"
-                        onchange="updateKvKey('${esc(node.id)}','${esc(port.name)}',${i},this.value)">
+                        onchange="updateKvKey('${jsEsc(node.id)}','${jsEsc(port.name)}',${i},this.value)">
                     <input class="form-input" value="${esc(v)}" placeholder="value"
-                        oninput="updateKvVal('${esc(node.id)}','${esc(port.name)}','${esc(k)}',this.value)">
-                    <button class="btn btn-danger-outline btn-sm" onclick="removeKv('${esc(node.id)}','${esc(port.name)}','${esc(k)}')">×</button>
+                        oninput="updateKvVal('${jsEsc(node.id)}','${jsEsc(port.name)}','${jsEsc(k)}',this.value)">
+                    <button class="btn btn-danger-outline btn-sm" onclick="removeKv('${jsEsc(node.id)}','${jsEsc(port.name)}','${jsEsc(k)}')">×</button>
                 </div>`).join('')}
         </div>
-        <button class="btn btn-ghost btn-sm" onclick="addKv('${esc(node.id)}','${esc(port.name)}')">+ Add row</button>
+        <button class="btn btn-ghost btn-sm" onclick="addKv('${jsEsc(node.id)}','${jsEsc(port.name)}')">+ Add row</button>
         ${port.helpText ? `<div class="form-hint">${esc(port.helpText)}</div>` : ''}
     </div>`;
 }

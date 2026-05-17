@@ -4839,6 +4839,28 @@ function esc(s) {
     return (s ?? '').toString().replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/'/g, '&#39;');
 }
 
+// Escape a value for a single-quoted JS string that itself sits inside a
+// double-quoted HTML attribute, e.g. onclick="fn('${jsEsc(x)}')". esc() is
+// wrong here: it encodes ' as &#39;, which the HTML parser decodes back to '
+// before the JS engine sees it, letting a crafted value break out of the JS
+// string. So escape JS-string metacharacters FIRST (\, ', line terminators),
+// then HTML-encode the chars that matter in a double-quoted attribute (& and
+// " plus < > defensively). The backslashes introduced by JS-escaping aren't
+// HTML-special, so they survive attribute decoding intact.
+function jsEsc(s) {
+    return (s ?? '').toString()
+        .replace(/\\/g, '\\\\')
+        .replace(/'/g, "\\'")
+        .replace(/\n/g, '\\n')
+        .replace(/\r/g, '\\r')
+        .replace(/\u2028/g, '\\u2028')
+        .replace(/\u2029/g, '\\u2029')
+        .replace(/&/g, '&amp;')
+        .replace(/"/g, '&quot;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+}
+
 function timeAgo(iso) {
     const diff = Date.now() - new Date(iso).getTime();
     if (diff < 60_000) return 'just now';
