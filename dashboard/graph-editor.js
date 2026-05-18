@@ -1267,6 +1267,10 @@ window.updateKvKey = function (nodeId, port, idx, newKey) {
     delete obj[oldKey];
     obj[newKey] = val;
     node.config = { ...node.config, [port]: obj };
+    // Re-render so the value/remove inputs rebind to the new key — without
+    // this they keep calling updateKvVal/removeKv with the old key, which
+    // resurrects a stale entry on the next value edit. Matches addKv/removeKv.
+    renderInspector();
     updateYamlPanel();
 };
 window.updateKvVal = function (nodeId, port, key, val) {
