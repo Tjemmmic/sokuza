@@ -176,6 +176,35 @@ describe('executeGraph', () => {
         expect(result.nodeOutputs.b).toMatchObject({ __error: expect.stringContaining('kaboom') });
     });
 
+    it('on_error=continue mirrors the error into steps/results, not just nodeOutputs', async () => {
+        // A continue-failed node still executed: {{steps.<id>}} and
+        // {{results.N}} must agree with {{nodes.<id>}} for that node, and a
+        // downstream node reading the legacy steps.<id> syntax must see it.
+        actions.set('boom', async () => { throw new Error('kaboom'); });
+        actions.set('echo', async (params) => ({ echoed: params.value }));
+        registry.register(actionDef('test.boom', 'boom', [
+            { name: 'result', role: 'output', label: 'Result', wire: true },
+        ]));
+        registry.register(actionDef('test.echo', 'echo', [
+            { name: 'value', role: 'input', label: 'Value', wire: true, config: true, control: 'text' },
+            { name: 'echoed', role: 'output', label: 'Echoed', wire: true },
+        ]));
+        const graph: NodeGraph = {
+            nodes: [
+                { id: 'trig', type: 'trigger.github' },
+                { id: 'b', type: 'test.boom', on_error: 'continue' },
+                { id: 'c', type: 'test.echo', config: { value: 'saw: {{steps.b.__error}}' } },
+            ],
+            edges: [
+                { from: { node: 'b', port: 'result' }, to: { node: 'c', port: '__seq' } },
+            ],
+        };
+        const result = await executeGraph(graph, evt(), actions, registry, noopLogger);
+        expect(result.steps.b).toEqual(result.nodeOutputs.b);
+        expect(result.steps.b).toMatchObject({ __error: 'kaboom' });
+        expect(Object.values(result.results)).toContainEqual(result.nodeOutputs.b);
+        expect(result.nodeOutputs.c.echoed).toBe('saw: kaboom');
+    });
     it('on_error=continue preserves the message, stack, and class name of Error objects', async () => {
         // String(new TypeError("x")) -> "TypeError: x" — usable but
         // throws away .stack and .name. Downstream wires that pluck

@@ -124,7 +124,16 @@ export async function executeGraph(
                     // {{nodes.<id>.__errorStack}} surfaces the stack for
                     // diagnostics. Falls back to String() for thrown
                     // non-Error values (strings, plain objects).
-                    nodeOutputs[node.id] = serializeContinueError(outcome.reason);
+                    //
+                    // A continue-failed node still executed, so mirror its
+                    // output into all three views exactly like the success
+                    // path below — otherwise {{steps.<id>.__error}} and
+                    // {{results.N}} would silently disagree with
+                    // {{nodes.<id>.__error}} for the same node.
+                    const errOut = serializeContinueError(outcome.reason);
+                    nodeOutputs[node.id] = errOut;
+                    stepsView[node.id] = errOut;
+                    indexResults[executionIndex++] = errOut;
                     continue;
                 }
                 if (!firstError) firstError = { reason: outcome.reason, node };
