@@ -205,6 +205,31 @@ describe('executeGraph', () => {
         expect(Object.values(result.results)).toContainEqual(result.nodeOutputs.b);
         expect(result.nodeOutputs.c.echoed).toBe('saw: kaboom');
     });
+
+    it('template path traversal stops at __proto__/constructor (renders empty)', async () => {
+        actions.set('echo', async (params) => ({ echoed: params.value }));
+        registry.register(actionDef('test.echo', 'echo', [
+            { name: 'value', role: 'input', label: 'Value', wire: true, config: true, control: 'text' },
+            { name: 'echoed', role: 'output', label: 'Echoed', wire: true },
+        ]));
+        const graph: NodeGraph = {
+            nodes: [
+                { id: 'trig', type: 'trigger.github' },
+                { id: 'a', type: 'test.echo', config: { value: 'real' } },
+                {
+                    id: 'b', type: 'test.echo',
+                    config: { value: 'x[{{nodes.a.__proto__}}][{{nodes.a.constructor}}][{{nodes.a.echoed}}]' },
+                },
+            ],
+            edges: [
+                { from: { node: 'a', port: 'echoed' }, to: { node: 'b', port: '__seq' } },
+            ],
+        };
+        const result = await executeGraph(graph, evt(), actions, registry, noopLogger);
+        // Prototype keys resolve like any missing ref (""), the real port still works.
+        expect(result.nodeOutputs.b.echoed).toBe('x[][][real]');
+    });
+
     it('on_error=continue preserves the message, stack, and class name of Error objects', async () => {
         // String(new TypeError("x")) -> "TypeError: x" — usable but
         // throws away .stack and .name. Downstream wires that pluck

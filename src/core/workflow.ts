@@ -534,6 +534,9 @@ function resolvePath(obj: unknown, path: string): unknown {
 
     for (const part of parts) {
         if (current === null || current === undefined) return undefined;
+        // {{steps.x.__proto__.…}} resolves to a missing value rather than
+        // climbing the prototype chain — consistent with the graph runtime.
+        if (part === '__proto__' || part === 'constructor') return undefined;
         current = (current as Record<string, unknown>)[part];
     }
 

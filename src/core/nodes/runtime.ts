@@ -462,6 +462,10 @@ function resolvePath(obj: unknown, path: string): unknown {
     let cur: unknown = obj;
     for (const part of parts) {
         if (cur === null || cur === undefined) return undefined;
+        // A template like {{nodes.x.__proto__.…}} should resolve to a
+        // missing value, not climb the prototype chain. Treated as any
+        // other unresolved ref (renders ""), never the prototype object.
+        if (part === '__proto__' || part === 'constructor') return undefined;
         cur = (cur as Record<string, unknown>)[part];
     }
     return cur;
