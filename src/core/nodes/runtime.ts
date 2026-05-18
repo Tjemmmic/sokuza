@@ -504,8 +504,15 @@ export function toposortLayers(graph: NodeGraph): GraphNode[][] {
                 `Edge references unknown destination node "${e.to.node}" (from "${e.from.node}.${e.from.port}" → port "${e.to.port}"). Check for a typo or a stale edge.`,
             );
         }
-        // Self-loops are silently ignored — they'd deadlock the toposort.
-        if (e.from.node === e.to.node) continue;
+        // A node cannot consume its own output (it hasn't run yet), so a
+        // self-loop edge is always a hand-authored mistake — the editor
+        // refuses to draw one. Fail loud like the unknown-node checks
+        // above rather than silently dropping the edge the author wrote.
+        if (e.from.node === e.to.node) {
+            throw new Error(
+                `Self-loop edge on node "${e.from.node}" (port "${e.from.port}" → "${e.to.port}"). A node cannot depend on its own output.`,
+            );
+        }
         inDegree.set(e.to.node, (inDegree.get(e.to.node) ?? 0) + 1);
         childrenOf.get(e.from.node)!.push(e.to.node);
     }

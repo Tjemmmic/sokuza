@@ -432,10 +432,11 @@ describe('executeGraph', () => {
         expect(elapsed).toBeLessThan(140);
     });
 
-    it('toposort tolerates a self-loop edge instead of deadlocking', async () => {
-        // The toposort code path explicitly drops self-loops. A graph
-        // with one is still executable; the loop just doesn't add an
-        // in-degree edge.
+    it('toposort throws on a self-loop edge rather than silently dropping it', () => {
+        // A node cannot consume its own output; the editor refuses to draw
+        // a self-loop, so one only appears in hand-authored YAML and is a
+        // mistake. Fail loud like the unknown-node checks rather than
+        // silently ignoring the edge the author wrote.
         const graph: NodeGraph = {
             nodes: [
                 { id: 'trig', type: 'trigger.github' },
@@ -445,13 +446,7 @@ describe('executeGraph', () => {
                 { from: { node: 'a', port: 'event' }, to: { node: 'a', port: 'event' } },
             ],
         };
-        const layers = toposortLayers(graph);
-        // Both nodes resolve in a single layer (the self-loop is ignored).
-        expect(layers.length).toBe(1);
-        expect(layers[0].map((n) => n.id).sort()).toEqual(['a', 'trig']);
-        // And the graph still executes without throwing.
-        const result = await executeGraph(graph, evt(), actions, registry, noopLogger);
-        expect(result.nodeOutputs.a).toBeDefined();
+        expect(() => toposortLayers(graph)).toThrow(/Self-loop edge on node "a"/);
     });
 
     it('toposort throws on an edge referencing a nonexistent source node', () => {
