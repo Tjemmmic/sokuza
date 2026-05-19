@@ -135,7 +135,11 @@ export class WorkflowQueue {
         const running = this.running.get(jobId);
         if (running) {
             const ac = this.abortControllers.get(jobId);
-            if (ac) ac.abort();
+            // Distinct reasons let the runtime distinguish a manual
+            // cancel from a timeout in the node-level error message —
+            // "Workflow aborted" alone leaves the user guessing whether
+            // it was their click or a 5-minute ai.review CLI call.
+            if (ac) ac.abort('cancelled');
             running.status = 'cancelled';
             running.completedAt = new Date().toISOString();
             this.removeFromDedup(running);
@@ -220,7 +224,7 @@ export class WorkflowQueue {
 
         for (const [id] of this.running) {
             const ac = this.abortControllers.get(id);
-            if (ac) ac.abort();
+            if (ac) ac.abort('shutdown');
         }
 
         const deadline = Date.now() + timeoutMs;
@@ -319,7 +323,7 @@ export class WorkflowQueue {
             const timer = setTimeout(() => {
                 if (!this.running.has(job.id)) return;
                 this.logger.warn({ jobId: job.id, timeout: job.resolvedConfig.timeout }, 'Job timed out — force-failing');
-                ac.abort();
+                ac.abort({ kind: 'timeout', timeoutSec: job.resolvedConfig.timeout });
                 this.clearTimer(job.id);
                 job.status = 'failed';
                 job.error = `Timed out after ${job.resolvedConfig.timeout}s`;

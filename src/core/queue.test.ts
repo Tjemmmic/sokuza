@@ -487,6 +487,14 @@ describe('WorkflowQueue', () => {
             expect(job.error).toMatch(/Timed out/);
             expect(q.getJobs('running')).toHaveLength(0);
             expect(signalSeen?.aborted).toBe(true);
+            // The signal's reason carries a structured marker the
+            // runtime expands into "Workflow timed out after Xs (raise
+            // queue.defaults.timeout …)". Without this the user-facing
+            // node error said only "Workflow aborted" — indistinguishable
+            // from a manual cancel.
+            const reason = signalSeen?.reason as { kind?: string; timeoutSec?: number } | undefined;
+            expect(reason?.kind).toBe('timeout');
+            expect(reason?.timeoutSec).toBe(0.05);
 
             const stats = q.getStats();
             expect(stats.availableSlots).toBe(2);

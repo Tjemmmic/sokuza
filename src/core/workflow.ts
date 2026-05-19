@@ -15,6 +15,7 @@ import { toArray } from './types.js';
 import { executeGraph } from './nodes/runtime.js';
 import { getNodeRegistry } from './nodes/registry.js';
 import { extractTriggerFromGraph, isGraphWorkflow } from './nodes/graph-trigger.js';
+import { abortErrorFromSignal } from './abort-error.js';
 import { isStringTruthy } from './nodes/truthy.js';
 import { isWorkflowTempPath } from './temp-paths.js';
 
@@ -316,7 +317,7 @@ export async function executeWorkflow(
 
         for (const group of groups) {
             if (_signal?.aborted) {
-                throw new Error('Workflow aborted');
+                throw abortErrorFromSignal(_signal);
             }
 
             if (group.kind === 'sequential') {

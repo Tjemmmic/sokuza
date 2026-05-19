@@ -1,6 +1,7 @@
 import { GitHubApiClient } from '../api.js';
 import type { ActionContext, ActionHandler } from '../../../core/types.js';
 import { resolveRepoTarget, requireToken } from './_target.js';
+import { abortErrorFromSignal } from '../../../core/abort-error.js';
 
 const DEFAULT_TIMEOUT_S = 600; // 10 min — long enough for typical CI
 const DEFAULT_INTERVAL_S = 15;
@@ -66,7 +67,7 @@ export const githubWaitForChecksAction: ActionHandler = async (params, context) 
         // doesn't fire one final HTTP call after waking up. The runtime's
         // outer abort race unblocks the await, but the action itself keeps
         // running unless we bail here too.
-        if (context.signal?.aborted) throw new Error('Workflow aborted');
+        if (context.signal?.aborted) throw abortErrorFromSignal(context.signal);
         let snapshot: CheckSnapshot;
         try {
             snapshot = await pollOnce(client, target.owner, target.repo, sha);
@@ -219,7 +220,7 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
             signal.removeEventListener('abort', onAbort);
             cb();
         };
-        const onAbort = () => finish(() => reject(new Error('Workflow aborted')));
+        const onAbort = () => finish(() => reject(abortErrorFromSignal(signal)));
         if (signal.aborted) { onAbort(); return; }
         signal.addEventListener('abort', onAbort, { once: true });
         timer = setTimeout(() => finish(() => resolve()), ms);

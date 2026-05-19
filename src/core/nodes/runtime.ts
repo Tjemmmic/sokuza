@@ -15,6 +15,7 @@ import type {
 } from './types.js';
 import type { NodeRegistry } from './registry.js';
 import { isStringTruthy } from './truthy.js';
+import { abortErrorFromSignal } from '../abort-error.js';
 
 // ─── Graph execution ─────────────────────────────────────────────────────────
 //
@@ -81,7 +82,7 @@ export async function executeGraph(
 
     for (const layer of layers) {
         if (opts.signal?.aborted) {
-            throw new Error('Workflow aborted');
+            throw abortErrorFromSignal(opts.signal);
         }
 
         // Run all nodes in this layer concurrently. fail-fast on first
@@ -156,7 +157,7 @@ export async function executeGraph(
         // aborted run can't appear "successful" just because every aborted
         // node opted into continue-on-failure semantics.
         if (opts.signal?.aborted) {
-            throw new Error('Workflow aborted');
+            throw abortErrorFromSignal(opts.signal);
         }
     }
 
@@ -340,7 +341,7 @@ function withTimeoutAndSignal<T>(
         }
 
         const onAbort = signal
-            ? () => finish(() => reject(new Error('Workflow aborted')))
+            ? () => finish(() => reject(abortErrorFromSignal(signal)))
             : null;
         if (signal) {
             if (signal.aborted) { onAbort!(); return; }

@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process';
+import { abortErrorFromSignal } from '../../core/abort-error.js';
 
 /**
  * Shell out to `git` in a working directory and reject on non-zero exit.
@@ -15,7 +16,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 export function execGit(cwd: string, args: string[], signal?: AbortSignal): Promise<void> {
     return new Promise((resolve, reject) => {
         if (signal?.aborted) {
-            reject(new Error('Workflow aborted'));
+            reject(abortErrorFromSignal(signal));
             return;
         }
         const child = spawn('git', args, { cwd, stdio: ['pipe', 'pipe', 'pipe'] });
@@ -42,7 +43,7 @@ export function execGit(cwd: string, args: string[], signal?: AbortSignal): Prom
 export function execGitOutput(cwd: string, args: string[], signal?: AbortSignal): Promise<string> {
     return new Promise((resolve, reject) => {
         if (signal?.aborted) {
-            reject(new Error('Workflow aborted'));
+            reject(abortErrorFromSignal(signal));
             return;
         }
         const child = spawn('git', args, { cwd, stdio: ['pipe', 'pipe', 'pipe'] });
@@ -80,7 +81,7 @@ function bindAbort(child: ChildProcess, signal: AbortSignal | undefined, reject:
         // but we reject pre-emptively so the caller sees the abort
         // reason instead of a generic "git push failed (code 143)".
         try { child.kill('SIGTERM'); } catch { /* already exited */ }
-        reject(new Error('Workflow aborted'));
+        reject(abortErrorFromSignal(signal));
     };
     signal.addEventListener('abort', onAbort, { once: true });
     return () => signal.removeEventListener('abort', onAbort);
