@@ -123,3 +123,59 @@ describe('execGitOutput', () => {
         await expect(pa).rejects.toThrow('git fetch failed (code 2): error from A');
     });
 });
+
+// ── abort signal: long git operations (push, clone) must die when the
+// workflow signal fires. Without this, a slow push outlives the
+// runtime's per-node timeout and may succeed after the workflow has
+// already been declared aborted.
+describe('abort signal', () => {
+    beforeEach(() => vi.clearAllMocks());
+
+    it('rejects immediately when execGit is called with an already-aborted signal', async () => {
+        const controller = new AbortController();
+        controller.abort();
+        await expect(execGit('/repo', ['push'], controller.signal)).rejects.toThrow(/Workflow aborted/);
+        expect(mockedSpawn).not.toHaveBeenCalled();
+    });
+
+    it('rejects immediately when execGitOutput is called with an already-aborted signal', async () => {
+        const controller = new AbortController();
+        controller.abort();
+        await expect(execGitOutput('/repo', ['log'], controller.signal)).rejects.toThrow(/Workflow aborted/);
+        expect(mockedSpawn).not.toHaveBeenCalled();
+    });
+
+    it('SIGTERMs the child and rejects with "Workflow aborted" when the signal fires mid-execution', async () => {
+        const child = makeChild();
+        const kill = vi.fn();
+        (child as unknown as { kill: typeof kill }).kill = kill;
+        mockedSpawn.mockReturnValueOnce(child as never);
+        const controller = new AbortController();
+        const promise = execGit('/repo', ['push', 'origin', 'main'], controller.signal);
+        // The signal fires while git is still running.
+        controller.abort();
+        await expect(promise).rejects.toThrow(/Workflow aborted/);
+        expect(kill).toHaveBeenCalledWith('SIGTERM');
+    });
+
+    it('does not reject the promise twice when the child later emits "close" after an abort', async () => {
+        const child = makeChild();
+        (child as unknown as { kill: () => void }).kill = () => undefined;
+        mockedSpawn.mockReturnValueOnce(child as never);
+        const controller = new AbortController();
+        const promise = execGit('/repo', ['push'], controller.signal);
+        controller.abort();
+        // Simulate the SIGTERM landing and the child exiting after the
+        // abort — the promise must still settle exactly once.
+        setImmediate(() => child.emit('close', 143));
+        await expect(promise).rejects.toThrow(/Workflow aborted/);
+    });
+
+    it('removes the abort listener on normal completion so signals are not retained', async () => {
+        const controller = new AbortController();
+        const removeSpy = vi.spyOn(controller.signal, 'removeEventListener');
+        scriptChild({ exitCode: 0 });
+        await execGit('/repo', ['status'], controller.signal);
+        expect(removeSpy).toHaveBeenCalledWith('abort', expect.any(Function));
+    });
+});
