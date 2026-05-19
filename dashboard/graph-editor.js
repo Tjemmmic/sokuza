@@ -860,10 +860,16 @@ function drawEdges() {
     }
 
     // Live wire-in-progress preview.
+    //
+    // Rendered with `hit=false` so the 14px-wide invisible click target
+    // is omitted: that hit area follows the cursor and would intercept
+    // the click that lands on the destination port, making wiring
+    // impossible. The user's click must reach `.ge-port` to fire
+    // `onPortClick(side='input')` and complete the wire.
     if (ge.wiringFrom && ge.wiringFrom.cursor) {
         const a = portCenter(ge.wiringFrom.nodeId, ge.wiringFrom.port, 'output');
         if (a) {
-            paths.push(edgePath(a, ge.wiringFrom.cursor, '__live', false, true));
+            paths.push(edgePath(a, ge.wiringFrom.cursor, '__live', false, true, false));
         }
     }
 
@@ -881,15 +887,21 @@ function portCenter(nodeId, port, side) {
     return { x: r.left + r.width / 2 - wr.left, y: r.top + r.height / 2 - wr.top };
 }
 
-function edgePath(a, b, id, selected, dashed) {
+function edgePath(a, b, id, selected, dashed, hit = true) {
     const dx = Math.max(40, Math.abs(b.x - a.x) * 0.4);
     const path = `M ${a.x} ${a.y} C ${a.x + dx} ${a.y}, ${b.x - dx} ${b.y}, ${b.x} ${b.y}`;
     const stroke = selected ? '#f43f5e' : 'rgba(99, 102, 241, 0.6)';
     const dash = dashed ? 'stroke-dasharray="6 4"' : '';
+    // `hit=false` (live wire) skips the invisible 14px-wide click target —
+    // otherwise the cursor-tracking preview steals the click destined
+    // for the input port the user is trying to wire into.
+    const hitPath = hit
+        ? `<path class="ge-edge-hit" d="${path}" stroke="transparent" stroke-width="14" fill="none"
+                onclick="selectEdge('${jsEsc(id || '')}')"></path>`
+        : '';
     return `
-        <g class="ge-edge${selected ? ' selected' : ''}" data-id="${esc(id || '')}">
-            <path class="ge-edge-hit" d="${path}" stroke="transparent" stroke-width="14" fill="none"
-                onclick="selectEdge('${jsEsc(id || '')}')"></path>
+        <g class="ge-edge${selected ? ' selected' : ''}" data-id="${esc(id || '')}" ${hit ? '' : 'pointer-events="none"'}>
+            ${hitPath}
             <path d="${path}" stroke="${stroke}" stroke-width="2" fill="none" ${dash}></path>
         </g>
     `;
