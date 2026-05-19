@@ -1,5 +1,6 @@
-import { describe, it, expect } from 'vitest';
-import { wrapResult } from './builtins.js';
+import { describe, it, expect, beforeEach } from 'vitest';
+import { wrapResult, registerBuiltinNodes } from './builtins.js';
+import { NodeRegistry } from './registry.js';
 
 // Pins the documented action-node output contract: every handler key becomes
 // a port, plus a synthetic `result` port carrying the whole return value.
@@ -41,5 +42,42 @@ describe('wrapResult', () => {
         wrapResult(handlerReturn);
         expect(handlerReturn).toEqual({ a: 1 });
         expect('result' in handlerReturn).toBe(false);
+    });
+});
+
+// AI node ports drive the visual editor's provider/model selects. The
+// dashboard renders these as proper dropdowns only when the port's
+// `control` field arrives as 'ai-provider' / 'ai-model' through
+// /api/nodes. Pin the contract so a builtins.ts refactor can't silently
+// regress all three AI nodes back to blank text boxes.
+
+describe('AI nodes expose typed AI provider/model controls', () => {
+    let registry: NodeRegistry;
+
+    beforeEach(() => {
+        registry = new NodeRegistry();
+        registerBuiltinNodes(registry);
+    });
+
+    for (const type of ['ai.review', 'ai.agent', 'ai.address-review']) {
+        it(`${type} provider port uses 'ai-provider' control`, () => {
+            const def = registry.serialize().find((n) => n.type === type);
+            expect(def, `${type} should be registered`).toBeDefined();
+            const providerPort = def!.ports.find((p) => p.name === 'provider' && p.role === 'input');
+            expect(providerPort?.control).toBe('ai-provider');
+        });
+
+        it(`${type} model port uses 'ai-model' control`, () => {
+            const def = registry.serialize().find((n) => n.type === type);
+            const modelPort = def!.ports.find((p) => p.name === 'model' && p.role === 'input');
+            expect(modelPort?.control).toBe('ai-model');
+        });
+    }
+
+    it('ai.review prompt port advertises the default-prompt source so the modal can offer "Load default"', () => {
+        const def = registry.serialize().find((n) => n.type === 'ai.review');
+        const promptPort = def!.ports.find((p) => p.name === 'prompt' && p.role === 'input');
+        expect(promptPort?.control).toBe('textarea');
+        expect(promptPort?.defaultSource).toBe('ai-review-system-prompt');
     });
 });

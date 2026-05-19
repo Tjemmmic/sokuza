@@ -48,11 +48,18 @@ window.openGraphEditor = async function (workflowName, opts = {}) {
     ge.wiringFrom = null;
 
     try {
-        // Load node defs first so the recipe modal (and downstream editor)
-        // both have the registry available.
-        const defsRes = await api.get('/api/nodes');
+        // Load node defs and AI providers in parallel — both are needed
+        // before the inspector renders (AI ports build their selects
+        // from the provider list, so a cache miss there would leave the
+        // user staring at an empty dropdown).
+        const [defsRes, aiRes] = await Promise.all([
+            api.get('/api/nodes'),
+            api.get('/api/ai/providers').catch(() => ({ providers: [], default_provider: null })),
+        ]);
         ge.nodeDefsList = defsRes.nodes || [];
         ge.nodeDefsByType = Object.fromEntries(ge.nodeDefsList.map((d) => [d.type, d]));
+        ge.aiProviders = Array.isArray(aiRes.providers) ? aiRes.providers : [];
+        ge.aiDefaultProvider = aiRes.default_provider || null;
 
         if (staged) {
             // Library click-to-open: skip the recipe picker, drop the user
@@ -1168,6 +1175,10 @@ function renderField(node, port) {
             return renderMultiselectField(node, port);
         case 'kv':
             return renderKvField(node, port);
+        case 'ai-provider':
+            return renderAiProviderField(node, port, value, labelHtml, onInput, help);
+        case 'ai-model':
+            return renderAiModelField(node, port, value, labelHtml, onInput, help);
         case 'github-pr':
         case 'github-issue':
         case 'github-repo':
@@ -1185,6 +1196,70 @@ function renderField(node, port) {
                     oninput="${onInput('this.value')}">${help}
             </div>`;
     }
+}
+
+// "Ready" check used by the provider select badge. We don't make a live
+// API call (the user can configure that on the Integrations page); we
+// just look at the masked entry we already fetched: API providers need
+// a key, CLI providers need the binary installed.
+function aiProviderReady(p) {
+    if (!p) return false;
+    if (p.kind === 'cli') return p.cli_installed === true;
+    return p.key_status === 'plaintext' || p.key_status === 'env-var';
+}
+
+function aiProviderStatusBadge(p) {
+    if (aiProviderReady(p)) return '✓';
+    if (p.kind === 'cli') return '⚠ CLI missing';
+    return '⚠ no key';
+}
+
+// Provider select for AI node config ports. The empty option labels
+// itself with the currently-resolved default so the user can SEE what
+// "leave blank" means instead of guessing. Options pull from the live
+// /api/ai/providers list captured at editor open. The onchange also
+// re-renders the inspector so the sibling `model` port's placeholder
+// reflects the new provider's default_model — without it, the
+// placeholder is stale until the user clicks away and back.
+function renderAiProviderField(node, port, value, labelHtml, onInput, help) {
+    const providers = (ge.aiProviders || []);
+    const defaultName = ge.aiDefaultProvider || (providers[0] && providers[0].name) || '';
+    const defaultLabel = defaultName ? `Use default (currently: ${defaultName})` : 'Use default';
+    const setExpr = onInput('this.value');
+    return `<div class="form-group">${labelHtml}
+        <select class="form-select" onchange="${setExpr}; renderInspector();">
+            <option value="" ${!value ? 'selected' : ''}>${esc(defaultLabel)}</option>
+            ${providers.map((p) => {
+                const badge = aiProviderStatusBadge(p);
+                const isDefault = p.name === defaultName;
+                const label = `${p.name}${isDefault ? ' (default)' : ''} — ${badge}`;
+                return `<option value="${esc(p.name)}" ${value === p.name ? 'selected' : ''}>${esc(label)}</option>`;
+            }).join('')}
+        </select>
+        ${providers.length === 0
+            ? '<div class="form-hint" style="color:var(--danger)">No AI providers configured. Add one on the Integrations page.</div>'
+            : help}
+    </div>`;
+}
+
+// Model override for an AI node port. Free text — different providers
+// expose different model namespaces — but the placeholder reflects the
+// chosen provider's default_model so the user has a concrete starting
+// point. Watches the sibling `provider` port's value via the inspector
+// re-render, not via DOM events.
+function renderAiModelField(node, port, value, labelHtml, onInput, help) {
+    const providerPortName = port.providerPortName || 'provider';
+    const selectedProvider = node.config?.[providerPortName] || ge.aiDefaultProvider;
+    const providerEntry = (ge.aiProviders || []).find((p) => p.name === selectedProvider);
+    const defaultModel = providerEntry?.default_model;
+    const placeholder = defaultModel
+        ? `Leave blank for "${defaultModel}" (the ${selectedProvider} default)`
+        : 'Leave blank for the provider default';
+    return `<div class="form-group">${labelHtml}
+        <input class="form-input" value="${esc(value ?? '')}"
+            placeholder="${esc(placeholder)}"
+            oninput="${onInput('this.value')}">${help}
+    </div>`;
 }
 
 function renderMultiselectField(node, port) {

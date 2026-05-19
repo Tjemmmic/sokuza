@@ -78,10 +78,22 @@ export interface NodePort {
     default?: unknown;
     placeholder?: string;
     helpText?: string;
-    /** Form control (only relevant when `config: true`). */
+    /** Form control (only relevant when `config: true`).
+     *  - `ai-provider`: select sourced from `GET /api/ai/providers` at
+     *    editor open. The empty option labels itself "Use default
+     *    (currently: <X>)" so the override semantics are explicit
+     *    instead of "blank text box that may or may not matter".
+     *  - `ai-model`: text input whose placeholder shows the chosen
+     *    provider's `default_model`, so the user has a starting point
+     *    without us hardcoding a stale list of per-provider models. */
     control?: 'text' | 'textarea' | 'select' | 'switch' | 'number'
             | 'github-pr' | 'github-issue' | 'github-repo' | 'code-md'
-            | 'code-yaml' | 'multiselect' | 'kv';
+            | 'code-yaml' | 'multiselect' | 'kv'
+            | 'ai-provider' | 'ai-model';
+    /** For `ai-model`: the name of the sibling port whose value selects
+     *  which provider's default_model fills this field's placeholder.
+     *  Defaults to `'provider'`. */
+    providerPortName?: string;
     options?: Array<{ value: string; label: string }>;
     /** Named default the editor can load into a textarea port. Resolved
      *  via `GET /api/ai/defaults/:source` — see `actions/default-prompts.ts`.
