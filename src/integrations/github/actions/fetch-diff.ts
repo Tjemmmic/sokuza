@@ -1,37 +1,18 @@
 import { GitHubApiClient } from '../api.js';
 import type { ActionHandler } from '../../../core/types.js';
 import { truncateDiff, DEFAULT_MAX_CHARS } from '../../../core/diff-truncator.js';
+import { resolveRepoTarget, requireToken } from './_target.js';
 
 export const githubFetchDiffAction: ActionHandler = async (params, context) => {
-    const githubConfig = context.integrationConfigs.github;
-    const token = (params.token as string) ?? (githubConfig?.token as string);
-
-    if (!token) {
-        throw new Error(
-            'github-fetch-diff requires a GitHub token. Set integrations.github.token in config or pass params.token.',
-        );
-    }
-
-    const pr = context.event.payload.pull_request as Record<string, unknown> | undefined;
-
-    const owner =
-        (params.owner as string) ??
-        (context.event.metadata.owner as string | undefined);
-
-    const repo =
-        (params.repo as string) ??
-        (context.event.metadata.repoName as string | undefined);
-
-    const prNumber =
-        (params.pr_number as number) ??
-        (context.event.metadata.prNumber as number | undefined) ??
-        (pr?.number as number | undefined);
-
-    if (!owner || !repo || !prNumber) {
-        throw new Error(
-            'github-fetch-diff: could not determine owner, repo, or pr_number from event payload or params.',
-        );
-    }
+    const token = requireToken(params, context, 'github-fetch-diff');
+    // `resolveRepoTarget` accepts `params.repo` as either "owner/name"
+    // (what `data.pr-fields.repo` outputs and what the editor's
+    // "Repository" port label implies) or just the bare name when
+    // paired with `params.owner`. The previous bespoke resolver read
+    // `repo` as the bare name only and produced a 404 when a graph
+    // wired `pr_fields.repo → diff.repo`.
+    const target = resolveRepoTarget(params, context, 'github-fetch-diff');
+    const { owner, repo, number: prNumber } = target;
 
     const client = new GitHubApiClient(token);
 
