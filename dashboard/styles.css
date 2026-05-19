@@ -2761,6 +2761,19 @@ tr:hover td {
 .form-label-row .form-label { margin: 0; }
 .ge-expand-btn { padding: 2px 8px !important; font-size: 11px !important; flex-shrink: 0; }
 
+/* ─── Palette presets ──────────────────────────────────────────────────────
+   Presets render in their own group above the built-in node types. The
+   subtle accent border makes them visually distinct so a user notices
+   that installing a library workflow added something to the palette.
+*/
+.ge-palette-preset { border-left: 2px solid var(--node-color, var(--accent)); }
+.ge-palette-preset .ge-palette-desc code {
+    background: rgba(99, 102, 241, 0.08);
+    padding: 1px 4px;
+    border-radius: 3px;
+    color: var(--text-secondary);
+}
+
 /* ─── Fullscreen prompt editor modal ───────────────────────────────────────
    Used by openPromptEditor(): a roomy textarea so multi-paragraph
    prompts (e.g. the ai.review system prompt) are actually legible.

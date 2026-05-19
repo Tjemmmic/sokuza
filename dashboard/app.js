@@ -3254,10 +3254,13 @@ function getFilteredLibraryItems() {
             i.category.replace('-', ' ').includes(q)
         );
     }
-    // Sort: installed first, then popular, then available before coming-soon
+    // Sort: installed first, then popular, then available before coming-soon.
+    // "Installed" derives from actual workflow existence so the sort
+    // matches the visual badge — deck-only would float orphaned cards
+    // to the top after a manual workflow delete.
     items.sort((a, b) => {
-        const aInstalled = deck.includes(a.id) ? 1 : 0;
-        const bInstalled = deck.includes(b.id) ? 1 : 0;
+        const aInstalled = getInstalledWorkflowName(a.id) ? 1 : 0;
+        const bInstalled = getInstalledWorkflowName(b.id) ? 1 : 0;
         if (aInstalled !== bInstalled) return bInstalled - aInstalled;
         if (a.popular !== b.popular) return b.popular - a.popular;
         if (a.status !== b.status) return a.status === 'available' ? -1 : 1;
@@ -3297,7 +3300,13 @@ function getDeckIssueItems() {
 }
 
 function renderLibraryCard(item) {
-    const isInstalled = deck.includes(item.id);
+    // Source of truth: does a workflow that originated from this
+    // library item actually exist? `deck` can desync (e.g. user
+    // deletes the workflow via the workflows page) — using deck
+    // membership alone makes the card lie about state and strands
+    // the user with no install button. See getInstalledWorkflowName
+    // for the matching rules.
+    const isInstalled = getInstalledWorkflowName(item.id) !== null;
     const isComingSoon = item.status === 'coming-soon';
     const diffColors = { easy: '#22c55e', medium: '#f59e0b', advanced: '#a855f7' };
     const diffColor = diffColors[item.difficulty] || '#6b7280';
@@ -3657,7 +3666,8 @@ window.confirmUninstallLibraryItem = async function (itemId) {
 window.previewLibraryItem = async function (itemId) {
     const item = libraryItems.find(i => i.id === itemId);
     if (!item) return;
-    const isInstalled = deck.includes(item.id);
+    // Match renderLibraryCard: workflow existence is the source of truth.
+    const isInstalled = getInstalledWorkflowName(item.id) !== null;
     try {
         const tmpl = templates.find(t => t.name === item.template) || libraryTemplates.find(t => t.name === item.template);
         const yamlContent = tmpl?.content || `# Template: ${item.template}\n# (Template content will be loaded on install)`;

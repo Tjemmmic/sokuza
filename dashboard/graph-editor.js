@@ -48,18 +48,19 @@ window.openGraphEditor = async function (workflowName, opts = {}) {
     ge.wiringFrom = null;
 
     try {
-        // Load node defs and AI providers in parallel — both are needed
-        // before the inspector renders (AI ports build their selects
-        // from the provider list, so a cache miss there would leave the
-        // user staring at an empty dropdown).
-        const [defsRes, aiRes] = await Promise.all([
+        // Load node defs, AI providers, and presets in parallel — all
+        // three feed the palette/inspector before first render. A cache
+        // miss on any of them would leave UI elements empty.
+        const [defsRes, aiRes, presetsRes] = await Promise.all([
             api.get('/api/nodes'),
             api.get('/api/ai/providers').catch(() => ({ providers: [], default_provider: null })),
+            api.get('/api/node-presets').catch(() => ({ presets: [] })),
         ]);
         ge.nodeDefsList = defsRes.nodes || [];
         ge.nodeDefsByType = Object.fromEntries(ge.nodeDefsList.map((d) => [d.type, d]));
         ge.aiProviders = Array.isArray(aiRes.providers) ? aiRes.providers : [];
         ge.aiDefaultProvider = aiRes.default_provider || null;
+        ge.presets = Array.isArray(presetsRes.presets) ? presetsRes.presets : [];
 
         if (staged) {
             // Library click-to-open: skip the recipe picker, drop the user
@@ -578,12 +579,56 @@ function renderPalette() {
     const ordered = ['Triggers', 'AI', 'GitHub', 'Notify', 'Utility', 'Flow'];
     const groupNames = [...new Set([...ordered.filter((g) => groups[g]), ...Object.keys(groups)])];
 
+    // Presets are filtered the same way as node defs so the search box
+    // works across both. They render as their own group above the
+    // built-in types so the user notices them when a library workflow
+    // has been installed.
+    const presetsAll = ge.presets || [];
+    const filteredPresets = presetsAll.filter((p) => {
+        if (!q) return true;
+        return (p.name || '').toLowerCase().includes(q)
+            || (p.nodeType || '').toLowerCase().includes(q)
+            || (p.description || '').toLowerCase().includes(q);
+    });
+
+    const presetsCollapsed = ge.palette.collapsedGroups['Presets'];
+    const presetsBlock = filteredPresets.length === 0 ? '' : `
+        <div class="ge-palette-group">
+            <div class="ge-palette-group-h" onclick="togglePaletteGroup('Presets')">
+                <span>Presets</span>
+                <span class="ge-palette-group-count">${filteredPresets.length}</span>
+                <span class="ge-palette-group-caret">${presetsCollapsed ? '▶' : '▼'}</span>
+            </div>
+            ${presetsCollapsed ? '' : `<div class="ge-palette-group-body">
+                ${filteredPresets.map((p) => {
+                    const def = ge.nodeDefsByType[p.nodeType];
+                    const color = def?.color || 'var(--accent)';
+                    const sourceLabel = p.source && p.source.startsWith('library:')
+                        ? p.source.slice('library:'.length)
+                        : 'custom';
+                    return `
+                        <div class="ge-palette-item ge-palette-preset" draggable="true"
+                            title="${esc(p.description || p.name)} — drops an ${esc(p.nodeType)} with this config"
+                            ondragstart="onPalettePresetDragStart(event, '${jsEsc(p.id)}')"
+                            onclick="addPresetOfId('${jsEsc(p.id)}')"
+                            style="--node-color:${esc(color)}">
+                            <span class="ge-palette-icon">${esc(p.icon || (def && def.icon) || '⚙️')}</span>
+                            <div class="ge-palette-meta">
+                                <div class="ge-palette-title">${esc(p.name)}</div>
+                                <div class="ge-palette-desc"><code style="font-size:10px">${esc(p.nodeType)}</code> · ${esc(sourceLabel)}</div>
+                            </div>
+                        </div>`;
+                }).join('')}
+            </div>`}
+        </div>`;
+
     el.innerHTML = `
         <div class="ge-palette-header">
             <input class="ge-palette-search" placeholder="Search nodes…" value="${esc(ge.palette.search)}"
                 oninput="ge.palette.search = this.value; renderPalette()">
         </div>
         <div class="ge-palette-body">
+            ${presetsBlock}
             ${groupNames.map((g) => {
                 const collapsed = ge.palette.collapsedGroups[g];
                 return `
@@ -612,7 +657,7 @@ function renderPalette() {
             }).join('')}
         </div>
         <div class="ge-palette-footer">
-            <div>${ge.nodeDefsList.length} node types</div>
+            <div>${ge.nodeDefsList.length} node types · ${presetsAll.length} preset${presetsAll.length === 1 ? '' : 's'}</div>
             <div style="font-size:10px;color:var(--text-muted);margin-top:4px">Drag onto canvas, or click to add at center</div>
         </div>
     `;
@@ -626,6 +671,36 @@ window.togglePaletteGroup = function (g) {
 window.onPaletteDragStart = function (e, type) {
     e.dataTransfer.setData('application/x-sokuza-node', type);
     e.dataTransfer.effectAllowed = 'copy';
+};
+
+// Drag a preset: carry the preset id through the drop-event payload so
+// the canvas drop handler can resolve it back to a (nodeType, config)
+// pair and stamp out a pre-configured node.
+window.onPalettePresetDragStart = function (e, presetId) {
+    e.dataTransfer.setData('application/x-sokuza-preset', presetId);
+    e.dataTransfer.effectAllowed = 'copy';
+};
+
+// Click-to-add a preset at canvas center. Wraps `addNodeOfType` with a
+// post-creation config merge — keeps a single insertion code path for
+// nodes (so trigger setup, id allocation, etc. stay identical).
+window.addPresetOfId = function (presetId, position) {
+    const preset = (ge.presets || []).find((p) => p.id === presetId);
+    if (!preset) return;
+    const def = ge.nodeDefsByType[preset.nodeType];
+    if (!def) {
+        toast(`Preset "${preset.name}" references unknown node type "${preset.nodeType}"`, 'error');
+        return;
+    }
+    addNodeOfType(preset.nodeType, position);
+    // The new node is selected — apply the preset config on top.
+    const node = ge.workflow.graph.nodes.find((n) => n.id === ge.selectedNodeId);
+    if (node) {
+        node.config = { ...(node.config || {}), ...preset.config };
+        renderCanvas();
+        renderInspector();
+        updateYamlPanel();
+    }
 };
 
 // ─── Canvas (nodes + edges) ────────────────────────────────────────────────
@@ -1651,18 +1726,23 @@ function bindCanvasInteractions() {
     });
 
     wrap.addEventListener('dragover', (e) => {
-        if (e.dataTransfer.types.includes('application/x-sokuza-node')) {
+        if (e.dataTransfer.types.includes('application/x-sokuza-node')
+            || e.dataTransfer.types.includes('application/x-sokuza-preset')) {
             e.preventDefault();
             e.dataTransfer.dropEffect = 'copy';
         }
     });
     wrap.addEventListener('drop', (e) => {
         const type = e.dataTransfer.getData('application/x-sokuza-node');
-        if (!type) return;
+        const presetId = e.dataTransfer.getData('application/x-sokuza-preset');
+        if (!type && !presetId) return;
         e.preventDefault();
-        const wr = wrap.getBoundingClientRect();
         const pos = screenToCanvas(e.clientX - 80, e.clientY - 40);
-        addNodeOfType(type, pos);
+        if (presetId) {
+            addPresetOfId(presetId, pos);
+        } else {
+            addNodeOfType(type, pos);
+        }
     });
 
     document.addEventListener('mousemove', onDocMouseMove);
@@ -1931,6 +2011,7 @@ window.saveGraphWorkflow = async function () {
             // with the library item id so the catalog badge flips to
             // "Installed" and Uninstall can find it later.
             if (ge.libraryItemId) payload._libraryItem = ge.libraryItemId;
+            const savedFromLibrary = !!ge.libraryItemId;
             await api.post('/api/workflows', payload);
             toast(`Created "${wf.name}"`);
             ge.isNew = false;
@@ -1943,6 +2024,16 @@ window.saveGraphWorkflow = async function () {
                 catch { /* best-effort */ }
             }
             ge.libraryItemId = null;
+            // Server auto-extracts presets on library install — refresh
+            // the cached list so they appear in the palette without
+            // requiring an editor reopen.
+            if (savedFromLibrary) {
+                try {
+                    const r = await api.get('/api/node-presets');
+                    ge.presets = Array.isArray(r.presets) ? r.presets : [];
+                    renderPalette();
+                } catch { /* presets refresh is non-fatal */ }
+            }
         } else {
             await api.put(`/api/workflows/${encodeURIComponent(ge.originalName)}`, payload);
             toast(`Saved "${wf.name}"`);
