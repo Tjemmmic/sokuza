@@ -307,6 +307,13 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
             return reply.status(409).send({ error: `Workflow "${workflow.name}" already exists` });
         }
 
+        // Bring the engine's in-memory config into sync with the freshly-
+        // written YAML. Without this, `GET /:name/details` (which reads
+        // from `getConfig()`, not the raw YAML) would 404 on the workflow
+        // the dashboard just created — making installed/duplicated
+        // workflows un-editable until the next reload.
+        await deps.reloadConfig();
+
         logger.info({ workflow: workflow.name }, 'Workflow created via dashboard');
         return { ok: true, workflow };
     });
@@ -328,6 +335,8 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
             return reply.status(404).send({ error: `Workflow "${name}" not found` });
         }
 
+        await deps.reloadConfig();
+
         logger.info({ workflow: name }, 'Workflow updated via dashboard');
         return { ok: true, workflow: result.workflow };
     });
@@ -346,6 +355,8 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
         if (!found) {
             return reply.status(404).send({ error: `Workflow "${name}" not found` });
         }
+
+        await deps.reloadConfig();
 
         logger.info({ workflow: name }, 'Workflow deleted via dashboard');
         return { ok: true };
