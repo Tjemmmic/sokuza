@@ -39,6 +39,7 @@ import { resetTemplateCache } from './templates.js';
 import { LogStore } from './log-store.js';
 import { ChatStore } from './chat-store.js';
 import { WorkdirManager } from './workdir-store.js';
+import { PresetStore } from './preset-store.js';
 import pretty from 'pino-pretty';
 
 const MAX_RECENT_EVENTS = 100;
@@ -75,6 +76,7 @@ export class SokuzaEngine {
     private logStore: LogStore;
     private chatStore: ChatStore;
     private workdirManager: WorkdirManager;
+    private presetStore: PresetStore;
 
     constructor(config: SokuzaConfig, configPath?: string) {
         this.config = config;
@@ -101,6 +103,11 @@ export class SokuzaEngine {
         // via SOKUZA_WORKDIR_ROOT. Constructed before setExecutor so the
         // address-review action receives a live manager via ActionContext.
         this.workdirManager = new WorkdirManager(this.logger);
+        // Per-user node presets. Library installs auto-extract AI-node
+        // configs into this store so the user can drop a pre-prompted
+        // version of an `ai.agent` onto the canvas; uninstalls
+        // auto-clean the corresponding presets.
+        this.presetStore = new PresetStore(this.logger);
         this.queue.setExecutor(this.createJobExecutor(), {
             integrationConfigs: config.integrations,
             ai: config.ai,
@@ -117,6 +124,11 @@ export class SokuzaEngine {
     /** Accessor for the workdir manager (API handlers, address-review action). */
     getWorkdirManager(): WorkdirManager {
         return this.workdirManager;
+    }
+
+    /** Accessor for the per-user node preset store. */
+    getPresetStore(): PresetStore {
+        return this.presetStore;
     }
 
     /** Register an integration plugin and its actions */
@@ -566,6 +578,7 @@ export class SokuzaEngine {
             getEngine: () => this,
             getChatStore: () => this.chatStore,
             getWorkdirManager: () => this.workdirManager,
+            getPresetStore: () => this.presetStore,
         });
 
         for (const integration of this.integrations.values()) {

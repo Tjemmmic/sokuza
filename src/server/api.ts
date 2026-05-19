@@ -41,6 +41,9 @@ interface ApiDeps {
     getChatStore: () => import('../core/chat-store.js').ChatStore;
     /** Persistent per-PR git workdir manager for the address-review action. */
     getWorkdirManager: () => import('../core/workdir-store.js').WorkdirManager;
+    /** Per-user node preset store — populated by library installs and
+     *  surfaced as a "Presets" group in the editor's node palette. */
+    getPresetStore: () => import('../core/preset-store.js').PresetStore;
 }
 
 function sanitizeFileName(name: string): string {
@@ -314,6 +317,32 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
         // workflows un-editable until the next reload.
         await deps.reloadConfig();
 
+        // Library install hook: when the dashboard tags a workflow with
+        // `_libraryItem` it means "this workflow comes from a library
+        // template". Walk that template's graph and replace any presets
+        // we previously extracted for it with a fresh set — silent
+        // auto-extraction so the security-audit prompt the template
+        // author wrote becomes a drop-in palette node on next editor
+        // open. Best-effort: a failure here logs but doesn't fail the
+        // install (presets are a discoverability nicety, not core).
+        const libraryItem = typeof workflow._libraryItem === 'string' ? workflow._libraryItem : null;
+        const templateName = typeof workflow.template === 'string' ? workflow.template : null;
+        if (libraryItem && templateName) {
+            try {
+                const { loadTemplates } = await import('../core/templates.js');
+                const { extractPresetsFromTemplate } = await import('../core/preset-store.js');
+                const templates = await loadTemplates(deps.getTemplateDir());
+                const tmpl = templates[templateName];
+                if (tmpl?.graph) {
+                    const presets = extractPresetsFromTemplate(templateName, tmpl.graph, {});
+                    await deps.getPresetStore().replaceBySource(`library:${libraryItem}`, presets);
+                    logger.info({ workflow: workflow.name, libraryItem, count: presets.length }, 'Extracted node presets from library template');
+                }
+            } catch (err) {
+                logger.warn({ err, workflow: workflow.name, libraryItem }, 'Failed to extract presets from library template');
+            }
+        }
+
         logger.info({ workflow: workflow.name }, 'Workflow created via dashboard');
         return { ok: true, workflow };
     });
@@ -344,10 +373,19 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
     server.delete('/api/workflows/:name', async (request, reply) => {
         const { name } = request.params as { name: string };
 
+        // Capture the workflow's library origin BEFORE deletion so we
+        // can cascade cleanup (deck + presets) afterwards. Without
+        // this, manually deleting an installed workflow via the
+        // workflows page would leave the library badge stuck on
+        // "Installed" with no workflow behind it — and the auto-
+        // extracted presets stranded with nothing to drop them onto.
+        let libraryItem: string | null = null;
         const found = await deps.configStore.updateRaw((config) => {
             const workflows = ((config.workflows as unknown[]) ?? []) as Record<string, unknown>[];
+            const target = workflows.find((w) => w.name === name);
+            if (!target) return false;
+            if (typeof target._libraryItem === 'string') libraryItem = target._libraryItem;
             const filtered = workflows.filter((w) => w.name !== name);
-            if (filtered.length === workflows.length) return false;
             config.workflows = filtered;
             return true;
         });
@@ -357,6 +395,27 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
         }
 
         await deps.reloadConfig();
+
+        if (libraryItem) {
+            // Remove the orphaned deck entry so the library card flips
+            // back to "Install" instead of getting stuck on "Installed".
+            try {
+                await deps.configStore.updateRaw((config) => {
+                    const deck = ((config.deck as string[]) ?? []).filter((d) => d !== libraryItem);
+                    config.deck = deck;
+                    return deck;
+                });
+            } catch (err) {
+                logger.warn({ err, libraryItem }, 'Failed to clean deck entry after workflow delete');
+            }
+            // Drop any presets that came from this library template.
+            try {
+                const removed = await deps.getPresetStore().deleteBySource(`library:${libraryItem}`);
+                if (removed > 0) logger.info({ libraryItem, removed }, 'Removed library-extracted presets on workflow delete');
+            } catch (err) {
+                logger.warn({ err, libraryItem }, 'Failed to clean presets after workflow delete');
+            }
+        }
 
         logger.info({ workflow: name }, 'Workflow deleted via dashboard');
         return { ok: true };
@@ -770,6 +829,52 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
     server.get('/api/nodes', async () => {
         const { getNodeRegistry } = await import('../core/nodes/registry.js');
         return { nodes: getNodeRegistry().serialize() };
+    });
+
+    // ─── Node Presets ───────────────────────────────────────────────────
+    //
+    // Per-user preset store. Library installs auto-populate
+    // `source: library:<id>` entries; the editor can also POST a
+    // `source: user` preset when the user saves a configured node from
+    // the inspector. The dashboard fetches the whole list on editor
+    // open and slots them into the palette alongside built-in nodes.
+
+    server.get('/api/node-presets', async () => {
+        const presets = await deps.getPresetStore().list();
+        return { presets };
+    });
+
+    server.post('/api/node-presets', async (request, reply) => {
+        const body = (request.body ?? {}) as Record<string, unknown>;
+        if (typeof body.name !== 'string' || !body.name.trim()) {
+            return reply.status(400).send({ error: 'name is required' });
+        }
+        if (typeof body.nodeType !== 'string' || !body.nodeType.trim()) {
+            return reply.status(400).send({ error: 'nodeType is required' });
+        }
+        const config = body.config && typeof body.config === 'object' && !Array.isArray(body.config)
+            ? body.config as Record<string, unknown>
+            : {};
+        const preset = await deps.getPresetStore().create({
+            name: body.name.trim(),
+            description: typeof body.description === 'string' ? body.description : undefined,
+            icon: typeof body.icon === 'string' ? body.icon : undefined,
+            nodeType: body.nodeType.trim(),
+            config,
+            // Manually-created presets are always tagged `user` to keep
+            // them out of the library cascade cleanup. The library
+            // import path uses `replaceBySource` directly and never
+            // hits this endpoint.
+            source: 'user',
+        });
+        return { ok: true, preset };
+    });
+
+    server.delete('/api/node-presets/:id', async (request, reply) => {
+        const { id } = request.params as { id: string };
+        const removed = await deps.getPresetStore().deleteOne(id);
+        if (!removed) return reply.status(404).send({ error: `Preset "${id}" not found` });
+        return { ok: true };
     });
 
     // ─── System: autostart service + updates ────────────────────────────
