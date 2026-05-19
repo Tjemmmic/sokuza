@@ -14,6 +14,14 @@ const MAX_TIMEOUT_S = 6 * 60 * 60; // 6h hard ceiling so a typo can't run foreve
 // halve wall-clock time for large CI matrices.
 
 const FAILED_CONCLUSIONS = new Set(['failure', 'timed_out', 'cancelled', 'action_required', 'stale']);
+// Tolerate up to N back-to-back API failures before giving up. GitHub's
+// status endpoints are flaky enough (transient 5xx, brief 401 during
+// token rotation, occasional connection resets) that a single failed
+// request shouldn't tank an otherwise-healthy 10-minute poll. After this
+// many consecutive failures we propagate the last error so a real
+// problem (404 SHA, bad token, sustained outage) doesn't silently spin
+// until timeout.
+const MAX_CONSECUTIVE_POLL_ERRORS = 3;
 
 /**
  * "github-wait-for-checks" — poll commit checks (both Checks API
@@ -51,6 +59,7 @@ export const githubWaitForChecksAction: ActionHandler = async (params, context) 
     // Log only when the snapshot meaningfully changes — keeps the log
     // from drowning at default 15s/40-poll-cap settings.
     let lastLoggedKey = '';
+    let consecutiveErrors = 0;
 
     while (Date.now() < deadline) {
         // Honour aborts before each poll so a workflow cancelled mid-sleep
@@ -58,7 +67,26 @@ export const githubWaitForChecksAction: ActionHandler = async (params, context) 
         // outer abort race unblocks the await, but the action itself keeps
         // running unless we bail here too.
         if (context.signal?.aborted) throw new Error('Workflow aborted');
-        const snapshot = await pollOnce(client, target.owner, target.repo, sha);
+        let snapshot: CheckSnapshot;
+        try {
+            snapshot = await pollOnce(client, target.owner, target.repo, sha);
+            consecutiveErrors = 0;
+        } catch (err) {
+            consecutiveErrors++;
+            if (consecutiveErrors >= MAX_CONSECUTIVE_POLL_ERRORS) {
+                context.logger.error(
+                    { err, sha, consecutiveErrors },
+                    'github-wait-for-checks: aborting after consecutive poll failures',
+                );
+                throw err;
+            }
+            context.logger.warn(
+                { err, sha, consecutiveErrors },
+                'github-wait-for-checks: transient API error, will retry',
+            );
+            await sleep(intervalSec * 1000, context.signal);
+            continue;
+        }
         lastSnapshot = snapshot;
 
         if (snapshot.pending === 0 && snapshot.state !== 'pending') {

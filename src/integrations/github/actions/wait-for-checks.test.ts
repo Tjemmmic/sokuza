@@ -301,6 +301,88 @@ describe('github-wait-for-checks', () => {
         expect(spy).not.toHaveBeenCalled();
     });
 
+    // ── transient API tolerance: a single failed request mid-poll must
+    // not tank an otherwise-healthy multi-minute wait. We tolerate up to
+    // MAX_CONSECUTIVE_POLL_ERRORS (3) consecutive failures, after which
+    // a sustained outage propagates so the caller sees the real error.
+    it('tolerates a transient API failure and recovers on the next poll', async () => {
+        // First poll: check-runs throws (e.g. transient 502). Second poll
+        // succeeds. The action must NOT propagate the first failure.
+        let pollCount = 0;
+        vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+            const url = typeof input === 'string' ? input : (input as URL).toString();
+            if (url.includes('/check-runs')) {
+                pollCount++;
+                if (pollCount === 1) return new Response('bad gateway', { status: 502 });
+                return new Response(JSON.stringify({ check_runs: [{ name: 'lint', status: 'completed', conclusion: 'success' }], total_count: 1 }), { status: 200 });
+            }
+            // /status — always succeeds; on the failing poll Promise.all
+            // rejects on the check-runs side and the combined-status
+            // result is discarded.
+            return new Response(JSON.stringify({ state: 'success', statuses: [] }), { status: 200 });
+        });
+        const promise = githubWaitForChecksAction({ sha: 'abc', interval: 1, timeout: 60 }, makeContext());
+        await vi.runAllTimersAsync();
+        const result = await promise;
+        expect(result.success).toBe(true);
+        expect(result.totalChecks).toBe(1);
+    });
+
+    it('propagates the error after MAX_CONSECUTIVE_POLL_ERRORS=3 consecutive failures', async () => {
+        // Every check-runs call fails. The action gives up on the third
+        // strike and surfaces the API error — not a "timedOut".
+        vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+            const url = typeof input === 'string' ? input : (input as URL).toString();
+            if (url.includes('/check-runs')) {
+                return new Response('internal error', { status: 500 });
+            }
+            return new Response(JSON.stringify({ state: 'success', statuses: [] }), { status: 200 });
+        });
+        // Register the rejection handler BEFORE advancing fake timers so
+        // the rejection emitted by Promise.all isn't classified as
+        // "asynchronously handled" by Node's microtask scheduler. Without
+        // this, vitest's unhandled-rejection probe fires on a perfectly
+        // legitimate transient error.
+        const expectation = expect(
+            githubWaitForChecksAction({ sha: 'abc', interval: 1, timeout: 600 }, makeContext()),
+        ).rejects.toThrow(/GitHub API error listing check-runs/);
+        await vi.runAllTimersAsync();
+        await expectation;
+    });
+
+    it('resets the consecutive-error counter after a successful poll', async () => {
+        // 2 failures, then a success (with checks still in_progress so the
+        // loop continues), then 2 more failures, then a success. The
+        // action must NOT have given up — the success between the two
+        // failure runs resets the counter.
+        let i = 0;
+        const seq: Array<{ ok: boolean; checks?: Array<Record<string, unknown>>; statusState?: string }> = [
+            { ok: false },
+            { ok: false },
+            { ok: true, checks: [{ name: 'lint', status: 'in_progress' }], statusState: 'pending' },
+            { ok: false },
+            { ok: false },
+            { ok: true, checks: [{ name: 'lint', status: 'completed', conclusion: 'success' }], statusState: 'success' },
+        ];
+        vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+            const url = typeof input === 'string' ? input : (input as URL).toString();
+            const stage = seq[Math.min(i, seq.length - 1)];
+            if (url.includes('/check-runs')) {
+                if (!stage.ok) return new Response('bad gateway', { status: 502 });
+                return new Response(JSON.stringify({ check_runs: stage.checks ?? [], total_count: stage.checks?.length ?? 0 }), { status: 200 });
+            }
+            // Advance the stage cursor on the combined-status leg so the
+            // two parallel calls share a stage.
+            i++;
+            if (!stage.ok) return new Response('bad gateway', { status: 502 });
+            return new Response(JSON.stringify({ state: stage.statusState ?? 'success', statuses: [] }), { status: 200 });
+        });
+        const promise = githubWaitForChecksAction({ sha: 'abc', interval: 1, timeout: 600 }, makeContext());
+        await vi.runAllTimersAsync();
+        const result = await promise;
+        expect(result.success).toBe(true);
+    });
+
     it('issues check-runs and combined-status in parallel (H5 — halves wall time)', async () => {
         // Verify both calls dispatch before either resolves: track call order.
         const startedAt: number[] = [];
