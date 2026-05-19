@@ -99,4 +99,20 @@ describe('githubCommentAction owner/repo resolution', () => {
             githubCommentAction({ body: 'hi' }, ctx()),
         ).rejects.toThrow(/could not resolve/);
     });
+
+    // Reproduces the user-reported 404 chain: the manual-pr-review
+    // recipe wired `trigger.pr` (a full PR object) into `post.pr_number`
+    // (which expects a scalar number). Before the coercion guard in
+    // `_target.ts`, the action passed the object through and GitHub
+    // 404'd on `/issues/[object Object]/comments`. After the guard the
+    // PR object is skipped and the metadata-fallback number wins.
+    it('falls back to event-metadata prNumber when pr_number is wired as a PR object (bad recipe path)', async () => {
+        await githubCommentAction(
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            { repo: 'Tjemmmic/meikai', pr_number: { number: 6, title: 'fix' } as any, body: 'hi' },
+            ctx({ metadata: { prNumber: 6, repo: 'Tjemmmic/meikai', owner: 'Tjemmmic', repoName: 'meikai' } }),
+        );
+        // The PR object was rejected; metadata.prNumber=6 won.
+        expect(mockCreateComment).toHaveBeenCalledWith('Tjemmmic', 'meikai', 6, 'hi');
+    });
 });

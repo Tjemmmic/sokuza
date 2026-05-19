@@ -106,26 +106,37 @@ const BUILTIN_RECIPES = [
         title: 'Manual PR Review',
         icon: '🎮',
         tagline: 'Pick a PR from the dashboard and run an AI review on it',
-        bullets: ['1 manual input (the PR)', 'Fetch its diff', 'AI Code Review', 'Post the review as a PR comment'],
+        bullets: ['1 manual input (the PR)', 'Decompose into scalars', 'Fetch diff', 'AI Code Review', 'Post comment'],
         build: () => ({
             name: 'manual-pr-review',
             description: 'Run an AI review on demand against any PR',
             enabled: true,
             graph: {
+                // The github-pr picker emits the *whole PR object* on
+                // `trigger.pr`, not a number — wiring it directly to ports
+                // that expect a number (fetch_diff.pr_number, post.pr_number)
+                // produced "[object Object]" in URL paths and a 404 from
+                // GitHub. The data.pr-fields node decomposes the object into
+                // scalar `number`/`repo`/`branch` ports for downstream
+                // actions to wire from cleanly.
                 nodes: [
                     { id: 'trigger', type: 'trigger.manual', position: { x: 60, y: 160 },
                       config: { inputs: [{ name: 'pr', label: 'Pull Request', type: 'github-pr', required: true }] } },
-                    { id: 'fetch_diff', type: 'github.fetch-diff', position: { x: 380, y: 160 },
-                      config: {} },
-                    { id: 'review', type: 'ai.review', position: { x: 720, y: 160 }, config: {} },
-                    { id: 'post', type: 'github.comment', position: { x: 1060, y: 160 },
+                    { id: 'pr_fields', type: 'data.pr-fields', position: { x: 360, y: 160 }, config: {} },
+                    { id: 'fetch_diff', type: 'github.fetch-diff', position: { x: 680, y: 160 }, config: {} },
+                    { id: 'review', type: 'ai.review', position: { x: 1000, y: 160 }, config: {} },
+                    { id: 'post', type: 'github.comment', position: { x: 1340, y: 160 },
                       config: { body: '{{nodes.review.markdown}}' } },
                 ],
                 edges: [
-                    { id: 'e1', from: { node: 'trigger', port: 'pr' }, to: { node: 'fetch_diff', port: 'pr_number' } },
-                    { id: 'e2', from: { node: 'fetch_diff', port: 'diff' }, to: { node: 'review', port: 'diff' } },
-                    { id: 'e3', from: { node: 'trigger', port: 'pr' }, to: { node: 'review', port: 'pr_number' } },
-                    { id: 'e4', from: { node: 'trigger', port: 'pr' }, to: { node: 'post', port: 'pr_number' } },
+                    { id: 'e1', from: { node: 'trigger', port: 'pr' }, to: { node: 'pr_fields', port: 'pr' } },
+                    { id: 'e2', from: { node: 'pr_fields', port: 'number' }, to: { node: 'fetch_diff', port: 'pr_number' } },
+                    { id: 'e3', from: { node: 'pr_fields', port: 'repo' }, to: { node: 'fetch_diff', port: 'repo' } },
+                    { id: 'e4', from: { node: 'fetch_diff', port: 'diff' }, to: { node: 'review', port: 'diff' } },
+                    { id: 'e5', from: { node: 'pr_fields', port: 'number' }, to: { node: 'review', port: 'pr_number' } },
+                    { id: 'e6', from: { node: 'pr_fields', port: 'repo' }, to: { node: 'review', port: 'repo' } },
+                    { id: 'e7', from: { node: 'pr_fields', port: 'number' }, to: { node: 'post', port: 'pr_number' } },
+                    { id: 'e8', from: { node: 'pr_fields', port: 'repo' }, to: { node: 'post', port: 'repo' } },
                 ],
             },
         }),

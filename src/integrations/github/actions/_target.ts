@@ -51,6 +51,26 @@ export function requireToken(params: Params, context: ActionContext, callerName:
  * have exactly two non-empty segments — callers should treat that as "not
  * supplied" so the next link of the precedence chain wins.
  */
+/**
+ * Coerce a candidate value to a positive integer issue / PR number.
+ * Accepts:
+ *   - finite positive numbers
+ *   - strings that parse to a finite positive integer (covers
+ *     template-interpolated values like `"6"` from
+ *     `{{event.payload.number}}`)
+ * Rejects everything else (objects, arrays, booleans, NaN, ≤0) by
+ * returning undefined — letting the next candidate in the firstNonEmpty
+ * chain win.
+ */
+function coerceIssueNumber(raw: unknown): number | undefined {
+    if (typeof raw === 'number' && Number.isFinite(raw) && raw > 0) return raw;
+    if (typeof raw === 'string' && raw.length > 0) {
+        const n = Number(raw);
+        if (Number.isFinite(n) && n > 0 && Number.isInteger(n)) return n;
+    }
+    return undefined;
+}
+
 function splitRepo(raw: string | undefined): { owner: string; repo: string } | undefined {
     if (!raw) return undefined;
     const parts = raw.split('/');
@@ -92,14 +112,22 @@ export function resolveRepoTarget(params: Params, context: ActionContext, caller
         metaRepoSplit?.repo,
     );
 
+    // Coerce each candidate to a positive integer; non-numeric values
+    // (most commonly: a full PR object wired into a number port via a
+    // bad recipe like `trigger.pr → post.pr_number`) collapse to
+    // undefined so the next candidate gets a chance. Without this,
+    // firstNonEmpty would happily return the PR object, then the
+    // action would format it as `[object Object]` in the URL path and
+    // GitHub would 404 — the symptom the user kept hitting after the
+    // owner/repo migration.
     const number = firstNonEmpty(
-        params.number as number | undefined,
-        params.pr_number as number | undefined,
-        params.issue_number as number | undefined,
-        meta.prNumber as number | undefined,
-        meta.issueNumber as number | undefined,
-        typeof pr?.number === 'number' ? pr.number : undefined,
-        typeof issue?.number === 'number' ? issue.number : undefined,
+        coerceIssueNumber(params.number),
+        coerceIssueNumber(params.pr_number),
+        coerceIssueNumber(params.issue_number),
+        coerceIssueNumber(meta.prNumber),
+        coerceIssueNumber(meta.issueNumber),
+        coerceIssueNumber(pr?.number),
+        coerceIssueNumber(issue?.number),
     );
 
     // Only complain about a malformed params.repo when *no* other source

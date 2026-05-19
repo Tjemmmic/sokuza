@@ -180,3 +180,73 @@ describe('requireToken — precedence chain', () => {
         }
     });
 });
+
+// The user's actual failure mode: the manual-pr-review recipe wired
+// `trigger.pr → post.pr_number`, but `trigger.pr` outputs the whole PR
+// object. Without coercion, firstNonEmpty returned the object as the
+// "number", the action passed it to `createComment(..., target.number, ...)`,
+// the URL template interpolated `[object Object]`, and GitHub 404'd. The
+// shared resolver now rejects non-numeric values so the next candidate
+// (event metadata.prNumber, payload.pr.number) gets a chance.
+
+describe('resolveRepoTarget — number coercion', () => {
+    it('rejects a PR object wired into pr_number and falls through to event metadata', () => {
+        const prObject = { number: 6, repo: 'Tjemmmic/meikai', title: 'fix: x' };
+        const result = resolveRepoTarget(
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            { repo: 'Tjemmmic/meikai', pr_number: prObject as any },
+            ctx({ metadata: { prNumber: 6 } }),
+            'test',
+        );
+        expect(result.number).toBe(6);
+        expect(typeof result.number).toBe('number');
+    });
+
+    it('rejects an arbitrary string in pr_number ("6 hello") and falls through', () => {
+        const result = resolveRepoTarget(
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            { repo: 'octo/r', pr_number: '6 hello' as any },
+            ctx({ metadata: { prNumber: 42 } }),
+            'test',
+        );
+        expect(result.number).toBe(42);
+    });
+
+    it('accepts a stringified integer (template interpolation often yields strings)', () => {
+        const result = resolveRepoTarget(
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            { repo: 'octo/r', pr_number: '12' as any },
+            ctx(),
+            'test',
+        );
+        expect(result.number).toBe(12);
+    });
+
+    it('rejects a negative or zero pr_number even when typed as a number', () => {
+        const result = resolveRepoTarget(
+            { repo: 'octo/r', pr_number: -1 },
+            ctx({ metadata: { prNumber: 7 } }),
+            'test',
+        );
+        expect(result.number).toBe(7);
+    });
+
+    it('throws the friendly "could not resolve PR/issue number" when every candidate is non-numeric', () => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const prObject = { number: 6 } as any;
+        expect(() => resolveRepoTarget(
+            { repo: 'octo/r', pr_number: prObject },
+            ctx(),
+            'test',
+        )).toThrow(/could not resolve PR\/issue number/);
+    });
+
+    it('extracts payload.pull_request.number when no params or metadata supply one', () => {
+        const result = resolveRepoTarget(
+            { repo: 'octo/r' },
+            ctx({ payload: { pull_request: { number: 99 } } }),
+            'test',
+        );
+        expect(result.number).toBe(99);
+    });
+});
