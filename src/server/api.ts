@@ -213,7 +213,15 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
     server.get('/api/config', async () => {
         const raw = await deps.configStore.readRaw();
         const parsed = yaml.load(raw) as Record<string, unknown>;
-        return { config: parsed };
+        // `raw` is the source of truth for the Settings page editor —
+        // the dashboard used to call its own hand-rolled YAML serializer
+        // on `parsed`, which flattened nested object values inside array
+        // items to one indent level (turning `trigger:\n  source: x`
+        // into `trigger:\n  source: x` at the wrong column, eventually
+        // corrupting workflows[].graph.nodes[].config and producing
+        // duplicate-mapping-key errors on the next reload). Returning
+        // the raw text lets the editor show exactly what's on disk.
+        return { config: parsed, raw };
     });
 
     server.put('/api/config', async (request, reply) => {
@@ -230,7 +238,14 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
                 return reply.status(400).send({ error: 'Missing config in body' });
             }
         } catch (e: any) {
-            if (e.message?.includes('YAML')) {
+            // js-yaml throws `YAMLException` with messages like "duplicated
+            // mapping key" or "bad indentation" that don't contain the
+            // word "YAML" — checking the constructor name catches every
+            // parse failure without false-positive on unrelated runtime
+            // errors (disk full, EACCES, etc.) which should propagate
+            // as 500.
+            const isYamlError = e?.name === 'YAMLException' || e?.message?.includes('YAML');
+            if (isYamlError) {
                 return reply.status(400).send({ error: `Invalid YAML: ${e.message}` });
             }
             throw e;

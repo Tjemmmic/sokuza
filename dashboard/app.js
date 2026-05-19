@@ -6017,7 +6017,13 @@ window.systemRunUpdate = async function () {
 // ═════════════════════════════════════════════════════════════════════════════
 async function renderSettings(el) {
     const data = await api.get('/api/config');
-    const configYaml = typeof data.config === 'string' ? data.config : toYaml(data.config);
+    // Use the server's raw YAML directly — re-serializing parsed-then-dumped
+    // YAML on the client is what corrupted configs in the past (the
+    // hand-rolled `toYaml` flattened nested keys inside array items to a
+    // single indent level, which `yaml.load` accepted silently until a
+    // duplicate-key collision made the whole file unparseable).
+    const configYaml = data.raw
+        ?? (typeof data.config === 'string' ? data.config : '# Failed to read config\n');
 
     el.innerHTML = `
         <div class="page-header">
@@ -6084,31 +6090,6 @@ async function renderSettings(el) {
             editor.selectionStart = editor.selectionEnd = start + 2;
         }
     });
-}
-
-function toYaml(obj, indent = 0) {
-    const pad = '  '.repeat(indent);
-    let out = '';
-    for (const [k, v] of Object.entries(obj)) {
-        if (v === null || v === undefined) continue;
-        if (Array.isArray(v)) {
-            out += `${pad}${k}:\n`;
-            for (const item of v) {
-                if (typeof item === 'object') {
-                    const lines = toYaml(item, indent + 2).split('\n').filter(Boolean);
-                    out += `${pad}  - ${lines[0].trim()}\n`;
-                    for (let i = 1; i < lines.length; i++) out += `${pad}    ${lines[i].trim()}\n`;
-                } else {
-                    out += `${pad}  - ${item}\n`;
-                }
-            }
-        } else if (typeof v === 'object') {
-            out += `${pad}${k}:\n${toYaml(v, indent + 1)}`;
-        } else {
-            out += `${pad}${k}: ${v}\n`;
-        }
-    }
-    return out;
 }
 
 window.saveConfig = async function () {
