@@ -117,6 +117,66 @@ describe('aiReviewAction', () => {
         expect(result.review).toContain('looks good overall');
     });
 
+    // The ai.review node (core/nodes/builtins.ts) advertises six output
+    // ports: markdown, structured, summary, issues, mergeReady, runId.
+    // The action's return object must produce ALL of them, otherwise a
+    // graph wire like `{{nodes.review.summary}}` silently resolves to
+    // undefined and downstream actions (github.comment with `body`
+    // required) fail with confusing errors. Pin every port name.
+    it('returns every output port the ai.review node declares', async () => {
+        process.env.ANTHROPIC_API_KEY = 'test-key';
+        // Force a parseable structured JSON response so the derived
+        // ports (summary/issues/mergeReady) populate.
+        mockCreate.mockResolvedValueOnce({
+            content: [{ type: 'text', text: JSON.stringify({
+                summary: 'Looks fine, no issues',
+                issues: [],
+                decision: 'APPROVE',
+                justification: 'No problems found',
+            }) }],
+            model: 'claude-sonnet-4-6',
+            usage: { input_tokens: 100, output_tokens: 20 },
+        });
+        const context = makeContext({
+            ai: loadAIProviders(undefined),
+            steps: { fetch_diff: { diff: '+a\n-b' } },
+        });
+        const result = (await aiReviewAction({}, context)) as Record<string, unknown>;
+        expect(typeof result.markdown).toBe('string');
+        expect(result.markdown).toBeTruthy();
+        expect(typeof result.runId).toBe('string');
+        expect(result.summary).toBe('Looks fine, no issues');
+        expect(Array.isArray(result.issues)).toBe(true);
+        expect(result.mergeReady).toBe(true);
+        expect(result.structured).toMatchObject({ decision: 'APPROVE' });
+    });
+
+    it('returns markdown + undefined structured ports when the response is unparseable', async () => {
+        process.env.ANTHROPIC_API_KEY = 'test-key';
+        // Unparseable response — repair loop will exhaust and the action
+        // still returns. The graph contract demands `markdown` is always
+        // populated even when structured parsing failed; the derived
+        // ports may be undefined.
+        mockCreate.mockResolvedValue({
+            content: [{ type: 'text', text: 'just some prose, no JSON' }],
+            model: 'claude-sonnet-4-6',
+            usage: { input_tokens: 10, output_tokens: 5 },
+        });
+        const context = makeContext({
+            ai: loadAIProviders(undefined),
+            steps: { fetch_diff: { diff: '+a' } },
+        });
+        const result = (await aiReviewAction({ parse_repair_retries: 0 }, context)) as Record<string, unknown>;
+        expect(typeof result.markdown).toBe('string');
+        expect(result.markdown).toBeTruthy();
+        // Parsing failed → these collapse to undefined, which is the
+        // documented behavior. The contract is "the port name exists";
+        // value semantics are up to the caller to handle.
+        expect(result.structured).toBeUndefined();
+        expect(result.summary).toBeUndefined();
+        expect(result.mergeReady).toBeUndefined();
+    });
+
     it('should accept legacy "api" provider alias', async () => {
         process.env.ANTHROPIC_API_KEY = 'test-key';
         const context = makeContext({

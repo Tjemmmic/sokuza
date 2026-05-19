@@ -364,6 +364,21 @@ export const aiReviewAction: ActionHandler = async (params, context) => {
                 finalChars: truncation.finalChars,
             }
             : undefined,
+        // ─── Output ports the ai.review node declares ──────────────────
+        // `actionNode` spreads this return object onto the node's outputs
+        // (see wrapResult in core/nodes/builtins.ts). The graph editor's
+        // node definition advertises these specific port names; if any
+        // are missing, wires from `review.<port>` resolve to undefined
+        // and the runtime silently falls through to config defaults,
+        // which is how a wired `body` ended up empty on github.comment.
+        // Always emit them, even when parsing failed (markdown is still
+        // the rendered text; structured outputs degrade to undefined).
+        markdown: review,
+        structured: parsed ?? undefined,
+        summary: parsed?.summary,
+        issues: parsed?.issues,
+        mergeReady: parsed ? parsed.decision === 'APPROVE' : undefined,
+        runId,
     };
 };
 
