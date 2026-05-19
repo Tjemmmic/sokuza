@@ -191,7 +191,11 @@ const libraryCategories = [
     { key: 'custom', label: 'Custom', icon: '🛠️' },
 ];
 
-const libraryItems = [
+// Expose libraryItems so graph-editor.js can map template names to the
+// human-readable card titles when rendering recipes. Without this the
+// recipe picker shows prettified filenames ("Auto Label Pr") instead of
+// the curated display names ("Auto-Label PRs").
+const libraryItems = window.libraryItems = [
     // ── Code Quality ──
     { id: 'ai-pr-review', name: 'AI PR Review', description: 'Claude reviews every PR for bugs, security issues, and code quality — posts a detailed comment with approve/reject decision.', category: 'code-quality', icon: '🔍', tags: ['ai', 'review', 'pr', 'automated'], template: 'ai-pr-review', requiredIntegrations: ['github'], difficulty: 'easy', status: 'available', popular: true, defaultTrigger: { source: ['github', 'gh-cli'], event: ['pull_request.opened'] } },
     { id: 'review-on-update', name: 'Review on Update', description: 'Re-run AI review whenever new commits are pushed to an open PR.', category: 'code-quality', icon: '🔄', tags: ['ai', 'review', 'pr', 'synchronize'], template: 'ai-pr-review', requiredIntegrations: ['github'], difficulty: 'easy', status: 'available', popular: false, defaultTrigger: { source: ['github', 'gh-cli'], event: ['pull_request.synchronize'] } },
@@ -1241,7 +1245,7 @@ async function renderWorkflows(el) {
                 <td>${sourceBadge(sources[0])}${sources.length > 1 ? `<span style="font-size:10px;color:var(--text-muted)"> +${sources.length - 1}</span>` : ''}</td>
                 <td><code style="font-size:12px;color:var(--text-secondary)">${esc((() => { const evts = Array.isArray(wf.trigger?.event) ? wf.trigger.event : [wf.trigger?.event].filter(Boolean); return evts.map(e => eventLabelMap[e] || e).join(', '); })())}</code>${wf.trigger?.repo ? `<br><span style="font-size:11px;color:var(--text-muted)">${esc(Array.isArray(wf.trigger.repo) ? wf.trigger.repo.join(', ') : wf.trigger.repo)}</span>` : ''}</td>
                 <td>${wf.template ? `<span class="badge badge-action">${esc(wf.template)}</span>` : '<span style="font-size:12px;color:var(--text-muted)">custom</span>'}${wf.enabled === false ? ' <span class="badge" style="background:rgba(239,68,68,0.15);color:#ef4444;border:1px solid rgba(239,68,68,0.3);font-size:10px">disabled</span>' : ''}</td>
-                <td>${wf.steps?.length ?? '—'}</td>
+                <td>${wf.graph?.nodes?.length ?? wf.steps?.length ?? (wf.template ? '<span style="color:var(--text-muted);font-size:11px">(from template)</span>' : '—')}</td>
                 <td>${renderHistory(wf.name)}</td>
                 <td style="text-align:right">
                     <div class="btn-group" style="justify-content:flex-end">
@@ -3400,6 +3404,17 @@ window.openLibraryItemInEditor = async function (itemId) {
 async function renderLibrary(el) {
     // If builder is active, render it instead
     if (builderState) { renderTemplateBuilder(el); return; }
+
+    // Refresh the workflows list before rendering: the library card's
+    // "Installed" badge derives from actual workflow existence (via
+    // `getInstalledWorkflowName`), so a stale module-scoped `workflows`
+    // would make the badge lie after a deletion that happened in
+    // another tab / via the API / via a workflow uninstall that
+    // navigated us elsewhere before refreshing.
+    try {
+        const wfData = await api.get('/api/workflows');
+        workflows = wfData.workflows || [];
+    } catch { /* keep stale data; rendering still completes */ }
 
     // Load custom templates
     try {
@@ -5860,7 +5875,7 @@ async function renderSystem(el) {
         : `
             <p><span style="color:var(--text-muted)">Version:</span> <code>${esc(info.version ?? '')}</code></p>
             <p><span style="color:var(--text-muted)">Platform:</span> <code>${esc(info.platform ?? '')}</code> (Node ${esc(info.nodeVersion ?? '')})</p>
-            <p><span style="color:var(--text-muted)">Config:</span> <code>${esc(info.configPath ?? '')}</code></p>
+            <p><span style="color:var(--text-muted)">Config:</span> <code class="path-wrap">${esc(info.configPath ?? '')}</code></p>
             <p><span style="color:var(--text-muted)">PID:</span> <code>${esc(String(info.pid ?? ''))}</code></p>
         `;
 
@@ -5871,7 +5886,7 @@ async function renderSystem(el) {
             <p><span style="color:var(--text-muted)">Installed:</span> ${svcStatus?.installed ? '<span class="badge badge-success">yes</span>' : '<span class="badge">no</span>'}</p>
             <p><span style="color:var(--text-muted)">Enabled:</span> ${svcStatus?.enabled ? '<span class="badge badge-success">yes — starts at login</span>' : '<span class="badge">no</span>'}</p>
             <p><span style="color:var(--text-muted)">Active:</span> ${svcStatus?.active ? '<span class="badge badge-success">yes — running now</span>' : '<span class="badge">no</span>'}</p>
-            <p><span style="color:var(--text-muted)">Unit file:</span> <code style="font-size:11px">${esc(svcStatus?.unitPath ?? '—')}</code></p>
+            <p><span style="color:var(--text-muted)">Unit file:</span> <code class="path-wrap" style="font-size:11px">${esc(svcStatus?.unitPath ?? '—')}</code></p>
             ${(svcStatus?.notes ?? []).map((n) => `<p style="color:var(--text-muted);font-size:12px">• ${esc(n)}</p>`).join('')}
             <div class="btn-group" style="margin-top:12px">
                 ${svcStatus?.installed

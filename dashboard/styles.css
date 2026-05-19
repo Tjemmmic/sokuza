@@ -2761,6 +2761,24 @@ tr:hover td {
 .form-label-row .form-label { margin: 0; }
 .ge-expand-btn { padding: 2px 8px !important; font-size: 11px !important; flex-shrink: 0; }
 
+/* Long absolute paths in System / Settings need to wrap at any
+   character — otherwise a long Linux path overruns the card and gets
+   clipped behind the next column. */
+.path-wrap {
+    display: inline-block;
+    max-width: 100%;
+    word-break: break-all;
+    overflow-wrap: anywhere;
+}
+
+/* Highlight a topbar input when save validation fails — the previous
+   feedback was a toast-only, which scrolled out of view before the
+   user could focus the field that needed fixing. */
+.ge-input-error {
+    border-color: var(--danger, #ef4444) !important;
+    box-shadow: 0 0 0 1px var(--danger, #ef4444) !important;
+}
+
 /* ─── Palette presets ──────────────────────────────────────────────────────
    Presets render in their own group above the built-in node types. The
    subtle accent border makes them visually distinct so a user notices

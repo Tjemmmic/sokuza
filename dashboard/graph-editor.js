@@ -255,8 +255,12 @@ async function loadAllRecipes() {
 
 /** YAML template → recipe shape the picker renders. */
 function yamlTemplateToRecipe(t) {
-    const title = t.description ? prettyName(t.name) : prettyName(t.name);
-    const tagline = t.description || `Starter recipe: ${prettyName(t.name)}`;
+    // Prefer the library's curated display name + icon if this template
+    // backs a library item — keeps the picker consistent with the
+    // Library page instead of falling back to a prettified filename.
+    const libraryMatch = (window.libraryItems || []).find((it) => it.template === t.name);
+    const title = libraryMatch?.name || prettyName(t.name);
+    const tagline = libraryMatch?.description || t.description || `Starter recipe: ${prettyName(t.name)}`;
     // Derive bullets from the graph's node titles — keeps the card
     // self-explanatory even when the YAML omits an explicit bullets list.
     const bullets = (t.graph?.nodes || [])
@@ -266,7 +270,7 @@ function yamlTemplateToRecipe(t) {
     return {
         id: t.name,
         title,
-        icon: t.icon || iconForGraph(t.graph),
+        icon: libraryMatch?.icon || t.icon || iconForGraph(t.graph),
         tagline,
         bullets: bullets.length ? bullets : ['Pre-wired starter graph'],
         source: 'yaml',
@@ -1989,8 +1993,13 @@ window.autoLayoutGraph = function () {
 
 window.saveGraphWorkflow = async function () {
     const wf = ge.workflow;
+    const nameInput = document.getElementById('ge-name');
+    // Clear any previous error highlight before re-checking.
+    nameInput?.classList.remove('ge-input-error');
     if (!wf.name || !/^[a-zA-Z0-9_-]+$/.test(wf.name)) {
         toast('Name is required (letters, digits, _ and - only)', 'error');
+        nameInput?.classList.add('ge-input-error');
+        nameInput?.focus();
         return;
     }
     if (wf.graph.nodes.length === 0) {
@@ -2111,31 +2120,63 @@ function updateYamlPanel() {
 }
 
 // Tiny YAML-ish stringifier — good enough for the read-only preview pane.
+//
+// Output contract:
+//   - Scalars (string, number, bool, null) render inline with no leading \n.
+//   - Empty arrays/objects render inline as `[]` / `{}`.
+//   - Non-empty arrays and objects at indent > 0 PREPEND a `\n` so the parent
+//     formats them as a multi-line block (`key:\n  child: …`) instead of
+//     jamming them onto the key's line. The top-level call (indent=0) omits
+//     the leading \n so the preview doesn't start with a blank line.
+//   - Empty strings emit `""` rather than nothing, otherwise YAML reads the
+//     value as null.
 function pseudoYaml(obj, indent = 0) {
     const pad = '  '.repeat(indent);
     if (obj === null || obj === undefined) return 'null';
     if (typeof obj === 'string') {
+        if (obj === '') return '""';
         if (obj.includes('\n') || obj.length > 60) return `|\n${obj.split('\n').map((l) => pad + '  ' + l).join('\n')}`;
         // Backslashes must be doubled BEFORE quote-escaping — otherwise
         // an input like `hello\"` would emit `"hello\\""`, which YAML
         // parses as the (truncated) scalar "hello\" followed by garbage.
         // Order matters: double the slashes first, then escape quotes.
         const escaped = obj.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-        return /^[a-zA-Z0-9_./@:#-]*$/.test(obj) ? obj : `"${escaped}"`;
+        return /^[a-zA-Z0-9_./@:#-]+$/.test(obj) ? obj : `"${escaped}"`;
     }
     if (typeof obj === 'number' || typeof obj === 'boolean') return String(obj);
     if (Array.isArray(obj)) {
         if (obj.length === 0) return '[]';
-        return '\n' + obj.map((v) => pad + '- ' + pseudoYaml(v, indent + 1).replace(/^\n?/, '')).join('\n');
+        const body = obj.map((v) => {
+            const rendered = pseudoYaml(v, indent + 1);
+            if (rendered.startsWith('\n')) {
+                // Nested object element: the child returned `\n` + indented
+                // body. Strip the first line's leading indent and replace
+                // it with `pad + '- '` so the dash aligns with the parent
+                // and the field name follows it directly. Subsequent lines
+                // keep their full indent (which equals the dash column +
+                // one level, the correct YAML alignment).
+                const lines = rendered.slice(1).split('\n');
+                const firstStripped = lines[0].replace(/^ */, '');
+                return pad + '- ' + firstStripped + (lines.length > 1 ? '\n' + lines.slice(1).join('\n') : '');
+            }
+            return pad + '- ' + rendered;
+        }).join('\n');
+        return indent > 0 ? '\n' + body : body;
     }
     if (typeof obj === 'object') {
         const entries = Object.entries(obj);
         if (entries.length === 0) return '{}';
-        return entries.map(([k, v]) => {
+        const body = entries.map(([k, v]) => {
             const rendered = pseudoYaml(v, indent + 1);
-            const inline = !rendered.startsWith('\n');
-            return pad + k + ': ' + (inline ? rendered : rendered.replace(/^\n/, '\n'));
+            // When the child rendered a multi-line block (starts with \n),
+            // emit `key:\n…` — NOT `key: \n…`. The trailing space made
+            // the previous version look like `trigger: <space><newline>`,
+            // which is technically valid YAML but reads as a value-set
+            // empty scalar instead of a parent of a sub-block.
+            if (rendered.startsWith('\n')) return pad + k + ':' + rendered;
+            return pad + k + ': ' + rendered;
         }).join('\n');
+        return indent > 0 ? '\n' + body : body;
     }
     return String(obj);
 }
