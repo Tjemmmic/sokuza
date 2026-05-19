@@ -418,6 +418,8 @@ function ensureGraphShape(wf) {
     };
     const nodes = [triggerNode];
     const edges = [];
+    let edgeCounter = 0;
+    const newEdgeId = () => `e${edgeCounter++}`;
     let lastId = 'trigger';
     let x = 380;
     (wf.steps || []).forEach((step, i) => {
@@ -432,12 +434,83 @@ function ensureGraphShape(wf) {
             on_error: step.on_error,
             timeout: step.timeout,
         });
-        edges.push({ id: `e${edges.length}`, from: { node: lastId, port: 'event' }, to: { node: id, port: '__seq' } });
+
+        // Derive explicit data edges from any param value that is EXACTLY
+        // a `{{steps.X.Y}}` ref (no surrounding text). Pure refs map
+        // 1:1 to a wire — the visual editor shows the connection and the
+        // saved YAML preserves it. Params with surrounding text (e.g.
+        // "## Header\n{{steps.audit.review}}") are left as config so the
+        // runtime's template interpolation can compose the final string;
+        // the graph runtime auto-derives ordering from those refs via
+        // collectNodeRefs, so we don't need a separate edge for them.
+        let hasIncomingDataEdge = false;
+        const params = step.params || {};
+        for (const [paramKey, paramVal] of Object.entries(params)) {
+            const ref = parsePureStepRef(paramVal);
+            if (!ref) continue;
+            // Skip dangling forward references — the source step must
+            // have been declared earlier in the steps array.
+            if (!nodes.some((n) => n.id === ref.stepId)) continue;
+            edges.push({
+                id: newEdgeId(),
+                from: { node: ref.stepId, port: ref.port },
+                to: { node: id, port: paramKey },
+            });
+            hasIncomingDataEdge = true;
+        }
+
+        // Always add an explicit __seq edge from the previous step so the
+        // toposort enforces legacy sequential semantics even when the
+        // step has no data dependencies. The source port MUST be a real
+        // port (the editor renders edges by querying for the DOM port
+        // element; a phantom `event` port on a non-trigger node leaves
+        // the edge undrawn — that's the "NONE of the nodes are hooked
+        // up" symptom legacy-steps templates used to show in the editor).
+        if (!hasIncomingDataEdge) {
+            const sourcePort = firstOutputPortForType(
+                nodes.find((n) => n.id === lastId)?.type,
+            );
+            if (sourcePort) {
+                edges.push({
+                    id: newEdgeId(),
+                    from: { node: lastId, port: sourcePort },
+                    to: { node: id, port: '__seq' },
+                });
+            }
+        }
+
         lastId = id;
         x += 280;
     });
     wf.graph = { nodes, edges };
     return wf;
+}
+
+/** Pick the first wire-able output port for a node type. Triggers have a
+ *  canonical `event` port that all triggers expose; non-trigger nodes
+ *  expose their own output set. Falls back to `event` only when nothing
+ *  else is registered (which means we couldn't load the node defs yet —
+ *  the synthesized edge will still look broken, but at least we don't
+ *  silently emit a phantom port). */
+function firstOutputPortForType(nodeType) {
+    if (!nodeType) return null;
+    if (nodeType.startsWith('trigger.')) return 'event';
+    const def = ge.nodeDefsByType?.[nodeType];
+    if (!def) return 'event'; // best-effort fallback when defs aren't loaded yet
+    const port = def.ports.find((p) => p.role === 'output' && p.wire);
+    return port?.name || 'event';
+}
+
+/** If `value` is a string that is EXACTLY `{{steps.<id>.<port>}}` (with
+ *  optional whitespace), return `{stepId, port}`. Otherwise null. We
+ *  refuse partial matches because an interpolated body like
+ *  `"## Header\n{{steps.x.y}}"` is logically a template, not a wire —
+ *  turning it into a wire would silently drop the surrounding text. */
+function parsePureStepRef(value) {
+    if (typeof value !== 'string') return null;
+    const m = value.trim().match(/^\{\{\s*steps\.([a-zA-Z0-9_-]+)\.([a-zA-Z0-9_.-]+)\s*\}\}$/);
+    if (!m) return null;
+    return { stepId: m[1], port: m[2] };
 }
 
 function ensureArr(v) {
