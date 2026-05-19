@@ -253,4 +253,107 @@ describe('git-commit-and-push', () => {
             gitCommitAndPushAction({ workdir, message: 'inj', remote: 'origin\x07bell' }, ctx()),
         ).rejects.toThrow(/remote contains control characters/);
     });
+
+    // ── workdir validation: a user-authored workflow YAML could otherwise
+    // point this at any git repo on the host and stage-then-push its
+    // contents under the action's identity.
+    describe('workdir validation', () => {
+        it('rejects a relative workdir (must be absolute)', async () => {
+            await expect(
+                gitCommitAndPushAction({ workdir: 'relative/path', message: 'm' }, ctx()),
+            ).rejects.toThrow(/must be an absolute path/);
+        });
+
+        it('rejects the filesystem root /', async () => {
+            await expect(
+                gitCommitAndPushAction({ workdir: '/', message: 'm' }, ctx()),
+            ).rejects.toThrow(/must not be the filesystem root/);
+        });
+
+        it('rejects a workdir under a sensitive system path (/etc)', async () => {
+            await expect(
+                gitCommitAndPushAction({ workdir: '/etc/some-repo', message: 'm' }, ctx()),
+            ).rejects.toThrow(/sensitive system path/);
+        });
+
+        it('rejects an exact match on a sensitive system path (/proc)', async () => {
+            await expect(
+                gitCommitAndPushAction({ workdir: '/proc', message: 'm' }, ctx()),
+            ).rejects.toThrow(/sensitive system path/);
+        });
+
+        it('does not over-match /etc-customer (only exact dir or with trailing slash)', async () => {
+            // /etc-customer does not start with "/etc/" — must not be flagged.
+            // We expect a different error (workdir doesn't exist as a git repo)
+            // not the sensitive-path error.
+            await expect(
+                gitCommitAndPushAction({ workdir: '/etc-customer/does-not-exist', message: 'm' }, ctx()),
+            ).rejects.not.toThrow(/sensitive system path/);
+        });
+
+        it('rejects a workdir with a NUL character', async () => {
+            await expect(
+                gitCommitAndPushAction({ workdir: '/tmp/ok\0bad', message: 'm' }, ctx()),
+            ).rejects.toThrow(/NUL character/);
+        });
+
+        it('rejects a workdir with control characters', async () => {
+            await expect(
+                gitCommitAndPushAction({ workdir: '/tmp/ok\x07bell', message: 'm' }, ctx()),
+            ).rejects.toThrow(/control characters/);
+        });
+
+        it('rejects a workdir starting with "-" (defence-in-depth against flag injection)', async () => {
+            await expect(
+                gitCommitAndPushAction({ workdir: '-rf', message: 'm' }, ctx()),
+            ).rejects.toThrow(/must not start with "-"/);
+        });
+
+        it('still rejects on missing workdir with the existing message', async () => {
+            await expect(
+                gitCommitAndPushAction({ message: 'm' }, ctx()),
+            ).rejects.toThrow(/workdir is required/);
+        });
+    });
+
+    // ── orphan-commit rollback: a push failure must leave HEAD where it
+    // was so retries don't accumulate orphan commits in long-lived
+    // workdirs (workdir-manager, chat-session).
+    it('rolls back the local commit when push fails', async () => {
+        const headBefore = git(workdir, 'rev-parse', 'HEAD');
+        await writeFile(join(workdir, 'new.txt'), 'hello\n');
+        await expect(
+            gitCommitAndPushAction(
+                { workdir, message: 'will fail to push', remote: 'no-such-remote' },
+                ctx(),
+            ),
+        ).rejects.toThrow(/push failed/);
+        // The new commit was NOT left behind: HEAD is where we started.
+        expect(git(workdir, 'rev-parse', 'HEAD')).toBe(headBefore);
+        // Staged changes are still staged so the next attempt sees the
+        // same diff (--soft semantics).
+        const staged = git(workdir, 'diff', '--cached', '--name-only');
+        expect(staged).toContain('new.txt');
+    });
+
+    // ── abort signal: a long-running push must not outlive the workflow's
+    // abort signal. When the signal is pre-aborted, the action bails out
+    // at the very first git invocation (the `add`) with "Workflow
+    // aborted" rather than spawning subprocesses that would outlive the
+    // workflow declaration of cancellation.
+    it('refuses to spawn git when context.signal is already aborted', async () => {
+        await writeFile(join(workdir, 'new.txt'), 'hello\n');
+        const controller = new AbortController();
+        controller.abort();
+        const baseCtx = ctx();
+        await expect(
+            gitCommitAndPushAction(
+                { workdir, message: 'will be aborted' },
+                { ...baseCtx, signal: controller.signal },
+            ),
+        ).rejects.toThrow(/Workflow aborted/);
+        // No commit should have landed.
+        const log = git(workdir, 'log', '--oneline');
+        expect(log.split('\n').length).toBe(1); // only the initial commit
+    });
 });

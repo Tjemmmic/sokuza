@@ -62,6 +62,9 @@ publishes automatically.
 
 - **Wire endpoints align at any pan/zoom.** Moved the wire SVG out of the transformed canvas so endpoints render in viewport pixel space.
 - **Workflow templates with `graph:` no longer fail "must have steps".** `templates.ts` now accepts either form; `engine.ts` and `api.ts` use `?? 0` fallbacks when reading `workflow.steps?.length`.
+- **`git.commit-and-push` validates `workdir`.** The visual editor exposed `workdir` as freeform text but the action passed it straight to `git add -A`; a user-authored YAML could point at any local git repo and commit-then-push under the action's identity. Now rejects NUL/control chars, leading `-`, relative paths, the filesystem root, and obvious system paths (`/etc`, `/proc`, `/sys`, `/dev`, `/boot`, `/root`, `/usr`, `/bin`, `/sbin`, `/lib*`, `/var/{log,lib,run}`).
+- **`git.commit-and-push` propagates `context.signal` to git subprocesses.** Previously a workflow timeout or cancel would unblock the runtime but leave `git push` running to completion against the network. The action now threads the signal through `execGit` / `execGitOutput`; on abort the child receives SIGTERM and the action rejects with `Workflow aborted` instead of letting the push outlive the workflow.
+- **`git.commit-and-push` rolls back the local commit on push failure.** When `git push` failed (network, auth, rejected pre-push hook), the action used to leave the commit in the workdir, polluting retries in long-lived workdirs (workdir-manager, chat-session). Now wraps the push in try/catch and runs `git reset --soft HEAD~1` on failure, preserving the staged index so the next attempt sees the same diff.
 
 ## [0.1.2] - 2026-04-27
 
