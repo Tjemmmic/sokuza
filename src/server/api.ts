@@ -1034,6 +1034,24 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
         return entry;
     }
 
+    // Named default prompts the visual editor can surface as "Load default"
+    // affordances in the inspector. Returns the actual TypeScript-generated
+    // text so the user sees what the action runs when their override port
+    // is empty — and gets a sane starting point if they want to customise.
+    server.get('/api/ai/defaults/:source', async (request, reply) => {
+        const { source } = request.params as { source: string };
+        try {
+            const { getDefaultPrompt } = await import('../actions/default-prompts.js');
+            const text = getDefaultPrompt(source);
+            if (text == null) {
+                return reply.status(404).send({ error: `Unknown default prompt source "${source}"` });
+            }
+            return { source, text };
+        } catch (err) {
+            return reply.status(500).send({ error: (err as Error).message });
+        }
+    });
+
     server.get('/api/ai/providers', async () => {
         const config = await deps.configStore.read();
         const providersRaw = (config.ai as Record<string, unknown> | undefined)?.providers;

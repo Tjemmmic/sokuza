@@ -2750,3 +2750,30 @@ tr:hover td {
 .ge-recipe-card ul { font-size: 11px; color: var(--text-muted); list-style: none; padding-left: 0; }
 .ge-recipe-card ul li { padding: 2px 0; padding-left: 14px; position: relative; }
 .ge-recipe-card ul li::before { content: '·'; position: absolute; left: 4px; color: var(--accent); font-weight: bold; }
+
+/* ─── Inspector textarea ergonomics ────────────────────────────────────────
+   The sidebar form is narrow (~340px); prompts and code snippets are
+   miserable to edit there. `.form-label-row` keeps the inline label +
+   the "Edit in modal" affordance on one line; `.ge-expand-btn` is a
+   compact ghost button.
+*/
+.form-label-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 4px; }
+.form-label-row .form-label { margin: 0; }
+.ge-expand-btn { padding: 2px 8px !important; font-size: 11px !important; flex-shrink: 0; }
+
+/* ─── Fullscreen prompt editor modal ───────────────────────────────────────
+   Used by openPromptEditor(): a roomy textarea so multi-paragraph
+   prompts (e.g. the ai.review system prompt) are actually legible.
+   The toolbar carries the "Load default" affordance for ports whose
+   action falls back to a TS-generated default when blank.
+*/
+.ge-prompt-editor { display: flex; flex-direction: column; gap: 12px; height: calc(80vh - 200px); min-height: 320px; }
+.ge-prompt-editor-toolbar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.ge-prompt-editor-textarea {
+    flex: 1;
+    min-height: 280px;
+    font-family: var(--mono);
+    font-size: 13px;
+    line-height: 1.55;
+    resize: vertical;
+}

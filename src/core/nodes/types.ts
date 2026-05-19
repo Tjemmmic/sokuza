@@ -83,6 +83,13 @@ export interface NodePort {
             | 'github-pr' | 'github-issue' | 'github-repo' | 'code-md'
             | 'code-yaml' | 'multiselect' | 'kv';
     options?: Array<{ value: string; label: string }>;
+    /** Named default the editor can load into a textarea port. Resolved
+     *  via `GET /api/ai/defaults/:source` — see `actions/default-prompts.ts`.
+     *  Only meaningful for `textarea`/`code-md` ports whose action consults
+     *  a hardcoded TS default when the field is left blank (e.g. ai.review's
+     *  system prompt). Without this hint the user has no way to see the
+     *  text their workflow actually runs. */
+    defaultSource?: string;
 }
 
 /** Runtime inputs handed to a node's execute(): map port → resolved value. */

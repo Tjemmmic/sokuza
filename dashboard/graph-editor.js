@@ -1121,13 +1121,27 @@ function renderField(node, port) {
     switch (port.control) {
         case 'textarea':
         case 'code-md':
-        case 'code-yaml':
-            return `<div class="form-group">${labelHtml}
+        case 'code-yaml': {
+            // The inspector sidebar is narrow — a 4-row textarea is fine
+            // for short configuration but useless for prompts. The
+            // "Edit in modal" button opens a fullscreen editor that can
+            // optionally load a TS-generated default when the port
+            // declares a `defaultSource`.
+            const defaultSrc = port.defaultSource ? jsEsc(port.defaultSource) : '';
+            const portLabel = jsEsc(port.label);
+            return `<div class="form-group">
+                <div class="form-label-row">
+                    <label class="form-label">${esc(port.label)}${required}</label>
+                    <button type="button" class="btn btn-ghost btn-sm ge-expand-btn"
+                        onclick="openPromptEditor('${jsEsc(node.id)}', '${jsEsc(port.name)}', '${portLabel}', '${defaultSrc}')">
+                        ↗ Edit in modal</button>
+                </div>
                 <textarea class="form-textarea ge-${port.control}" rows="4"
                     placeholder="${esc(port.placeholder || '')}"
                     oninput="${onInput('this.value')}">${esc(value ?? '')}</textarea>
                 ${help}
             </div>`;
+        }
         case 'select':
             return `<div class="form-group">${labelHtml}
                 <select class="form-select" onchange="${onInput('this.value')}">
@@ -1349,6 +1363,70 @@ window.removeManualInput = function (i) {
     renderInspector();
     renderCanvas();
     updateYamlPanel();
+};
+
+// Fullscreen prompt editor — opened from the "↗ Edit in modal" button on
+// textarea ports. Reuses the global modal infrastructure from app.js;
+// uses a larger body class so the textarea is actually readable.
+//
+// `defaultSource` is the named default registered in
+// src/actions/default-prompts.ts; when set, a "Load default" button
+// fetches that text and (with confirmation) pastes it into the editor
+// so the user can customise from a real starting point instead of
+// staring at an empty box guessing what the action runs under the
+// hood.
+window.openPromptEditor = function (nodeId, portName, portLabel, defaultSource) {
+    const node = ge.workflow.graph.nodes.find((n) => n.id === nodeId);
+    if (!node) return;
+    const current = node.config?.[portName] ?? '';
+    const hasDefault = !!defaultSource;
+
+    openModal(
+        `Edit: ${portLabel}`,
+        `<div class="ge-prompt-editor">
+            <div class="ge-prompt-editor-toolbar">
+                ${hasDefault
+                    ? `<button id="ge-prompt-load-default" class="btn btn-ghost btn-sm" type="button">📥 Load default</button>
+                       <span id="ge-prompt-default-hint" class="form-hint" style="margin:0">The built-in prompt the action uses when this field is blank.</span>`
+                    : '<span class="form-hint" style="margin:0">Edit the prompt or instructions for this node.</span>'}
+            </div>
+            <textarea id="ge-prompt-editor-textarea" class="form-textarea ge-prompt-editor-textarea"
+                placeholder="Leave blank to use the action's default."
+                spellcheck="false">${esc(current)}</textarea>
+        </div>`,
+        `<button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
+         <button class="btn btn-primary" onclick="savePromptEditor('${jsEsc(nodeId)}', '${jsEsc(portName)}')">Save</button>`,
+    );
+
+    if (hasDefault) {
+        const btn = document.getElementById('ge-prompt-load-default');
+        if (btn) btn.addEventListener('click', async () => {
+            try {
+                const ta = document.getElementById('ge-prompt-editor-textarea');
+                const hadContent = ta && ta.value.trim().length > 0;
+                if (hadContent && !window.confirm('Replace the current text with the built-in default?')) return;
+                btn.disabled = true;
+                btn.textContent = 'Loading…';
+                const res = await api.get(`/api/ai/defaults/${encodeURIComponent(defaultSource)}`);
+                if (ta && typeof res.text === 'string') ta.value = res.text;
+            } catch (err) {
+                toast(`Could not load default: ${err.message || 'unknown error'}`, 'error');
+            } finally {
+                btn.disabled = false;
+                btn.textContent = '📥 Load default';
+            }
+        });
+    }
+};
+
+window.savePromptEditor = function (nodeId, portName) {
+    const ta = document.getElementById('ge-prompt-editor-textarea');
+    const value = ta ? ta.value : '';
+    window.setNodeField(nodeId, portName, value);
+    // Refresh the inspector so the sidebar textarea reflects the new
+    // value the next time the user looks at it.
+    renderInspector();
+    closeModal();
 };
 
 window.setNodeField = function (nodeId, port, value) {
