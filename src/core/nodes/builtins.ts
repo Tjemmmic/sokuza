@@ -791,9 +791,21 @@ const ifNode: NodeDefinition = {
     color: COLOR_FLOW,
     ports: [
         { name: 'condition', label: 'Condition (template expression)', role: 'input', config: true, control: 'text', required: true, placeholder: '{{nodes.review.mergeReady}}' },
-        { name: 'value', label: 'Pass-through Value', role: 'input', wire: true, type: 'any', helpText: 'Optional: forwarded to whichever branch fires' },
-        { name: 'then', label: 'Then', role: 'output', wire: true, type: 'any' },
-        { name: 'else', label: 'Else', role: 'output', wire: true, type: 'any' },
+        { name: 'value', label: 'Pass-through Value', role: 'input', wire: true, type: 'any', helpText: 'Optional: forwarded to the taken branch on `then`/`else`' },
+        // `then`/`else` carry the pass-through value (or `true` as
+        // sentinel when no value is wired). Use these for DATA wires
+        // into the downstream node's config/input ports.
+        { name: 'then', label: 'Then (value)', role: 'output', wire: true, type: 'any' },
+        { name: 'else', label: 'Else (value)', role: 'output', wire: true, type: 'any' },
+        // `thenFired`/`elseFired` are *always-truthy* sentinels (the
+        // string "true") emitted on the branch that ran. Use these in
+        // a downstream node's `condition:` field instead of `then`/`else`
+        // — otherwise wiring a `value` of 0 / false / "" / "null" /
+        // "undefined" produces a pass-through that `isStringTruthy()`
+        // reads as falsy, and the downstream skips even though the
+        // if-node took the branch.
+        { name: 'thenFired', label: 'Then Fired? (for condition:)', role: 'output', wire: true, type: 'string', helpText: 'Always "true" when the then branch ran; safe to use in downstream `condition:` regardless of the value passed through' },
+        { name: 'elseFired', label: 'Else Fired? (for condition:)', role: 'output', wire: true, type: 'string', helpText: 'Always "true" when the else branch ran; safe to use in downstream `condition:` regardless of the value passed through' },
         { name: 'matched', label: 'Branch Taken', role: 'output', wire: true, type: 'string' },
     ],
     execute: async (inputs) => {
@@ -802,6 +814,8 @@ const ifNode: NodeDefinition = {
         return {
             then: truthy ? (inputs.value ?? true) : undefined,
             else: truthy ? undefined : (inputs.value ?? true),
+            thenFired: truthy ? 'true' : undefined,
+            elseFired: truthy ? undefined : 'true',
             matched: truthy ? 'then' : 'else',
         };
     },
