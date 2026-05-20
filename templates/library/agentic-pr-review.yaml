@@ -1,0 +1,94 @@
+# Agentic PR Review (clone + agent + auto-fix-ready)
+#
+# Replaces the diff-only `ai.review` with a tool-using agent that
+# clones the repo and explores the actual codebase. With
+# `parse_as_review: true` set on the ai.agent node, the agent's output
+# is parsed as a structured review AND recorded under
+# ~/.sokuza/runs/ai-review/ — which means the `auto-fix-address-review`
+# workflow picks it up by the same `<!-- sokuza:run-id=... -->` marker
+# that the diff-only template uses today.
+#
+# Pair this with `auto-fix-address-review` to close the agentic
+# review → suggest/push fixes loop.
+#
+# Exercises: trigger.gh-cli, github.clone-repo, ai.agent
+#             (parse_as_review=true), github.create-review
+#
+# Usage:
+#   - name: agentic-review
+#     template: agentic-pr-review
+
+description: Clone the repo, run a tool-using agent, post the result as a real GitHub Review (loop-compatible)
+icon: 🛠️
+
+trigger:
+  source: gh-cli
+  event: pull_request.opened
+
+graph:
+  nodes:
+    - id: trigger
+      type: trigger.gh-cli
+      position: { x: 60, y: 240 }
+      config:
+        events: [pull_request.opened]
+    - id: clone
+      type: github.clone-repo
+      position: { x: 360, y: 240 }
+      config: {}
+    - id: agent
+      type: ai.agent
+      position: { x: 700, y: 240 }
+      config:
+        # Switch the agent into review-recording mode. Output ports
+        # `markdown` / `structured` / `runId` etc. are populated only
+        # when this flag is on.
+        parse_as_review: true
+        prompt: |
+          You are reviewing a pull request. You have full read access to
+          the cloned repo at the workdir.
+
+          1. Inspect the diff, then read the surrounding files to verify
+             that your concerns are grounded in real behaviour, not
+             surface patterns.
+          2. Run any read-only checks you find useful (typecheck, search,
+             test names) to validate hypotheses.
+          3. Output ONLY a JSON object matching the standard sokuza
+             review schema:
+             {
+               "summary": "...",
+               "issues": [
+                 { "priority": "P1|P2|P3", "title": "...",
+                   "file": "...", "lineStart": N, "lineEnd": N,
+                   "problem": "...", "fix": "..." }
+               ],
+               "decision": "APPROVE" | "CHANGES_REQUESTED",
+               "justification": "..."
+             }
+
+          No prose outside the JSON.
+    - id: post
+      type: github.create-review
+      position: { x: 1080, y: 240 }
+      config:
+        event: COMMENT
+        body: |
+          ## 🤖 AI Code Review (agentic)
+
+          {{nodes.agent.markdown}}
+
+          <!-- sokuza:run-id={{nodes.agent.runId}} -->
+  edges:
+    - from: { node: trigger, port: repo }
+      to: { node: clone, port: repo }
+    - from: { node: trigger, port: branch }
+      to: { node: clone, port: ref }
+    - from: { node: clone, port: path }
+      to: { node: agent, port: workdir }
+    - from: { node: trigger, port: prNumber }
+      to: { node: post, port: pr_number }
+    - from: { node: trigger, port: repo }
+      to: { node: post, port: repo }
+    # post's body interpolates agent.markdown and agent.runId.
+    - from: { node: agent, port: markdown }
+      to: { node: post, port: __seq }
