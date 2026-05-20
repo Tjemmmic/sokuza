@@ -274,6 +274,11 @@ describe('aiAgentAction — parse_as_review', () => {
         expect(record.truncation.triggered).toBe(false);
         expect(record.truncation.originalChars).toBe(0);
         expect(record.input.diffBytes).toBe(0);
+        // promptChars is the agentic analog of diffBytes: it must
+        // actually land in the record. A previous iteration of the
+        // helper accepted the param but silently dropped it on the
+        // floor; this assertion pins the fix so it can't regress.
+        expect(record.input.promptChars).toBe('review'.length);
     });
 
     it('falls back to raw output when parsing fails but still records a run', async () => {

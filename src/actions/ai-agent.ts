@@ -231,6 +231,7 @@ function buildAgentReviewRecord(args: {
             diffBytes: 0,
             diffSha1: '',
             incompleteFiles: [],
+            promptChars: args.promptChars,
         },
         truncation: {
             triggered: false,

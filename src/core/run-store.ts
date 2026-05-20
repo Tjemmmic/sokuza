@@ -74,6 +74,10 @@ export interface AiReviewRunRecord {
         /** SHA-1 of the raw diff for correlating re-runs of the same input. */
         diffSha1: string;
         incompleteFiles: string[];
+        /** Size of the agent's input prompt, in characters. Set only for
+         *  `strategy: 'agentic'` runs — there is no diff in agent mode,
+         *  so this is the analog of `diffBytes` for cost/sizing analysis. */
+        promptChars?: number;
     };
     truncation: {
         triggered: boolean;
