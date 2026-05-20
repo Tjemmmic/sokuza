@@ -59,8 +59,14 @@ export interface AiReviewRunRecord {
     provider: string;
     model: string;
     usage?: { input_tokens?: number; output_tokens?: number };
-    /** Context-handling strategy. Future values: 'rlm'. */
-    strategy: 'truncate';
+    /** How the review was produced.
+     *   - 'truncate': one-shot completion against a (possibly truncated)
+     *      diff. Produced by `ai-review`.
+     *   - 'agentic':  tool-using agent that explored a cloned workdir and
+     *      returned a structured review. Produced by `ai-agent` with
+     *      `parse_as_review: true`. The truncation block is zero in this
+     *      mode (agent reads files directly; nothing to truncate). */
+    strategy: 'truncate' | 'agentic';
     input: {
         /** 'full' | 'file-patches' | 'summary' — from upstream fetch step. */
         diffSource?: string;
@@ -68,6 +74,10 @@ export interface AiReviewRunRecord {
         /** SHA-1 of the raw diff for correlating re-runs of the same input. */
         diffSha1: string;
         incompleteFiles: string[];
+        /** Size of the agent's input prompt, in characters. Set only for
+         *  `strategy: 'agentic'` runs — there is no diff in agent mode,
+         *  so this is the analog of `diffBytes` for cost/sizing analysis. */
+        promptChars?: number;
     };
     truncation: {
         triggered: boolean;

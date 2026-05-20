@@ -82,6 +82,42 @@ describe('AI nodes expose typed AI provider/model controls', () => {
     });
 });
 
+// When ai.agent is set to parse_as_review=true it must emit the same output
+// ports as ai.review so downstream nodes (`github.create-review` interpolating
+// `{{nodes.X.markdown}}` + `{{nodes.X.runId}}`) work without any rewiring.
+// Pin both the config port and the output ports.
+
+describe('ai.agent exposes the parse_as_review surface for the auto-fix loop', () => {
+    let registry: NodeRegistry;
+
+    beforeEach(() => {
+        registry = new NodeRegistry();
+        registerBuiltinNodes(registry);
+    });
+
+    it('declares a parse_as_review config switch', () => {
+        const def = registry.serialize().find((n) => n.type === 'ai.agent');
+        expect(def, 'ai.agent should be registered').toBeDefined();
+        const flag = def!.ports.find((p) => p.name === 'parse_as_review' && p.role === 'input');
+        expect(flag, 'ai.agent missing parse_as_review port').toBeDefined();
+        expect(flag?.config).toBe(true);
+        expect(flag?.control).toBe('switch');
+        expect(flag?.type).toBe('boolean');
+    });
+
+    // Same names as ai.review so existing graphs can swap one for the other.
+    const REVIEW_OUTPUTS = ['markdown', 'structured', 'summary', 'issues', 'mergeReady', 'runId'];
+
+    for (const portName of REVIEW_OUTPUTS) {
+        it(`declares output port "${portName}" so wires resolve at design time`, () => {
+            const def = registry.serialize().find((n) => n.type === 'ai.agent');
+            const port = def!.ports.find((p) => p.name === portName && p.role === 'output');
+            expect(port, `ai.agent missing review output port "${portName}"`).toBeDefined();
+            expect(port?.wire).toBe(true);
+        });
+    }
+});
+
 // All three GitHub-flavored trigger nodes must expose the same filter ports
 // — including the exclude/negation axes. Without this pin a poll/cli node
 // can silently regress to only `events`/`repos` (the original shape),

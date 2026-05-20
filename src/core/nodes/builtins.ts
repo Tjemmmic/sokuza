@@ -358,8 +358,19 @@ const aiAgentNode = actionNode({
         { name: 'model', label: 'Model', role: 'input', config: true, control: 'ai-model',
           helpText: 'Override the provider\'s default model. Leave blank to use the provider default.' },
         { name: 'max_tokens', label: 'Max Tokens', role: 'input', config: true, control: 'number', type: 'number' },
+        { name: 'parse_as_review', label: 'Parse Output as Code Review', role: 'input', config: true, control: 'switch', type: 'boolean',
+          helpText: 'Parse the agent\'s output as a structured review and record a run so the auto-fix loop can pick it up. Pair this with `github.create-review` wiring `{{nodes.<id>.markdown}}` + `{{nodes.<id>.runId}}` — same shape as ai.review.' },
         { name: 'output', label: 'Agent Output', role: 'output', wire: true, type: 'string' },
         { name: 'transcript', label: 'Transcript', role: 'output', wire: true, type: 'json' },
+        // ─── parse_as_review outputs ─────────────────────────────────
+        // Populated only when parse_as_review is true. Declared
+        // unconditionally so the editor can wire them at design time.
+        { name: 'markdown', label: 'Review Markdown', role: 'output', wire: true, type: 'string', helpText: 'Rendered review (parse_as_review only)' },
+        { name: 'structured', label: 'Structured Review', role: 'output', wire: true, type: 'review', helpText: 'Parsed review object (parse_as_review only)' },
+        { name: 'summary', label: 'Review Summary', role: 'output', wire: true, type: 'string', helpText: 'One-line summary (parse_as_review only)' },
+        { name: 'issues', label: 'Issues', role: 'output', wire: true, type: 'json', helpText: 'Array of issues (parse_as_review only)' },
+        { name: 'mergeReady', label: 'Merge Ready', role: 'output', wire: true, type: 'boolean', helpText: 'True if decision=APPROVE (parse_as_review only)' },
+        { name: 'runId', label: 'Run Id', role: 'output', wire: true, type: 'string', helpText: 'Address-review marker (parse_as_review only)' },
     ],
 });
 

@@ -124,8 +124,18 @@ describe('AI nodes: declared output ports match action return keys', () => {
     });
 
     it('ai.agent emits every output port name it advertises', async () => {
+        // ai.agent declares both the always-on legacy ports (`output`,
+        // `transcript`) and the parse_as_review review-shape ports
+        // (`markdown`/`structured`/`summary`/`issues`/`mergeReady`/`runId`).
+        // The review-shape ports are populated only when
+        // `parse_as_review: true`; with the flag off they must still
+        // appear on the result bag as undefined so wires resolve to a
+        // stable null rather than disappearing silently.
         const declared = declaredOutputPorts('ai.agent');
-        expect(declared.sort()).toEqual(['output', 'transcript']);
+        expect(declared.sort()).toEqual([
+            'issues', 'markdown', 'mergeReady',
+            'output', 'runId', 'structured', 'summary', 'transcript',
+        ]);
 
         const result = await aiAgentAction(
             { workdir: '/tmp/repo', prompt: 'do the thing' },
