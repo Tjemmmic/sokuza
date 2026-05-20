@@ -118,6 +118,49 @@ describe('ai.agent exposes the parse_as_review surface for the auto-fix loop', (
     }
 });
 
+// utility.shell-exec must expose stable port names so library workflows
+// (clone repo → run tests → branch on success) can wire to them without
+// hand-debugging "why is `success` undefined?"
+
+describe('utility.shell-exec exposes the documented input + output ports', () => {
+    let registry: NodeRegistry;
+
+    beforeEach(() => {
+        registry = new NodeRegistry();
+        registerBuiltinNodes(registry);
+    });
+
+    const INPUT_PORTS = ['workdir', 'command', 'args', 'timeout_seconds', 'max_output_bytes', 'env'];
+    const OUTPUT_PORTS = ['stdout', 'stderr', 'exitCode', 'success', 'timedOut', 'truncated', 'durationMs'];
+
+    it('declares every documented input port as config-true', () => {
+        const def = registry.serialize().find((n) => n.type === 'utility.shell-exec');
+        expect(def, 'utility.shell-exec should be registered').toBeDefined();
+        for (const portName of INPUT_PORTS) {
+            const port = def!.ports.find((p) => p.name === portName && p.role === 'input');
+            expect(port, `utility.shell-exec missing input port "${portName}"`).toBeDefined();
+            expect(port?.config).toBe(true);
+        }
+    });
+
+    it('declares every documented output port as wire-able', () => {
+        const def = registry.serialize().find((n) => n.type === 'utility.shell-exec');
+        for (const portName of OUTPUT_PORTS) {
+            const port = def!.ports.find((p) => p.name === portName && p.role === 'output');
+            expect(port, `utility.shell-exec missing output port "${portName}"`).toBeDefined();
+            expect(port?.wire).toBe(true);
+        }
+    });
+
+    it('marks workdir and command as required (the two un-defaulted inputs)', () => {
+        const def = registry.serialize().find((n) => n.type === 'utility.shell-exec');
+        const workdir = def!.ports.find((p) => p.name === 'workdir');
+        const command = def!.ports.find((p) => p.name === 'command');
+        expect(workdir?.required).toBe(true);
+        expect(command?.required).toBe(true);
+    });
+});
+
 // All three GitHub-flavored trigger nodes must expose the same filter ports
 // — including the exclude/negation axes. Without this pin a poll/cli node
 // can silently regress to only `events`/`repos` (the original shape),

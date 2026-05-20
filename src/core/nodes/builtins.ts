@@ -804,6 +804,38 @@ const webhookNode = actionNode({
     ],
 });
 
+const shellExecNode = actionNode({
+    type: 'utility.shell-exec',
+    actionName: 'shell-exec',
+    group: 'Utility',
+    title: 'Shell Exec',
+    description: 'Run a shell command in a workdir and capture stdout/stderr/exitCode',
+    icon: '⚙️',
+    color: COLOR_UTILITY,
+    ports: [
+        { name: 'workdir', label: 'Workdir', role: 'input', wire: true, config: true, control: 'text', type: 'string', required: true,
+          helpText: 'Absolute path. Usually wired from github.clone-repo.' },
+        { name: 'command', label: 'Command', role: 'input', wire: true, config: true, control: 'text', type: 'string', required: true,
+          helpText: 'e.g. `npm test` or `cargo build --release`. Runs through /bin/sh -c by default; set Args to switch to exec mode (no shell).' },
+        { name: 'args', label: 'Args (exec mode)', role: 'input', wire: true, config: true, control: 'text', type: 'string',
+          helpText: 'Comma-separated argv. When set, Command is the executable and no shell parsing happens. Use when interpolating untrusted values into Command would be unsafe.' },
+        { name: 'timeout_seconds', label: 'Timeout (seconds)', role: 'input', config: true, control: 'number', type: 'number',
+          default: 300, helpText: 'SIGTERM at this mark, SIGKILL 5s later. Default 300.' },
+        { name: 'max_output_bytes', label: 'Max Output Bytes', role: 'input', config: true, control: 'number', type: 'number',
+          default: 10485760, helpText: 'Cap on captured stdout/stderr. Process is killed when exceeded. Default 10MB.' },
+        { name: 'env', label: 'Env Vars', role: 'input', config: true, control: 'kv',
+          helpText: 'Additional env vars. Merged over process.env so PATH etc. are inherited.' },
+        { name: 'stdout', label: 'Stdout', role: 'output', wire: true, type: 'string' },
+        { name: 'stderr', label: 'Stderr', role: 'output', wire: true, type: 'string' },
+        { name: 'exitCode', label: 'Exit Code', role: 'output', wire: true, type: 'number' },
+        { name: 'success', label: 'Success', role: 'output', wire: true, type: 'boolean',
+          helpText: 'True if exitCode=0 and not timed-out/truncated' },
+        { name: 'timedOut', label: 'Timed Out', role: 'output', wire: true, type: 'boolean' },
+        { name: 'truncated', label: 'Output Truncated', role: 'output', wire: true, type: 'boolean' },
+        { name: 'durationMs', label: 'Duration (ms)', role: 'output', wire: true, type: 'number' },
+    ],
+});
+
 // ─── Control flow ───────────────────────────────────────────────────────────
 //
 // `if` evaluates a condition expression and emits either `then` or `else`
@@ -1304,7 +1336,7 @@ const ALL_BUILTINS: NodeDefinition[] = [
     // Notify
     slackSend, slackReact,
     // Utility
-    logNode, webhookNode,
+    logNode, webhookNode, shellExecNode,
     // Flow
     ifNode, setNode, mergeNode, filterListNode,
     // Data

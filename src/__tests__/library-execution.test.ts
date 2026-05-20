@@ -231,6 +231,10 @@ describe('library template execution', () => {
         actions.set('git-commit-and-push', async () => ({
             pushed: true, hasChanges: true, sha: 'aaaa1111', branch: 'feature/x',
         }));
+        actions.set('shell-exec', async () => ({
+            stdout: 'mock stdout\n', stderr: '', exitCode: 0,
+            success: true, timedOut: false, truncated: false, durationMs: 12,
+        }));
 
         // Slack actions
         actions.set('slack-send-message', async () => ({
