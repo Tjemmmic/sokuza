@@ -60,6 +60,18 @@ graph:
       to: { node: review_fields, port: review }
     - from: { node: review_fields, port: totalCount }
       to: { node: gate, port: value }
+    # Gate the downstream fetch + address-review on the gate firing.
+    # Without these `gate.thenFired → ...__seq` edges, the gate was
+    # decorative — reviews/address ran unconditionally and the comment
+    # at line 37 ("only fire when the review is non-empty") was a lie.
+    # Using `thenFired` (not `then`) because a totalCount of 0 would
+    # round-trip through `then` as the string "0", which downstream
+    # `__seq` resolution still treats as a passing edge — `thenFired`
+    # is the always-truthy sentinel for exactly this gate-pattern use.
+    - from: { node: gate, port: thenFired }
+      to: { node: reviews, port: __seq }
+    - from: { node: gate, port: thenFired }
+      to: { node: address, port: __seq }
     - from: { node: trigger, port: prNumber }
       to: { node: reviews, port: pr_number }
     - from: { node: trigger, port: repo }
