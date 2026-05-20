@@ -12,8 +12,8 @@ import {
     recordAiReviewRun,
     generateRunId,
     sha1,
-    type AiReviewRunRecord,
 } from '../core/run-store.js';
+import { extractEventInfo } from './_event-info.js';
 
 const DEFAULT_MAX_TOKENS = 4096;
 
@@ -381,22 +381,6 @@ export const aiReviewAction: ActionHandler = async (params, context) => {
         runId,
     };
 };
-
-function extractEventInfo(event: { source: string; event: string; payload?: Record<string, unknown>; metadata?: Record<string, unknown> }): AiReviewRunRecord['event'] {
-    const meta = event.metadata ?? {};
-    const pr = event.payload?.pull_request as Record<string, unknown> | undefined;
-    const info: AiReviewRunRecord['event'] = {
-        source: event.source,
-        event: event.event,
-    };
-    const repo = meta.repo as string | undefined;
-    if (repo) info.repo = repo;
-    const prNumber = (meta.prNumber ?? pr?.number) as number | undefined;
-    if (typeof prNumber === 'number') info.prNumber = prNumber;
-    const branch = (pr?.head as Record<string, unknown> | undefined)?.ref as string | undefined;
-    if (branch) info.branch = branch;
-    return info;
-}
 
 function resolveDiffSource(context: { steps: Record<string, unknown>; results: Record<string | number, unknown> }): string | undefined {
     for (const result of Object.values(context.steps)) {

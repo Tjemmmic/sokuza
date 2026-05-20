@@ -1,4 +1,4 @@
-import type { ActionHandler, EventPayload } from '../core/types.js';
+import type { ActionHandler } from '../core/types.js';
 import { runAgentWithFallback } from '../core/ai-providers.js';
 import {
     parseStructuredReviewExt,
@@ -9,6 +9,7 @@ import {
     generateRunId,
     type AiReviewRunRecord,
 } from '../core/run-store.js';
+import { extractEventInfo } from './_event-info.js';
 
 /**
  * "ai-agent" action.
@@ -202,7 +203,8 @@ export const aiAgentAction: ActionHandler = async (params, context) => {
 
 /** Compose the synthetic ai-review run record produced by an agentic run.
  *  Truncation/diff fields are zeroed — the agent reads files directly,
- *  so there's no diff to truncate. The `strategy: 'agentic'` tag
+ *  so there's no diff to truncate. `input.promptChars` holds the agent's
+ *  prompt size in lieu of `diffBytes`. The `strategy: 'agentic'` tag
  *  distinguishes these runs in the dashboard. */
 function buildAgentReviewRecord(args: {
     runId: string;
@@ -242,21 +244,4 @@ function buildAgentReviewRecord(args: {
         },
         output: args.output,
     };
-}
-
-function extractEventInfo(event: EventPayload | undefined): AiReviewRunRecord['event'] {
-    if (!event) return { source: '', event: '' };
-    const meta = event.metadata ?? {};
-    const pr = event.payload?.pull_request as Record<string, unknown> | undefined;
-    const info: AiReviewRunRecord['event'] = {
-        source: event.source,
-        event: event.event,
-    };
-    const repo = meta.repo as string | undefined;
-    if (repo) info.repo = repo;
-    const prNumber = (meta.prNumber ?? pr?.number) as number | undefined;
-    if (typeof prNumber === 'number') info.prNumber = prNumber;
-    const branch = (pr?.head as Record<string, unknown> | undefined)?.ref as string | undefined;
-    if (branch) info.branch = branch;
-    return info;
 }
