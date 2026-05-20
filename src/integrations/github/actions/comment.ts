@@ -38,7 +38,15 @@ export const githubCommentAction: ActionHandler = async (params, context) => {
         'Comment posted',
     );
 
+    // Emit BOTH the canonical port names the github.comment node
+    // declares (`commentId`, `url`) AND the snake_case keys earlier
+    // code used. The node-port declarations in core/nodes/builtins.ts
+    // are the contract a downstream `{{nodes.post.commentId}}` wire
+    // reads; the snake_case keys stay for back-compat with any legacy
+    // template that referenced them.
     return {
+        commentId: result.id,
+        url: result.html_url,
         comment_id: result.id,
         html_url: result.html_url,
     };

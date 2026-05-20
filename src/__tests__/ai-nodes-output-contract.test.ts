@@ -135,4 +135,36 @@ describe('AI nodes: declared output ports match action return keys', () => {
             expect(port in result, `ai.agent return must include "${port}" key`).toBe(true);
         }
     });
+
+    // Same class of bug as the AI nodes: github.comment used to return
+    // only the snake_case keys (`comment_id`, `html_url`) while the
+    // node port declarations promise `commentId` and `url`. Any wire
+    // like `{{nodes.post.commentId}}` silently resolved to undefined.
+    // This test pins the contract for the third place the bug existed.
+    it('github.comment emits every output port name it advertises', async () => {
+        const declared = declaredOutputPorts('github.comment');
+        expect(declared.sort()).toEqual(['commentId', 'url']);
+
+        // Mock the underlying GitHub API call so the test never hits
+        // the network. The action's return shape is what we're
+        // asserting, not the API.
+        vi.resetModules();
+        vi.doMock('../integrations/github/api.js', () => ({
+            GitHubApiClient: vi.fn().mockImplementation(() => ({
+                createComment: vi.fn().mockResolvedValue({ id: 42, html_url: 'https://github.com/o/r/issues/1#c42' }),
+            })),
+        }));
+        try {
+            const { githubCommentAction } = await import('../integrations/github/actions/comment.js');
+            const result = await githubCommentAction(
+                { repo: 'o/r', pr_number: 1, body: 'hi' },
+                makeContext({ integrationConfigs: { github: { token: 'gh_test' } } }),
+            ) as Record<string, unknown>;
+            for (const port of declared) {
+                expect(port in result, `github.comment return must include "${port}" key`).toBe(true);
+            }
+        } finally {
+            vi.doUnmock('../integrations/github/api.js');
+        }
+    });
 });

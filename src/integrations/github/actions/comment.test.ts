@@ -58,6 +58,24 @@ describe('githubCommentAction owner/repo resolution', () => {
         expect(mockCreateComment).toHaveBeenCalledWith('Tjemmmic', 'meikai', 6, 'hi');
     });
 
+    // The github.comment node declares `commentId` and `url` output
+    // ports. The action used to return only `comment_id` / `html_url`,
+    // so any downstream `{{nodes.post.commentId}}` wire silently
+    // resolved to undefined. Pin both shapes so a future refactor that
+    // drops the canonical names is loud.
+    it('returns both canonical (commentId/url) and snake_case (comment_id/html_url) ports', async () => {
+        mockCreateComment.mockResolvedValueOnce({ id: 99, html_url: 'https://github.com/o/r/issues/1#c99' });
+        const result = await githubCommentAction(
+            { repo: 'o/r', pr_number: 1, body: 'hi' },
+            ctx(),
+        ) as Record<string, unknown>;
+        expect(result.commentId).toBe(99);
+        expect(result.url).toBe('https://github.com/o/r/issues/1#c99');
+        // Back-compat aliases still present:
+        expect(result.comment_id).toBe(99);
+        expect(result.html_url).toBe('https://github.com/o/r/issues/1#c99');
+    });
+
     it('accepts separate params.owner + params.repo_name', async () => {
         await githubCommentAction(
             { owner: 'Tjemmmic', repo_name: 'meikai', pr_number: 6, body: 'hi' },
