@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import pino from 'pino';
-import { mkdtemp, rm, writeFile, chmod } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { ActionContext } from '../core/types.js';
@@ -162,7 +162,11 @@ describe('shell-exec — exec mode (args supplied)', () => {
 // ─── Timeout ────────────────────────────────────────────────────────────────
 
 describe('shell-exec — timeout', () => {
-    it('SIGTERMs the child at timeout and reports timedOut=true', async () => {
+    // Explicit per-test timeout: the SIGKILL backstop is 1.5s, so even
+    // worst-case (CI under load where SIGTERM doesn't take immediately
+    // and we end up waiting for SIGKILL) settles well under 15s. The
+    // default 5s vitest timeout was too tight when SIGTERM was delayed.
+    it('SIGTERMs the child at timeout and reports timedOut=true', { timeout: 15000 }, async () => {
         const result = await shellExecAction(
             { workdir, command: 'sleep 5', timeout_seconds: 0.3 },
             ctx(),
@@ -198,19 +202,40 @@ describe('shell-exec — timeout', () => {
 // ─── Output cap ─────────────────────────────────────────────────────────────
 
 describe('shell-exec — max_output_bytes', () => {
-    it('truncates stdout at the cap and kills the child', async () => {
+    it('truncates stdout at the cap and kills the child', { timeout: 15000 }, async () => {
         // `yes` produces "y\n" forever. With a 1KB cap the child gets
         // SIGTERM as soon as we cross it.
         const result = await shellExecAction(
-            { workdir, command: 'yes', max_output_bytes: 1024, timeout_seconds: 5 },
+            { workdir, command: 'yes', max_output_bytes: 1024, timeout_seconds: 10 },
             ctx(),
         ) as Output;
         expect(result.truncated).toBe(true);
         expect(result.success).toBe(false);
         expect(result.stdout.length).toBeLessThanOrEqual(1024);
-        // Should have terminated well under the 5s timeout — the cap,
+        // Should have terminated well under the 10s timeout — the cap,
         // not the timeout, is what killed it.
         expect(result.durationMs).toBeLessThan(5000);
+    });
+
+    it('caps total bytes across stdout + stderr (not per-stream)', { timeout: 15000 }, async () => {
+        // Pin against the per-stream-tracking bug where stdout could
+        // grow to maxBytes AND stderr could independently grow to
+        // maxBytes (2× the documented limit). Run an in-shell loop
+        // (no backgrounding) so SIGTERM to the shell halts the writers.
+        const result = await shellExecAction(
+            {
+                workdir,
+                command: 'while true; do echo stdout-line; echo stderr-line >&2; done',
+                max_output_bytes: 2048,
+                timeout_seconds: 10,
+            },
+            ctx(),
+        ) as Output;
+        expect(result.truncated).toBe(true);
+        // Allow a small slack for the final chunk that landed before
+        // SIGTERM took effect, but assert we're nowhere near 2× the cap.
+        const totalBytes = result.stdout.length + result.stderr.length;
+        expect(totalBytes).toBeLessThanOrEqual(2048);
     });
 });
 

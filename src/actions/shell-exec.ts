@@ -3,6 +3,14 @@ import { isAbsolute, resolve as resolvePath } from 'node:path';
 import type { ActionHandler } from '../core/types.js';
 import { abortErrorFromSignal } from '../core/abort-error.js';
 
+/** Grace period between SIGTERM and the fallback SIGKILL. Well-behaved
+ *  children (node, npm, cargo, …) exit on SIGTERM in <100ms, so 1.5s is
+ *  comfortably above the realistic wait. Kept short on purpose: when a
+ *  workflow times out or aborts, the caller wants the action to settle
+ *  quickly — leaving a stale child around for many seconds defeats the
+ *  point of the timeout. */
+const SIGKILL_BACKSTOP_MS = 1500;
+
 /**
  * "shell-exec" — run an arbitrary command in a workdir and capture its
  * stdout/stderr/exit code. Used by graph workflows that need to verify
@@ -80,17 +88,25 @@ export const shellExecAction: ActionHandler = async (params, context) => {
 
         const stdoutChunks: Buffer[] = [];
         const stderrChunks: Buffer[] = [];
-        let stdoutBytes = 0;
-        let stderrBytes = 0;
+        // Shared counter across both streams: `max_output_bytes` is a
+        // TOTAL cap, not per-stream. With per-stream tracking, stdout
+        // and stderr could each independently grow to `maxBytes` for
+        // up to 2× the documented limit.
+        let capturedBytes = 0;
         let truncated = false;
         let timedOut = false;
         let killTimer: NodeJS.Timeout | null = null;
         let settled = false;
 
+        // Schedules the SIGKILL backstop, replacing any prior schedule
+        // so back-to-back kill paths (timeout, output-cap, abort) don't
+        // pile up orphaned timers that keep the event loop alive past
+        // the action's resolution.
         const killHard = () => {
+            if (killTimer) clearTimeout(killTimer);
             killTimer = setTimeout(() => {
                 try { child.kill('SIGKILL'); } catch { /* already dead */ }
-            }, 5000);
+            }, SIGKILL_BACKSTOP_MS);
         };
 
         const timeoutTimer = setTimeout(() => {
@@ -110,53 +126,54 @@ export const shellExecAction: ActionHandler = async (params, context) => {
         if (signal) signal.addEventListener('abort', onAbort, { once: true });
 
         const captureFromStream = (stream: 'stdout' | 'stderr') => (chunk: Buffer) => {
-            const isStdout = stream === 'stdout';
-            const currentBytes = isStdout ? stdoutBytes : stderrBytes;
-            const remaining = maxBytes - currentBytes;
+            const remaining = maxBytes - capturedBytes;
             if (remaining <= 0) return; // already full
-            if (chunk.length > remaining) {
-                const slice = chunk.subarray(0, remaining);
-                if (isStdout) {
-                    stdoutChunks.push(slice);
-                    stdoutBytes += slice.length;
-                } else {
-                    stderrChunks.push(slice);
-                    stderrBytes += slice.length;
-                }
-                if (!truncated) {
-                    truncated = true;
-                    try { child.kill('SIGTERM'); } catch { /* already dead */ }
-                    killHard();
-                }
-                return;
-            }
-            if (isStdout) {
-                stdoutChunks.push(chunk);
-                stdoutBytes += chunk.length;
+            const accepted = chunk.length > remaining ? chunk.subarray(0, remaining) : chunk;
+            if (stream === 'stdout') {
+                stdoutChunks.push(accepted);
             } else {
-                stderrChunks.push(chunk);
-                stderrBytes += chunk.length;
+                stderrChunks.push(accepted);
+            }
+            capturedBytes += accepted.length;
+            if (chunk.length > remaining && !truncated) {
+                truncated = true;
+                try { child.kill('SIGTERM'); } catch { /* already dead */ }
+                killHard();
             }
         };
 
         child.stdout?.on('data', captureFromStream('stdout'));
         child.stderr?.on('data', captureFromStream('stderr'));
 
+        // Cleanup runs on every settlement path. Pulled out so abort
+        // and timeout paths don't leak the SIGKILL backstop timer
+        // when `close` arrives after them (the close handler would
+        // otherwise early-return on `settled` without clearing it).
+        const cleanup = () => {
+            clearTimeout(timeoutTimer);
+            if (killTimer) {
+                clearTimeout(killTimer);
+                killTimer = null;
+            }
+            if (signal) signal.removeEventListener('abort', onAbort);
+        };
+
         child.on('error', (err) => {
             if (settled) return;
             settled = true;
-            clearTimeout(timeoutTimer);
-            if (killTimer) clearTimeout(killTimer);
-            if (signal) signal.removeEventListener('abort', onAbort);
+            cleanup();
             reject(err);
         });
 
         child.on('close', (code, sig) => {
+            // Always clear pending timers even if we already settled
+            // via timeout/abort/error — otherwise the SIGKILL backstop
+            // can keep the event loop alive past the action's
+            // resolution. Order matters: cleanup before the
+            // `if (settled) return` guard.
+            cleanup();
             if (settled) return;
             settled = true;
-            clearTimeout(timeoutTimer);
-            if (killTimer) clearTimeout(killTimer);
-            if (signal) signal.removeEventListener('abort', onAbort);
 
             const stdout = Buffer.concat(stdoutChunks).toString('utf8');
             const stderr = Buffer.concat(stderrChunks).toString('utf8');
@@ -176,8 +193,9 @@ export const shellExecAction: ActionHandler = async (params, context) => {
                     durationMs,
                     timedOut,
                     truncated,
-                    stdoutBytes,
-                    stderrBytes,
+                    capturedBytes,
+                    stdoutBytes: Buffer.byteLength(stdout),
+                    stderrBytes: Buffer.byteLength(stderr),
                 },
                 'shell-exec completed',
             );
