@@ -648,6 +648,34 @@ describe('executeGraph', () => {
         expect(result.nodeOutputs.e.echoed).toBe('pre[]post');
     });
 
+    it('does NOT honour the bare `{{metadata.…}}` prefix — the canonical path is `event.metadata.…`', async () => {
+        // `metadata.` was listed in ALLOWED_PREFIXES but never wired
+        // into the resolution context, so it always silently collapsed
+        // to "". Removing it from the allow-list pushes such typos into
+        // the unknown-prefix branch so they round-trip as literals and
+        // surface to the author.
+        actions.set('echo', async (params) => ({ echoed: params.value }));
+        registry.register(actionDef('test.echo', 'echo', [
+            { name: 'value', role: 'input', label: 'Value', wire: true, config: true, control: 'text' },
+            { name: 'echoed', role: 'output', label: 'Echoed', wire: true },
+        ]));
+        const graph: NodeGraph = {
+            nodes: [
+                { id: 'trig', type: 'trigger.github' },
+                { id: 'bare', type: 'test.echo', config: { value: 'r={{metadata.repo}}' } },
+                { id: 'full', type: 'test.echo', config: { value: 'r={{event.metadata.repo}}' } },
+            ],
+            edges: [],
+        };
+        const result = await executeGraph(
+            graph,
+            evt({ metadata: { repo: 'octo/r' } }),
+            actions, registry, noopLogger,
+        );
+        expect(result.nodeOutputs.bare.echoed).toBe('r={{metadata.repo}}');
+        expect(result.nodeOutputs.full.echoed).toBe('r=octo/r');
+    });
+
     it('caps interpolation recursion to avoid stack overflow on deep configs', async () => {
         // Build a config nested 100 levels deep. Without the depth
         // guard this would either blow the stack (small node) or just

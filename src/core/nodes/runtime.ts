@@ -404,7 +404,15 @@ interface InterpolationContext {
     inputs: Record<string, unknown>;
 }
 
-const ALLOWED_PREFIXES = ['event.', 'results.', 'steps.', 'nodes.', 'metadata.', 'inputs.'];
+// `metadata.` is intentionally NOT in this list — the canonical path is
+// `event.metadata.…`, which is what every template in the repo uses (25
+// occurrences vs 0 for the bare `metadata.` form). Listing it here used
+// to imply `{{metadata.repo}}` would work, but no executor ever wired
+// `metadata` into the interpolation context as a top-level key, so it
+// silently resolved to undefined → empty string. Removing it surfaces
+// such typos (the unknown-prefix branch now preserves them as literals
+// in both executors).
+const ALLOWED_PREFIXES = ['event.', 'results.', 'steps.', 'nodes.', 'inputs.'];
 
 // Hard cap on interpolation recursion. Real configs are 1–3 levels deep
 // (a KV map, a list of {name,label,type} objects). 16 is well above any

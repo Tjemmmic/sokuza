@@ -511,15 +511,28 @@ function interpolateValue(value: unknown, context: ActionContext): unknown {
     return value;
 }
 
-const ALLOWED_INTERPOLATION_PREFIXES = ['event.', 'results.', 'steps.', 'metadata.', 'inputs.'];
+// `metadata.` is deliberately omitted — see core/nodes/runtime.ts for
+// the rationale. Use `event.metadata.…` (what every template already
+// does).
+const ALLOWED_INTERPOLATION_PREFIXES = ['event.', 'results.', 'steps.', 'inputs.'];
 
 const INPUTS_ALIAS_RE = /^inputs\.(.+)$/;
 
 function interpolateString(template: string, context: ActionContext): string {
-    return template.replace(/\{\{(.+?)\}\}/g, (_match, path: string) => {
+    return template.replace(/\{\{(.+?)\}\}/g, (match, path: string) => {
         const trimmed = path.trim();
+        // Anything outside the known prefixes is left intact — keeps
+        // the legacy executor in lockstep with the graph runtime
+        // (core/nodes/runtime.ts#interpolateString). A typo like
+        // `{{ndoes.review.sha}}` stays visible in logs and downstream
+        // string compares instead of silently becoming "", and literal
+        // `{{...}}` in user-authored content (Markdown handlebars
+        // examples, JSX snippets, doc bodies that legitimately mention
+        // template syntax) round-trips unchanged. Recognised-but-empty
+        // refs still resolve to "" so a missing optional value doesn't
+        // pollute output with placeholder text.
         if (!ALLOWED_INTERPOLATION_PREFIXES.some(p => trimmed.startsWith(p))) {
-            return '';
+            return match;
         }
         const resolved = INPUTS_ALIAS_RE.test(trimmed)
             ? `event.payload.${trimmed}`
