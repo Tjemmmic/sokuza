@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
-import { isAbsolute, resolve as resolvePath } from 'node:path';
 import type { ActionHandler } from '../core/types.js';
 import { abortErrorFromSignal } from '../core/abort-error.js';
+import { validateWorkdir } from './_workdir-validation.js';
 
 /** Grace period between SIGTERM and the fallback SIGKILL. Well-behaved
  *  children (node, npm, cargo, …) exit on SIGTERM in <100ms, so 1.5s is
@@ -52,7 +52,7 @@ const SIGKILL_BACKSTOP_MS = 1500;
  *   - env (optional KV). Merged over `process.env`.
  */
 export const shellExecAction: ActionHandler = async (params, context) => {
-    const workdir = validateWorkdir(params.workdir);
+    const workdir = validateWorkdir(params.workdir, 'shell-exec');
     const command = validateCommand(params.command);
     const explicitArgs = parseArgsParam(params.args);
     const useShell = explicitArgs === null;
@@ -214,51 +214,10 @@ export const shellExecAction: ActionHandler = async (params, context) => {
 };
 
 // ─── Validation helpers ────────────────────────────────────────────────────
-
-/**
- * Validate the user-supplied `workdir`. Mirrors `git-commit-and-push` —
- * the visual editor surfaces this as freeform text, so a user-authored
- * workflow YAML could point it at any path on the host. We refuse
- * injection-shaped strings and obviously sensitive system paths but
- * stop short of a strict allowlist (legitimate workdirs span tmpdir,
- * `~/.sokuza/auto-fix-workdirs/`, chat-session paths, and arbitrary
- * operator-chosen destDirs).
- */
-function validateWorkdir(raw: unknown): string {
-    if (typeof raw !== 'string' || raw.length === 0) {
-        throw new Error('shell-exec: workdir is required');
-    }
-    if (raw.includes('\0')) {
-        throw new Error('shell-exec: workdir contains NUL character');
-    }
-    if (/[\x00-\x1f\x7f]/.test(raw)) {
-        throw new Error('shell-exec: workdir contains control characters');
-    }
-    if (raw.startsWith('-')) {
-        throw new Error(`shell-exec: workdir must not start with "-" (got ${JSON.stringify(raw)})`);
-    }
-    if (!isAbsolute(raw)) {
-        throw new Error(`shell-exec: workdir must be an absolute path (got ${JSON.stringify(raw)})`);
-    }
-    const resolved = resolvePath(raw);
-    if (resolved === '/' || resolved === '\\') {
-        throw new Error('shell-exec: workdir must not be the filesystem root');
-    }
-    for (const denied of FORBIDDEN_WORKDIR_PREFIXES) {
-        if (resolved === denied || resolved.startsWith(denied + '/')) {
-            throw new Error(`shell-exec: workdir resolves to a sensitive system path (${resolved})`);
-        }
-    }
-    return raw;
-}
-
-/** Kept in sync with the same list in `git-commit-and-push.ts`. */
-const FORBIDDEN_WORKDIR_PREFIXES: readonly string[] = [
-    '/etc', '/proc', '/sys', '/dev', '/boot', '/root',
-    '/usr', '/bin', '/sbin',
-    '/lib', '/lib32', '/lib64',
-    '/var/log', '/var/lib', '/var/run',
-];
+//
+// Workdir validation is shared with `git-commit-and-push.ts` via
+// `_workdir-validation.ts`. The remaining helpers below are
+// shell-exec-specific (command, args list, timeout, env).
 
 function validateCommand(raw: unknown): string {
     if (typeof raw !== 'string' || raw.length === 0) {
