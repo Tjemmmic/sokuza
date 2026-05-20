@@ -67,6 +67,39 @@ describe('extractTriggerFromGraph', () => {
         })).toThrow(/config\.repos must be a string or array of strings.*boolean/);
     });
 
+    it('builds an exclude block from exclude_* config keys', () => {
+        const trigger = extractTriggerFromGraph({
+            nodes: [
+                {
+                    id: 'trig',
+                    type: 'trigger.github',
+                    config: {
+                        events: ['pull_request.opened'],
+                        exclude_authors: 'dependabot[bot], renovate[bot]',
+                        exclude_labels: ['wip', 'do-not-review'],
+                        exclude_branches: 'releases/*',
+                        exclude_repos: ['my-org/legacy-*'],
+                    },
+                },
+            ],
+            edges: [],
+        });
+        expect(trigger?.exclude).toEqual({
+            repo: ['my-org/legacy-*'],
+            branch: ['releases/*'],
+            author: ['dependabot[bot]', 'renovate[bot]'],
+            labels: ['wip', 'do-not-review'],
+        });
+    });
+
+    it('omits the exclude block entirely when no exclude_* keys are set', () => {
+        const trigger = extractTriggerFromGraph({
+            nodes: [{ id: 't', type: 'trigger.github', config: { events: ['pull_request.opened'] } }],
+            edges: [],
+        });
+        expect(trigger).not.toHaveProperty('exclude');
+    });
+
     it('treats null/undefined list configs as empty (legitimate "no filter")', () => {
         const trigger = extractTriggerFromGraph({
             nodes: [

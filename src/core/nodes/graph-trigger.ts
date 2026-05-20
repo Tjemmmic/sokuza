@@ -46,6 +46,14 @@ export function extractTriggerFromGraph(graph: NodeGraph): TriggerDefinition | u
     const authors = parseList(cfg.authors, 'authors', triggerNode.id);
     const labels = parseList(cfg.labels, 'labels', triggerNode.id);
 
+    // Negation: separate config keys keep the form UI flat (one field per
+    // exclude axis) while the resulting TriggerDefinition groups them
+    // under `exclude:` to match the YAML-author surface.
+    const excludeRepos = parseList(cfg.exclude_repos, 'exclude_repos', triggerNode.id);
+    const excludeBranches = parseList(cfg.exclude_branches, 'exclude_branches', triggerNode.id);
+    const excludeAuthors = parseList(cfg.exclude_authors, 'exclude_authors', triggerNode.id);
+    const excludeLabels = parseList(cfg.exclude_labels, 'exclude_labels', triggerNode.id);
+
     const trigger: TriggerDefinition = {
         source,
         event: events,
@@ -54,6 +62,13 @@ export function extractTriggerFromGraph(graph: NodeGraph): TriggerDefinition | u
     if (branches.length > 0) trigger.branch = branches;
     if (authors.length > 0) trigger.author = authors;
     if (labels.length > 0) trigger.labels = labels;
+
+    const exclude: NonNullable<TriggerDefinition['exclude']> = {};
+    if (excludeRepos.length > 0) exclude.repo = excludeRepos;
+    if (excludeBranches.length > 0) exclude.branch = excludeBranches;
+    if (excludeAuthors.length > 0) exclude.author = excludeAuthors;
+    if (excludeLabels.length > 0) exclude.labels = excludeLabels;
+    if (Object.keys(exclude).length > 0) trigger.exclude = exclude;
 
     if (source === 'cron' && typeof cfg.schedule === 'string' && cfg.schedule) {
         // Legacy form models cron schedules as the event name itself.

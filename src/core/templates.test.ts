@@ -140,6 +140,28 @@ describe('normalizeWorkflow — shorthand resolution', () => {
         );
         expect(wf.trigger.filters).toBeUndefined();
     });
+
+    it('passes the exclude block through unchanged', async () => {
+        // Engine consumes exclude directly off the trigger — resolveShorthands
+        // must not lose it. This pins the contract for YAML-authored workflows
+        // (graph workflows go through extractTriggerFromGraph instead).
+        const wf = await normalizeWorkflow(
+            minWorkflow({
+                source: 'github',
+                event: 'pull_request.opened',
+                exclude: {
+                    author: ['dependabot[bot]'],
+                    labels: ['wip'],
+                    branch: 'releases/*',
+                },
+            }),
+        );
+        expect(wf.trigger.exclude).toEqual({
+            author: ['dependabot[bot]'],
+            labels: ['wip'],
+            branch: 'releases/*',
+        });
+    });
 });
 
 // ─── normalizeWorkflow — metadata passthrough ───────────────────────────────

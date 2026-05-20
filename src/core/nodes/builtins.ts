@@ -166,6 +166,25 @@ const GITHUB_EVENT_RULES: DynamicOutputSpec = {
     ],
 };
 
+// Shared filter ports for the three GitHub-flavored trigger nodes. The
+// include and exclude axes are symmetric — repos/branches/authors/labels
+// each appear on both sides — and `extractTriggerFromGraph` reads them
+// by these exact config-key names. Globs (`my-org/*`) work on all four
+// include axes and on exclude repo/branch/author.
+const GITHUB_INCLUDE_PORTS: NodePort[] = [
+    { name: 'repos', label: 'Repositories', role: 'input', config: true, control: 'text', helpText: 'Comma-separated org/repo names. Supports glob, e.g. `my-org/*`. Empty = all.' },
+    { name: 'branches', label: 'Branches', role: 'input', config: true, control: 'text', helpText: 'Comma-separated branch names. Supports glob. Empty = all.' },
+    { name: 'authors', label: 'Authors', role: 'input', config: true, control: 'text', helpText: 'Comma-separated GitHub usernames (case-insensitive). Empty = all.' },
+    { name: 'labels', label: 'Labels (any of)', role: 'input', config: true, control: 'text', helpText: 'Comma-separated. Event must carry at least one of these labels.' },
+];
+
+const GITHUB_EXCLUDE_PORTS: NodePort[] = [
+    { name: 'exclude_repos', label: 'Exclude Repositories', role: 'input', config: true, control: 'text', helpText: 'Reject if repo matches any entry. Supports glob.' },
+    { name: 'exclude_branches', label: 'Exclude Branches', role: 'input', config: true, control: 'text', helpText: 'Reject if base branch matches any entry. Supports glob.' },
+    { name: 'exclude_authors', label: 'Exclude Authors', role: 'input', config: true, control: 'text', helpText: 'Reject if author matches any entry. Useful for `dependabot[bot]`. Supports glob.' },
+    { name: 'exclude_labels', label: 'Exclude Labels (any present)', role: 'input', config: true, control: 'text', helpText: 'Reject if the PR/issue carries any of these labels. Useful for `wip`, `do-not-review`.' },
+];
+
 const githubTrigger: NodeDefinition = {
     type: 'trigger.github',
     category: 'trigger',
@@ -176,10 +195,8 @@ const githubTrigger: NodeDefinition = {
     color: COLOR_TRIGGER,
     ports: [
         { name: 'events', label: 'Events', role: 'input', config: true, control: 'multiselect', required: true, helpText: 'pull_request.opened, issues.opened, review.submitted, …' },
-        { name: 'repos', label: 'Repositories', role: 'input', config: true, control: 'text', helpText: 'Comma-separated org/repo names. Empty = all repos.' },
-        { name: 'branches', label: 'Branches', role: 'input', config: true, control: 'text', helpText: 'Comma-separated. Empty = all branches.' },
-        { name: 'authors', label: 'Authors', role: 'input', config: true, control: 'text', helpText: 'Comma-separated GitHub usernames. Empty = all.' },
-        { name: 'labels', label: 'Labels (any of)', role: 'input', config: true, control: 'text' },
+        ...GITHUB_INCLUDE_PORTS,
+        ...GITHUB_EXCLUDE_PORTS,
         ...TRIGGER_BASE_OUTPUTS,
     ],
     dynamicOutputs: [GITHUB_EVENT_RULES],
@@ -195,7 +212,8 @@ const githubPollTrigger: NodeDefinition = {
     color: COLOR_TRIGGER,
     ports: [
         { name: 'events', label: 'Events', role: 'input', config: true, control: 'multiselect', required: true },
-        { name: 'repos', label: 'Repositories', role: 'input', config: true, control: 'text' },
+        ...GITHUB_INCLUDE_PORTS,
+        ...GITHUB_EXCLUDE_PORTS,
         ...TRIGGER_BASE_OUTPUTS,
     ],
     dynamicOutputs: [GITHUB_EVENT_RULES],
@@ -211,7 +229,8 @@ const ghCliTrigger: NodeDefinition = {
     color: COLOR_TRIGGER,
     ports: [
         { name: 'events', label: 'Events', role: 'input', config: true, control: 'multiselect', required: true },
-        { name: 'repos', label: 'Repositories', role: 'input', config: true, control: 'text' },
+        ...GITHUB_INCLUDE_PORTS,
+        ...GITHUB_EXCLUDE_PORTS,
         ...TRIGGER_BASE_OUTPUTS,
     ],
     dynamicOutputs: [GITHUB_EVENT_RULES],

@@ -218,6 +218,7 @@ function resolveShorthands(
         author: raw.author as OneOrMany<string> | undefined,
         labels: raw.labels as string[] | undefined,
         filters: Object.keys(filters).length > 0 ? filters : undefined,
+        exclude: raw.exclude as TriggerDefinition['exclude'] | undefined,
     };
 }
 
