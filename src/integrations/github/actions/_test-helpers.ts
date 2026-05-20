@@ -37,9 +37,33 @@ export function makeContext(overrides?: Partial<ActionContext>): ActionContext {
 export function mockFetch(handlers: Array<(url: string, init?: RequestInit) => Response | Promise<Response>>) {
     let i = 0;
     return vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
-        const url = typeof input === 'string' ? input : (input as URL).toString();
+        const url = extractFetchUrl(input);
         const handler = handlers[Math.min(i, handlers.length - 1)];
         i++;
         return handler(url);
     });
+}
+
+/** Pull the URL out of any of `fetch`'s three accepted input shapes.
+ *  `Request.toString()` returns `[object Request]`, so the previous
+ *  `(input as URL).toString()` cast would silently produce that string
+ *  if a caller ever switched to passing a Request — URL assertions in
+ *  tests would then either fail mysteriously or pass against the
+ *  bogus value. fetchWithTimeout only takes `string | URL` today, but
+ *  the mock should stay correct under future refactors.
+ *
+ *  Typed as `unknown` rather than the DOM `RequestInfo | URL` because
+ *  the tsconfig doesn't include the DOM lib; the runtime checks below
+ *  are exhaustive across all three shapes the fetch API accepts. */
+function extractFetchUrl(input: unknown): string {
+    if (typeof input === 'string') return input;
+    if (input instanceof URL) return input.toString();
+    // `Request` exists in the global scope at runtime (Node 18+ / browser)
+    // but may not be declared at the type level. Guard against the
+    // referenceError before using `instanceof`.
+    const RequestCtor = (globalThis as { Request?: new (...args: unknown[]) => unknown }).Request;
+    if (RequestCtor && input instanceof RequestCtor) {
+        return (input as { url: string }).url;
+    }
+    return String(input);
 }
