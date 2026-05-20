@@ -81,3 +81,45 @@ describe('AI nodes expose typed AI provider/model controls', () => {
         expect(promptPort?.defaultSource).toBe('ai-review-system-prompt');
     });
 });
+
+// All three GitHub-flavored trigger nodes must expose the same filter ports
+// — including the exclude/negation axes. Without this pin a poll/cli node
+// can silently regress to only `events`/`repos` (the original shape),
+// leaving the user unable to limit by author/branch/label in the editor.
+describe('GitHub trigger nodes expose symmetric include + exclude ports', () => {
+    let registry: NodeRegistry;
+
+    beforeEach(() => {
+        registry = new NodeRegistry();
+        registerBuiltinNodes(registry);
+    });
+
+    const INCLUDE_PORTS = ['repos', 'branches', 'authors', 'labels'];
+    const EXCLUDE_PORTS = [
+        'exclude_repos',
+        'exclude_branches',
+        'exclude_authors',
+        'exclude_labels',
+    ];
+
+    for (const type of ['trigger.github', 'trigger.github-poll', 'trigger.gh-cli']) {
+        it(`${type} exposes every include filter port`, () => {
+            const def = registry.serialize().find((n) => n.type === type);
+            expect(def, `${type} should be registered`).toBeDefined();
+            for (const portName of INCLUDE_PORTS) {
+                const port = def!.ports.find((p) => p.name === portName && p.role === 'input');
+                expect(port, `${type} missing include port "${portName}"`).toBeDefined();
+                expect(port?.config).toBe(true);
+            }
+        });
+
+        it(`${type} exposes every exclude filter port`, () => {
+            const def = registry.serialize().find((n) => n.type === type);
+            for (const portName of EXCLUDE_PORTS) {
+                const port = def!.ports.find((p) => p.name === portName && p.role === 'input');
+                expect(port, `${type} missing exclude port "${portName}"`).toBeDefined();
+                expect(port?.config).toBe(true);
+            }
+        });
+    }
+});
