@@ -24,7 +24,97 @@ const ge = (window._gEditor = {
     drag: null,                 // { kind:'node'|'pan'|'wire', ... }
     wiringFrom: null,           // { nodeId, port }
     palette: { search: '', collapsedGroups: {} },
+    // Snapshot of the workflow as it was last loaded or saved. Used
+    // to detect unsaved changes for the close/unload prompts. Set by
+    // captureEditorBaseline(); read by isEditorDirty(). Format:
+    // the JSON-serialized output of serializeWorkflow(), which is the
+    // exact shape we'd POST/PUT on save — anything not in that shape
+    // (selection, viewport, drag state) is correctly ignored.
+    savedSnapshot: null,
 });
+
+// ─── Unsaved-changes tracking ───────────────────────────────────────────────
+//
+// Without these guards a long editing session is lost the moment the user
+// closes the tab, hits browser back, or clicks a different sidebar link.
+// We compare the live workflow against a baseline serialized form rather
+// than instrumenting every mutation — there are dozens of mutation points
+// (setNodeField, addNodeOfType, deleteNode, wire create/disconnect, paste,
+// rename, drag, …) and instrumenting all of them is brittle. The snapshot
+// IS what we'd save, so any persisted divergence counts as "dirty".
+
+function captureEditorBaseline() {
+    if (!ge.workflow) { ge.savedSnapshot = null; return; }
+    try {
+        ge.savedSnapshot = JSON.stringify(serializeWorkflow(ge.workflow));
+    } catch {
+        // Defensive: if the workflow is mid-edit and not yet serializable
+        // (e.g. a node config is still being filled in), treat as
+        // baseline=null so the next baseline-capture wins.
+        ge.savedSnapshot = null;
+    }
+}
+
+function isEditorDirty() {
+    if (!ge.workflow || ge.savedSnapshot === null) return false;
+    try {
+        return JSON.stringify(serializeWorkflow(ge.workflow)) !== ge.savedSnapshot;
+    } catch {
+        // Same defensive bail: if serialization fails mid-edit, treat
+        // as "not dirty" — the user gets no false-positive prompt.
+        // They'll trip the guard next time the workflow is well-formed.
+        return false;
+    }
+}
+
+// Prompt the user before discarding unsaved changes. Returns true if
+// it's safe to proceed (no changes, or user confirmed discard) and
+// performs editor teardown on the proceed path; the caller is then
+// free to navigate without worrying about leaking listeners. Returns
+// false when the user cancels — caller leaves the editor intact.
+//
+// Teardown lives here (rather than only in closeGraphEditor) because
+// SPA navigation calls this hook directly via `window.__beforeNavigate`,
+// and we need exactly one place that guarantees the listeners get
+// removed on every "proceed" outcome.
+function confirmDiscardEditorChanges() {
+    if (!isEditorDirty()) { teardownEditorState(); return true; }
+    if (window.confirm('You have unsaved changes in the workflow editor. Discard them and leave?')) {
+        teardownEditorState();
+        return true;
+    }
+    return false;
+}
+
+function teardownEditorState() {
+    disarmEditorGuards();
+    unbindCanvasInteractions();
+}
+
+// Native beforeunload: catches tab close / refresh / browser back.
+// preventDefault() is enough to arm the browser's native "leave site?"
+// dialog in modern browsers; the (deprecated) returnValue is set for
+// older ones.
+function geOnBeforeUnload(e) {
+    if (!isEditorDirty()) return;
+    e.preventDefault();
+    e.returnValue = '';
+}
+
+function armEditorGuards() {
+    window.addEventListener('beforeunload', geOnBeforeUnload);
+    // SPA navigation (sidebar link clicks, in-app navigate() calls)
+    // doesn't fire beforeunload — wire a hook on window that the
+    // app's navigate() consults before changing pages.
+    window.__beforeNavigate = confirmDiscardEditorChanges;
+}
+
+function disarmEditorGuards() {
+    window.removeEventListener('beforeunload', geOnBeforeUnload);
+    if (window.__beforeNavigate === confirmDiscardEditorChanges) {
+        window.__beforeNavigate = null;
+    }
+}
 
 // Public entrypoint — exposed via window for app.js to call.
 //
@@ -67,6 +157,8 @@ window.openGraphEditor = async function (workflowName, opts = {}) {
             // straight into the editor with the template's graph already
             // loaded. They can rename, edit, and save = install.
             ge.workflow = ensureGraphShape(staged);
+            captureEditorBaseline();
+            armEditorGuards();
             renderEditor();
             return;
         }
@@ -80,6 +172,8 @@ window.openGraphEditor = async function (workflowName, opts = {}) {
 
         const wfRes = await api.get(`/api/workflows/${encodeURIComponent(workflowName)}/details`);
         ge.workflow = ensureGraphShape(wfRes.workflow);
+        captureEditorBaseline();
+        armEditorGuards();
         renderEditor();
     } catch (err) {
         toast(`Failed to open editor: ${err.message}`, 'error');
@@ -382,6 +476,12 @@ window.pickRecipe = async function (id) {
         if (!r) return;
         ge.workflow = r.build();
     }
+    // Recipe-built workflows always start clean: the user has done
+    // nothing yet, so the baseline IS the recipe output. Without
+    // this, the unsaved-changes prompt would fire the moment the
+    // user clicked Close, even if they made zero edits.
+    captureEditorBaseline();
+    armEditorGuards();
     renderEditor();
 };
 
@@ -591,13 +691,13 @@ function renderEditor() {
                 <input id="ge-name" class="ge-name-input" placeholder="workflow-name"
                     value="${esc(ge.workflow.name || '')}"
                     ${ge.isNew ? '' : 'readonly title="Workflow name is the unique key — duplicate to rename"'}
-                    oninput="ge.workflow.name = this.value">
+                    oninput="ge.workflow.name = this.value; updateDirtyIndicator(); updateYamlPanel()">
                 <input id="ge-desc" class="ge-desc-input" placeholder="What does this workflow do?"
                     value="${esc(ge.workflow.description || '')}"
-                    oninput="ge.workflow.description = this.value">
+                    oninput="ge.workflow.description = this.value; updateDirtyIndicator(); updateYamlPanel()">
                 <label class="ge-toggle" title="Enable / pause">
                     <input type="checkbox" ${ge.workflow.enabled !== false ? 'checked' : ''}
-                        onchange="ge.workflow.enabled = this.checked">
+                        onchange="ge.workflow.enabled = this.checked; updateDirtyIndicator(); updateYamlPanel()">
                     <span>${ge.workflow.enabled !== false ? 'Enabled' : 'Paused'}</span>
                 </label>
                 <div style="flex:1"></div>
@@ -605,7 +705,7 @@ function renderEditor() {
                 <button class="btn btn-ghost btn-sm" onclick="zoomTo(1)">100%</button>
                 <button class="btn btn-ghost btn-sm" onclick="zoomFit()" title="Fit graph to view">⊡ Fit</button>
                 <button class="btn btn-ghost btn-sm" onclick="toggleYamlPanel()">{ } YAML</button>
-                <button class="btn btn-primary btn-sm" onclick="saveGraphWorkflow()">💾 Save</button>
+                <button class="btn btn-primary btn-sm" id="ge-save-btn" onclick="saveGraphWorkflow()">💾 Save</button>
             </div>
 
             <div class="ge-body">
@@ -637,11 +737,17 @@ function renderEditor() {
     renderCanvas();
     renderInspector();
     bindCanvasInteractions();
+    // Initial paint: the indicator starts clean (baseline was captured
+    // at open time before any user edit).
+    updateDirtyIndicator();
     updateCanvasHint();
 }
 
 window.closeGraphEditor = function () {
-    unbindCanvasInteractions();
+    // Prompt for unsaved changes; teardown happens inside the helper on
+    // the "proceed" path so the hook used by SPA navigation gets the
+    // same cleanup guarantees this code path does.
+    if (!confirmDiscardEditorChanges()) return;
     navigate('workflows');
 };
 
@@ -2143,6 +2249,15 @@ window.saveGraphWorkflow = async function () {
             await api.put(`/api/workflows/${encodeURIComponent(ge.originalName)}`, payload);
             toast(`Saved "${wf.name}"`);
         }
+        // The on-disk state now matches the editor — refresh the
+        // baseline so isEditorDirty() returns false until the next
+        // edit. Critical: a save that didn't refresh the baseline
+        // would leave the editor permanently "dirty", prompting the
+        // user every time they tried to close even after saving.
+        captureEditorBaseline();
+        // The "modified" dot near the Save button derives from the
+        // baseline — repaint the topbar so it disappears immediately.
+        updateDirtyIndicator();
     } catch (err) {
         toast(`Save failed: ${err.message}`, 'error');
     }
@@ -2207,12 +2322,25 @@ window.toggleYamlPanel = function () {
 };
 
 function updateYamlPanel() {
+    // Every workflow mutation funnels through this function (it's
+    // already called from all 26 mutation sites), so it's also the
+    // ideal hook for the dirty indicator's repaint.
+    updateDirtyIndicator();
     const p = $('#ge-yaml-panel');
     if (!p || p.style.display === 'none') return;
     const pre = $('#ge-yaml-pre');
     if (!pre) return;
     const payload = serializeWorkflow(ge.workflow);
     pre.textContent = pseudoYaml(payload);
+}
+
+// Toggle a small "modified" dot next to the Save button so the user
+// can see at a glance that the workflow has unsaved changes. Cheap
+// to call repeatedly — just toggles a class on a single element.
+function updateDirtyIndicator() {
+    const btn = document.getElementById('ge-save-btn');
+    if (!btn) return;
+    btn.classList.toggle('ge-dirty', isEditorDirty());
 }
 
 // Tiny YAML-ish stringifier — good enough for the read-only preview pane.
@@ -2237,7 +2365,16 @@ function pseudoYaml(obj, indent = 0) {
         // parses as the (truncated) scalar "hello\" followed by garbage.
         // Order matters: double the slashes first, then escape quotes.
         const escaped = obj.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-        return /^[a-zA-Z0-9_./@:#-]+$/.test(obj) ? obj : `"${escaped}"`;
+        // Bare-word allow-list: only letters, digits, underscore, dot,
+        // slash, and dash — the characters used by every legitimate
+        // sokuza identifier (node ids, dotted types like `ai.review`,
+        // repo paths like `owner/name`). Deliberately excluded:
+        //   `:` — `field: foo:` parses as a malformed mapping
+        //   `#` — leading `#` is read as a comment (drops the value)
+        //   `@` — YAML reserves `@` as an indicator; `@me` throws
+        // URLs and emails (which contain those characters) correctly
+        // fall through to the quoted branch and parse unambiguously.
+        return /^[a-zA-Z0-9_./-]+$/.test(obj) ? obj : `"${escaped}"`;
     }
     if (typeof obj === 'number' || typeof obj === 'boolean') return String(obj);
     if (Array.isArray(obj)) {
@@ -2290,3 +2427,4 @@ window.renderCanvas = renderCanvas;
 window.renderPalette = renderPalette;
 window.drawEdges = drawEdges;
 window.updateYamlPanel = updateYamlPanel;
+window.updateDirtyIndicator = updateDirtyIndicator;

@@ -2779,6 +2779,23 @@ tr:hover td {
     box-shadow: 0 0 0 1px var(--danger, #ef4444) !important;
 }
 
+/* "Modified" dot on the Save button when the editor has unsaved
+   changes. Together with the close/unload confirmation, this gives
+   the user a continuous visual signal that pressing Save (or the
+   browser back button) matters right now. */
+#ge-save-btn { position: relative; }
+#ge-save-btn.ge-dirty::after {
+    content: '';
+    position: absolute;
+    top: 4px;
+    right: 4px;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: #f59e0b;
+    box-shadow: 0 0 0 2px var(--bg-primary, #0b0d12);
+}
+
 /* ─── Palette presets ──────────────────────────────────────────────────────
    Presets render in their own group above the built-in node types. The
    subtle accent border makes them visually distinct so a user notices

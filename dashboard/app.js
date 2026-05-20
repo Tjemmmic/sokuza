@@ -467,6 +467,13 @@ function confirm(msg) {
 
 // ─── Router ─────────────────────────────────────────────────────────────────
 function navigate(page) {
+    // Give the visual editor (or any other surface with unsaved state)
+    // a chance to prompt before we tear it down. The editor registers
+    // `window.__beforeNavigate` while it's open and dirty; a `false`
+    // return means the user cancelled and we should stay where we are.
+    if (typeof window.__beforeNavigate === 'function' && !window.__beforeNavigate()) {
+        return;
+    }
     if (page === 'templates') page = 'library';
     if (queueRefreshTimer) { clearInterval(queueRefreshTimer); queueRefreshTimer = null; }
     if (logSource) { logSource.close(); logSource = null; }
