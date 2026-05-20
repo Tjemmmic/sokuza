@@ -130,64 +130,125 @@ beforeAll(() => {
 describe('library template execution', () => {
     const templates = loadGraphTemplates();
 
-    // Mock every action with a permissive handler that returns generic
-    // outputs. We don't care what they DO — we care that the graph hands
-    // them well-formed inputs and doesn't crash on the wiring itself.
+    // Per-action mocks whose return shape matches each action's REAL
+    // return value. The previous kitchen-sink mock returned every
+    // possible key at once — templates that referenced an undeclared
+    // port still passed because the mock had it, masking the kind of
+    // node-port/action-return mismatch that broke ai-pr-review in
+    // production. Keeping each mock honest means a template wired
+    // against a phantom port (e.g. `{{nodes.review.totally_fake}}`)
+    // surfaces as an empty interpolation in this test, not just at
+    // runtime.
+    //
+    // Source of truth for each shape:
+    //   - ai-review.ts:       lines 349-382 (id/review/...; markdown/structured/summary/issues/mergeReady/runId)
+    //   - ai-agent.ts:        lines 60-87  (output/transcript/review/model/provider + parsedJson spread)
+    //   - address-review.ts:  lines 158-170 (halted) + 352-365 (record + iterationsRun/finalState)
+    //   - github actions:     each action's return statement
     function buildActionRegistry(): Map<string, ActionHandler> {
         const actions = new Map<string, ActionHandler>();
-        const generic: ActionHandler = async () => ({
-            // Cover the most-read output keys across the library so
-            // downstream interpolation finds something:
-            review: 'mocked review',
-            markdown: 'mocked markdown',
-            output: 'mocked agent output',
-            review_run_id: 'r-1',
-            structured: { issues: [], summary: '', mergeReady: true },
-            diff: '--- a\n+++ b\n',
-            files: [],
-            truncated: false,
-            commentId: 'c-1',
-            url: 'https://github.com/org/repo/x',
-            path: '/tmp/wd',
-            sha: 'aaaa1111',
-            number: 42,
-            branch: 'feature/x',
-            repo: 'org/repo',
-            pushed: true,
-            hasChanges: true,
-            merged: true,
-            message: 'merged',
-            success: true,
-            failedChecks: [],
-            totalChecks: 0,
-            timedOut: false,
-            reviewId: 'rv-1',
-            appliedLabels: ['bug'],
-            removedLabel: 'wip',
-            reviews: [],
-            issue: { number: 7 },
-            pr: { number: 42 },
-            state: 'open',
-            iterationsRun: 1,
-            finalState: 'done',
+
+        // AI actions
+        actions.set('ai-review', async () => ({
+            id: 'r-1', review: 'mocked review',
+            model: 'sonnet', provider: 'claude-code',
+            usage: { input_tokens: 100, output_tokens: 20 },
+            parsed: { summary: 'ok', issues: [], decision: 'APPROVE', justification: 'fine' },
+            truncation: undefined,
+            // Node-contract ports (ai.review):
+            markdown: 'mocked review',
+            structured: { summary: 'ok', issues: [], decision: 'APPROVE', justification: 'fine' },
+            summary: 'ok', issues: [], mergeReady: true,
+            runId: 'r-1',
+        }));
+        actions.set('ai-agent', async () => ({
+            output: 'mocked agent output', review: 'mocked agent output',
+            transcript: undefined,
+            model: 'sonnet', provider: 'claude-code',
+        }));
+        actions.set('address-review', async () => ({
+            id: 'ar-1', action: 'address-review', createdAt: '2026-05-04T00:00:00Z',
+            durationMs: 10, iteration: 1, iterationCap: 5,
+            sourceReviewRunId: 'r-1', mode: 'suggest',
+            provider: 'claude-code', model: 'sonnet',
+            issues: { addressed: [], rejected: [], deferred: [] },
+            workdir: { path: '/tmp/wd', reused: false },
+            issueFingerprint: 'abc',
+            // Node-contract ports (ai.address-review):
+            iterationsRun: 1, finalState: 'completed',
+        }));
+
+        // GitHub actions — match each handler's real return
+        actions.set('github-fetch-diff', async () => ({
+            diff: '--- a\n+++ b\n', files: [], fileCount: 0,
+            owner: 'org', repo: 'repo', pr_number: 42,
+            diff_source: 'bulk', incomplete_files: [], truncation: undefined,
+        }));
+        actions.set('github-comment', async () => ({
+            commentId: 'c-1', url: 'https://github.com/org/repo/issues/42#c-1',
+            comment_id: 'c-1', html_url: 'https://github.com/org/repo/issues/42#c-1',
+        }));
+        actions.set('github-clone-repo', async () => ({
+            path: '/tmp/wd', repo: 'org/repo', branch: 'main', ref: 'main', sha: 'aaaa1111',
+        }));
+        actions.set('github-create-pr', async () => ({
+            has_changes: true, pr_number: 100, number: 100,
+            pr_url: 'https://github.com/org/repo/pull/100',
+            url: 'https://github.com/org/repo/pull/100',
+            branch: 'feature/x', repo: 'org/repo',
+        }));
+        actions.set('github-create-review', async () => ({
+            event: 'COMMENT', html_url: 'https://github.com/org/repo/pull/42',
+            review_id: 'rv-1', inline_comments: 0, fallback_used: false,
+        }));
+        actions.set('github-fetch-reviews', async () => ({
+            reviews: [], comments: [], summary: '', owner: 'org', repo: 'repo', prNumber: 42,
+        }));
+        actions.set('github-fetch-pr', async () => ({
+            pr: { number: 42, title: 'mock PR', state: 'open' },
+            number: 42, repo: 'org/repo', state: 'open',
+        }));
+        actions.set('github-fetch-issue', async () => ({
+            issue: { number: 7, title: 'mock issue', state: 'open' },
+            number: 7, repo: 'org/repo', state: 'open',
+        }));
+        actions.set('github-merge-pr', async () => ({
+            merged: true, message: 'merged', sha: 'aaaa1111',
+        }));
+        actions.set('github-update-pr', async () => ({
+            number: 42, state: 'open', title: 'mock', body: 'body', base: 'main',
+        }));
+        actions.set('github-wait-for-checks', async () => ({
+            success: true, failedChecks: [], totalChecks: 0,
+            state: 'success', sha: 'aaaa1111', timedOut: false,
+        }));
+        actions.set('github-add-label', async () => ({
+            success: true, appliedLabels: ['bug'],
+        }));
+        actions.set('github-remove-label', async () => ({
+            success: true, removedLabel: 'wip',
+        }));
+        actions.set('git-commit-and-push', async () => ({
+            pushed: true, hasChanges: true, sha: 'aaaa1111', branch: 'feature/x',
+        }));
+
+        // Slack actions
+        actions.set('slack-send-message', async () => ({
+            ok: true, timestamp: '1700000000.000100', channel: 'C123',
+        }));
+        actions.set('slack-react', async () => ({
             ok: true,
-            status: 200,
-            timestamp: '1700000000.000100',
-            channel: 'C123',
+        }));
+
+        // Generic catch-all for log / webhook / utility nodes — these
+        // are widely-used and just need to not crash; their return
+        // shape is captured in the few keys downstream templates touch.
+        const generic: ActionHandler = async () => ({
+            logged: true, status: 200,
         });
-        for (const action of [
-            'log', 'webhook',
-            'ai-review', 'ai-agent', 'address-review',
-            'github-fetch-diff', 'github-comment', 'github-clone-repo',
-            'github-create-pr', 'github-create-review', 'github-fetch-reviews',
-            'github-fetch-pr', 'github-fetch-issue', 'github-merge-pr',
-            'github-update-pr', 'github-wait-for-checks',
-            'github-add-label', 'github-remove-label',
-            'git-commit-and-push',
-            'slack-send-message', 'slack-react',
-        ]) {
-            actions.set(action, generic);
-        }
+        actions.set('log', generic);
+        actions.set('webhook', generic);
+
         return actions;
     }
 
