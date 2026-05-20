@@ -1,0 +1,39 @@
+# Slack Mention React
+#
+# Listens for @-mentions of the bot in Slack and reacts with 👀 so the
+# user sees their mention was received before the bot responds.
+#
+# trigger.slack doesn't expose a typed `timestamp` output port (Slack's
+# event envelope varies by event subtype), so the message timestamp is
+# read out of the raw payload via template interpolation in the react
+# node's config. The channel port IS exposed, so it wires directly.
+#
+# Exercises: trigger.slack, slack.react
+#
+# Usage:
+#   - name: ack-mentions
+#     template: slack-mention-react
+
+description: React 👀 to every Slack @-mention so users know it landed
+icon: 👀
+
+trigger:
+  source: slack
+  event: app_mention
+
+graph:
+  nodes:
+    - id: trigger
+      type: trigger.slack
+      position: { x: 60, y: 240 }
+      config:
+        events: [app_mention]
+    - id: react
+      type: slack.react
+      position: { x: 360, y: 240 }
+      config:
+        emoji: eyes
+        timestamp: "{{event.payload.event.ts}}"
+  edges:
+    - from: { node: trigger, port: channel }
+      to: { node: react, port: channel }

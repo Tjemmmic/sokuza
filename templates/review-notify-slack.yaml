@@ -10,44 +10,68 @@
 #     trigger:
 #       event: pull_request.opened
 #       repo: "my-org/my-repo"
-#     # Override the default Slack channel:
-#     # steps:
-#     #   - action: github-fetch-diff
-#     #   - action: ai-review
-#     #   - action: github-comment
-#     #   - action: slack-send-message
-#     #     params:
-#     #       channel: "#my-custom-channel"
+
+description: AI review on every PR, posted to GitHub and a Slack channel
+icon: 🔍
 
 trigger:
   source: github
   event: pull_request.opened
 
-steps:
-  - id: fetch_diff
-    action: github-fetch-diff
-    params: {}
+graph:
+  nodes:
+    - id: trigger
+      type: trigger.github
+      position: { x: 60, y: 240 }
+      config:
+        events: [pull_request.opened]
+    - id: fetch_diff
+      type: github.fetch-diff
+      position: { x: 360, y: 240 }
+      config: {}
+    - id: review
+      type: ai.review
+      position: { x: 660, y: 240 }
+      config:
+        prompt: >
+          Review this pull request diff for bugs, security issues,
+          performance problems, and code quality. Be concise and actionable.
+    - id: post_gh
+      type: github.comment
+      position: { x: 980, y: 120 }
+      config:
+        body: |
+          ## 🤖 AI Code Review
 
-  - id: review
-    action: ai-review
-    params:
-      prompt: >
-        Review this pull request diff for bugs, security issues,
-        performance problems, and code quality. Be concise and actionable.
+          {{nodes.review.markdown}}
 
-  - action: github-comment
-    params:
-      body: |
-        ## 🤖 AI Code Review
-
-        {{steps.review.review}}
-
-        ---
-        _Reviewed by Sokuza AI ({{steps.review.model}}, via {{steps.review.provider}})_
-
-  - action: slack-send-message
-    params:
-      channel: "#code-reviews"
-      text: |
-        🔍 *New PR Review* on `{{event.metadata.repo}}#{{event.metadata.prNumber}}`
-        {{steps.review.review}}
+          ---
+          _Reviewed by Sokuza AI_
+    - id: post_slack
+      type: slack.send-message
+      position: { x: 980, y: 380 }
+      config:
+        channel: "#code-reviews"
+        text: |
+          🔍 *New PR Review* on `{{event.metadata.repo}}#{{event.metadata.prNumber}}`
+          {{nodes.review.markdown}}
+  edges:
+    - from: { node: trigger, port: prNumber }
+      to: { node: fetch_diff, port: pr_number }
+    - from: { node: trigger, port: repo }
+      to: { node: fetch_diff, port: repo }
+    - from: { node: fetch_diff, port: diff }
+      to: { node: review, port: diff }
+    - from: { node: trigger, port: prNumber }
+      to: { node: review, port: pr_number }
+    - from: { node: trigger, port: repo }
+      to: { node: review, port: repo }
+    - from: { node: trigger, port: prNumber }
+      to: { node: post_gh, port: pr_number }
+    - from: { node: trigger, port: repo }
+      to: { node: post_gh, port: repo }
+    # post_gh and post_slack both interpolate review.markdown in body/text.
+    - from: { node: review, port: markdown }
+      to: { node: post_gh, port: __seq }
+    - from: { node: review, port: markdown }
+      to: { node: post_slack, port: __seq }

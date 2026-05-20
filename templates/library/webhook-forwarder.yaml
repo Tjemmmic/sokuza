@@ -1,0 +1,71 @@
+# Webhook Forwarder
+#
+# Inbound HTTP → outbound HTTP. data.event-fields breaks the canonical
+# envelope down; data.template builds a forwarded body; utility.webhook
+# re-POSTs the event to a downstream service.
+#
+# IMPORTANT: the webhook integration emits events named after configured
+# endpoints — POSTs to /webhooks/custom/<name> become event "<name>".
+# Add an endpoint to your sokuza.config.yaml first:
+#
+#   integrations:
+#     webhook:
+#       endpoints:
+#         deploy-hook: {}     # accepts POST /webhooks/custom/deploy-hook
+#
+# Then this workflow's `event: deploy-hook` matches. The `path` field on
+# trigger.webhook is currently informational — wiring a custom path
+# requires the endpoint config above.
+#
+# Exercises: trigger.webhook, data.event-fields, data.template,
+#            utility.webhook
+#
+# Usage:
+#   - name: forward-events
+#     template: webhook-forwarder
+
+description: Forward an inbound webhook to a downstream HTTP endpoint
+icon: 🪝
+
+trigger:
+  source: webhook
+  event: deploy-hook
+
+graph:
+  nodes:
+    - id: trigger
+      type: trigger.webhook
+      position: { x: 60, y: 240 }
+      config:
+        path: "/webhooks/custom/deploy-hook"
+    - id: fields
+      type: data.event-fields
+      position: { x: 360, y: 240 }
+      config: {}
+    - id: body
+      type: data.template
+      position: { x: 660, y: 240 }
+      config:
+        template: |
+          {
+            "source": "{{nodes.fields.source}}",
+            "event": "{{nodes.fields.eventName}}",
+            "timestamp": "{{nodes.fields.timestamp}}",
+            "payload": {{nodes.fields.payload}}
+          }
+    - id: forward
+      type: utility.webhook
+      position: { x: 960, y: 240 }
+      config:
+        url: "https://example.com/inbound"
+        method: POST
+        headers:
+          content-type: "application/json"
+  edges:
+    - from: { node: trigger, port: event }
+      to: { node: fields, port: event }
+    - from: { node: body, port: text }
+      to: { node: forward, port: body }
+    # body's template interpolates fields.* .
+    - from: { node: fields, port: source }
+      to: { node: body, port: __seq }

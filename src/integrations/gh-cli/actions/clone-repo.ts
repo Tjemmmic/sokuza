@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import type { ActionHandler } from '../../../core/types.js';
 import { ghExec } from '../exec.js';
+import { WORKFLOW_TEMP_PREFIX } from '../../../core/temp-paths.js';
 
 const DEFAULT_DEPTH = 50;
 const DEFAULT_NON_PR_DEPTH = 1;
@@ -24,7 +25,7 @@ export const ghCloneRepoAction: ActionHandler = async (params, context) => {
         throw new Error('github-clone-repo: no repo specified and none found in event metadata');
     }
 
-    const tempDir = await mkdtemp(join(tmpdir(), 'sokuza-repo-'));
+    const tempDir = await mkdtemp(join(tmpdir(), WORKFLOW_TEMP_PREFIX));
 
     // Determine clone strategy
     if (ref) {

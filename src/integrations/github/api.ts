@@ -7,6 +7,28 @@ import { assembleDiffFromFiles } from '../../core/diff-assembler.js';
 
 const GITHUB_API_BASE = 'https://api.github.com';
 const DEFAULT_FETCH_TIMEOUT_MS = 30_000;
+const ERROR_BODY_MAX_CHARS = 500;
+
+/** Truncate API response bodies before they land in error messages — they
+ *  can carry sensitive context (PR titles from private repos) and propagate
+ *  to downstream loggers.
+ *
+ *  GitHub returns errors as JSON like
+ *      {"message":"Validation Failed","errors":[{"resource":"...","field":"..."}]}
+ *  Pretty-printed wire formats waste the truncation budget on whitespace,
+ *  so we try to JSON.parse first and re-emit compact JSON. Falls back to the
+ *  raw body for non-JSON responses (HTML 5xx pages, plain text, etc). */
+function truncateErrorBody(body: string): string {
+    let formatted = body;
+    try {
+        const parsed = JSON.parse(body);
+        formatted = JSON.stringify(parsed);
+    } catch {
+        // Not JSON — keep the raw body.
+    }
+    if (formatted.length <= ERROR_BODY_MAX_CHARS) return formatted;
+    return formatted.slice(0, ERROR_BODY_MAX_CHARS) + `… [truncated, ${formatted.length} chars total]`;
+}
 
 async function fetchWithTimeout(
     url: string | URL,
@@ -131,15 +153,24 @@ export class GitHubApiClient {
         repo: string,
         prNumber: number,
     ): Promise<DiffResult> {
-        try {
-            const diff = await this.getPullRequestDiff(owner, repo, prNumber);
+        // Inline the bulk-diff fetch so we can branch on the actual HTTP
+        // status code instead of substring-matching '406' in an error
+        // message (which would also match '/pulls/4060', SHA fragments, etc).
+        const url = `${this.baseUrl}/repos/${owner}/${repo}/pulls/${prNumber}`;
+        const res = await fetchWithTimeout(url, {
+            headers: this.headers('application/vnd.github.diff'),
+        });
+        if (res.ok) {
+            const diff = await res.text();
             return { diff, source: 'bulk', incompleteFiles: [] };
-        } catch (err) {
-            const msg = err instanceof Error ? err.message : String(err);
-            const isTooLarge = msg.includes('406') || msg.toLowerCase().includes('too large');
-            if (!isTooLarge) throw err;
+        }
+        if (res.status !== 406) {
+            throw new Error(
+                `GitHub API error fetching diff: ${res.status} ${res.statusText}`,
+            );
         }
 
+        // 406 = diff too large — fall back to per-file assembly.
         const files = await this.getPullRequestFiles(owner, repo, prNumber);
         const fileEntries = files.map((f) => ({
             filename: f.filename as string,
@@ -177,7 +208,7 @@ export class GitHubApiClient {
         if (!res.ok) {
             const errorBody = await res.text();
             throw new Error(
-                `GitHub API error creating comment: ${res.status} ${res.statusText} — ${errorBody}`,
+                `GitHub API error creating comment: ${res.status} ${res.statusText} — ${truncateErrorBody(errorBody)}`,
             );
         }
 
@@ -223,7 +254,7 @@ export class GitHubApiClient {
         if (!res.ok) {
             const errorBody = await res.text();
             throw new Error(
-                `GitHub API error creating review: ${res.status} ${res.statusText} — ${errorBody}`,
+                `GitHub API error creating review: ${res.status} ${res.statusText} — ${truncateErrorBody(errorBody)}`,
             );
         }
 
@@ -245,7 +276,7 @@ export class GitHubApiClient {
         });
         if (!res.ok) {
             const body = await res.text();
-            throw new Error(`GitHub API error adding labels: ${res.status} — ${body}`);
+            throw new Error(`GitHub API error adding labels: ${res.status} — ${truncateErrorBody(body)}`);
         }
     }
 
@@ -263,7 +294,7 @@ export class GitHubApiClient {
         // 404 means "label wasn't on the issue" — same desired end state.
         if (!res.ok && res.status !== 404) {
             const body = await res.text();
-            throw new Error(`GitHub API error removing label: ${res.status} — ${body}`);
+            throw new Error(`GitHub API error removing label: ${res.status} — ${truncateErrorBody(body)}`);
         }
     }
 
@@ -276,7 +307,7 @@ export class GitHubApiClient {
         const res = await fetchWithTimeout(url, { headers: this.headers() });
         if (!res.ok) {
             const body = await res.text();
-            throw new Error(`GitHub API error listing labels: ${res.status} — ${body}`);
+            throw new Error(`GitHub API error listing labels: ${res.status} — ${truncateErrorBody(body)}`);
         }
         const json = (await res.json()) as Array<{ name: string }>;
         return json.map((l) => l.name);
@@ -297,10 +328,155 @@ export class GitHubApiClient {
         if (!res.ok) {
             const errorBody = await res.text();
             throw new Error(
-                `GitHub API error creating PR: ${res.status} ${res.statusText} — ${errorBody}`,
+                `GitHub API error creating PR: ${res.status} ${res.statusText} — ${truncateErrorBody(errorBody)}`,
             );
         }
 
+        return (await res.json()) as Record<string, unknown>;
+    }
+
+    /** PATCH a pull request — title, body, state, base. Any subset works,
+     *  but at least one field must be supplied (sending {} would burn an
+     *  authenticated round-trip for a no-op).
+     *
+     *  Empty-string title/base are also rejected: GitHub returns 422 for
+     *  blank titles and rejects empty base branches outright, so we'd burn
+     *  the round-trip just to surface a confusing API error. (Empty body
+     *  IS legal — GitHub accepts blank PR descriptions.) */
+    async updatePullRequest(
+        owner: string,
+        repo: string,
+        prNumber: number,
+        options: { title?: string; body?: string; state?: 'open' | 'closed'; base?: string },
+    ): Promise<Record<string, unknown>> {
+        const url = `${this.baseUrl}/repos/${owner}/${repo}/pulls/${prNumber}`;
+        if (options.title !== undefined && options.title === '') {
+            throw new Error('updatePullRequest: title must not be empty (GitHub returns 422). Omit the field to keep the existing title.');
+        }
+        if (options.base !== undefined && options.base === '') {
+            throw new Error('updatePullRequest: base must not be empty. Omit the field to keep the existing base.');
+        }
+        const payload: Record<string, unknown> = {};
+        if (options.title !== undefined) payload.title = options.title;
+        if (options.body !== undefined) payload.body = options.body;
+        if (options.state !== undefined) payload.state = options.state;
+        if (options.base !== undefined) payload.base = options.base;
+        if (Object.keys(payload).length === 0) {
+            throw new Error('updatePullRequest: at least one of title/body/state/base must be supplied');
+        }
+        const res = await fetchWithTimeout(url, {
+            method: 'PATCH',
+            headers: this.headers(),
+            body: JSON.stringify(payload),
+        });
+        if (!res.ok) {
+            const errorBody = await res.text();
+            throw new Error(
+                `GitHub API error updating PR: ${res.status} ${res.statusText} — ${truncateErrorBody(errorBody)}`,
+            );
+        }
+        return (await res.json()) as Record<string, unknown>;
+    }
+
+    /** Merge a pull request. Method defaults to "merge"; use "squash"/"rebase"
+     *  for those merge styles. Throws on 405 (not mergeable) — caller decides
+     *  whether to retry or surface the failure. */
+    async mergePullRequest(
+        owner: string,
+        repo: string,
+        prNumber: number,
+        options: {
+            method?: 'merge' | 'squash' | 'rebase';
+            commit_title?: string;
+            commit_message?: string;
+            sha?: string;
+        } = {},
+    ): Promise<{ merged: boolean; sha: string; message: string; mergedFieldPresent: boolean }> {
+        const url = `${this.baseUrl}/repos/${owner}/${repo}/pulls/${prNumber}/merge`;
+        const payload: Record<string, unknown> = { merge_method: options.method ?? 'merge' };
+        if (options.commit_title) payload.commit_title = options.commit_title;
+        if (options.commit_message) payload.commit_message = options.commit_message;
+        if (options.sha) payload.sha = options.sha;
+        const res = await fetchWithTimeout(url, {
+            method: 'PUT',
+            headers: this.headers(),
+            body: JSON.stringify(payload),
+        });
+        if (!res.ok) {
+            const errorBody = await res.text();
+            throw new Error(
+                `GitHub API error merging PR: ${res.status} ${res.statusText} — ${truncateErrorBody(errorBody)}`,
+            );
+        }
+        const json = (await res.json()) as { merged?: boolean; sha?: string; message?: string };
+        return {
+            // mergedFieldPresent lets the caller distinguish "GitHub said
+            // merged=false" (an actual merge failure) from "the response was
+            // missing the field" (an unexpected API shape change).
+            mergedFieldPresent: typeof json.merged === 'boolean',
+            merged: json.merged === true,
+            sha: typeof json.sha === 'string' ? json.sha : '',
+            message: typeof json.message === 'string' ? json.message : '',
+        };
+    }
+
+    async getIssue(
+        owner: string,
+        repo: string,
+        issueNumber: number,
+    ): Promise<Record<string, unknown>> {
+        const url = `${this.baseUrl}/repos/${owner}/${repo}/issues/${issueNumber}`;
+        const res = await fetchWithTimeout(url, { headers: this.headers() });
+        if (!res.ok) {
+            throw new Error(
+                `GitHub API error fetching issue: ${res.status} ${res.statusText}`,
+            );
+        }
+        return (await res.json()) as Record<string, unknown>;
+    }
+
+    /** Fetch check runs for a commit SHA, paginating up to maxPages.
+     *  The default cap (5 pages × 100 per page = 500 runs) is comfortably
+     *  above any realistic CI count and bounds rate-limit exposure when the
+     *  caller polls in a loop. */
+    async getCheckRuns(
+        owner: string,
+        repo: string,
+        sha: string,
+        maxPages = 5,
+    ): Promise<Array<Record<string, unknown>>> {
+        const all: Array<Record<string, unknown>> = [];
+        const perPage = 100;
+        for (let page = 1; page <= maxPages; page++) {
+            const url = `${this.baseUrl}/repos/${owner}/${repo}/commits/${sha}/check-runs?page=${page}&per_page=${perPage}`;
+            const res = await fetchWithTimeout(url, { headers: this.headers() });
+            if (!res.ok) {
+                throw new Error(
+                    `GitHub API error listing check-runs: ${res.status} ${res.statusText}`,
+                );
+            }
+            const json = (await res.json()) as { check_runs?: Array<Record<string, unknown>>; total_count?: number };
+            const runs = json.check_runs ?? [];
+            all.push(...runs);
+            if (runs.length < perPage) break;
+        }
+        return all;
+    }
+
+    /** Combined commit status (the legacy "statuses" API — separate from
+     *  check-runs and used by some CIs like Travis/CircleCI). */
+    async getCombinedStatus(
+        owner: string,
+        repo: string,
+        sha: string,
+    ): Promise<Record<string, unknown>> {
+        const url = `${this.baseUrl}/repos/${owner}/${repo}/commits/${sha}/status`;
+        const res = await fetchWithTimeout(url, { headers: this.headers() });
+        if (!res.ok) {
+            throw new Error(
+                `GitHub API error fetching combined status: ${res.status} ${res.statusText}`,
+            );
+        }
         return (await res.json()) as Record<string, unknown>;
     }
 }

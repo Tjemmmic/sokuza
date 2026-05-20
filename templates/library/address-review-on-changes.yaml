@@ -1,0 +1,87 @@
+# Address Review On Changes Requested
+#
+# Listens for review submissions where the state is "changes_requested",
+# fetches all reviews on the PR for context, then runs ai.address-review
+# in suggest-mode to post inline suggestions for each issue.
+#
+# Notifies the team in Slack when finished.
+#
+# Exercises: ai.address-review, github.fetch-reviews,
+#            data.review-fields, slack.send-message
+#
+# Usage:
+#   - name: address-reviews
+#     template: address-review-on-changes
+
+description: When a reviewer requests changes, post inline auto-fix suggestions
+icon: 🩹
+
+trigger:
+  source: github
+  event: pull_request_review.submitted
+
+graph:
+  nodes:
+    - id: trigger
+      type: trigger.github
+      position: { x: 60, y: 240 }
+      config:
+        events: [pull_request_review.submitted]
+    - id: review_fields
+      type: data.review-fields
+      position: { x: 360, y: 240 }
+      config: {}
+    - id: gate
+      type: flow.if
+      position: { x: 660, y: 240 }
+      # Only fire when the review is non-empty (has issues to address).
+      config:
+        condition: "{{nodes.review_fields.totalCount}}"
+    - id: reviews
+      type: github.fetch-reviews
+      position: { x: 960, y: 100 }
+      config: {}
+    - id: address
+      type: ai.address-review
+      position: { x: 1260, y: 240 }
+      config:
+        mode: suggest
+        max_iterations: 1
+    - id: notify
+      type: slack.send-message
+      position: { x: 1560, y: 240 }
+      config:
+        channel: "#code-reviews"
+        text: |
+          🩹 Auto-suggestions posted on `{{event.metadata.repo}}#{{event.metadata.prNumber}}`
+          ({{nodes.address.iterationsRun}} iteration(s), final: {{nodes.address.finalState}})
+  edges:
+    - from: { node: trigger, port: review }
+      to: { node: review_fields, port: review }
+    - from: { node: review_fields, port: totalCount }
+      to: { node: gate, port: value }
+    # Gate the downstream fetch + address-review on the gate firing.
+    # Without these `gate.thenFired → ...__seq` edges, the gate was
+    # decorative — reviews/address ran unconditionally and the comment
+    # at line 37 ("only fire when the review is non-empty") was a lie.
+    # Using `thenFired` (not `then`) because a totalCount of 0 would
+    # round-trip through `then` as the string "0", which downstream
+    # `__seq` resolution still treats as a passing edge — `thenFired`
+    # is the always-truthy sentinel for exactly this gate-pattern use.
+    - from: { node: gate, port: thenFired }
+      to: { node: reviews, port: __seq }
+    - from: { node: gate, port: thenFired }
+      to: { node: address, port: __seq }
+    - from: { node: trigger, port: prNumber }
+      to: { node: reviews, port: pr_number }
+    - from: { node: trigger, port: repo }
+      to: { node: reviews, port: repo }
+    - from: { node: trigger, port: prNumber }
+      to: { node: address, port: pr_number }
+    - from: { node: trigger, port: repo }
+      to: { node: address, port: repo }
+    - from: { node: trigger, port: review }
+      to: { node: address, port: structured }
+    # notify's text interpolates address.iterationsRun and finalState.
+    - from: { node: address, port: iterationsRun }
+      to: { node: notify, port: __seq }

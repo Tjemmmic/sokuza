@@ -1,0 +1,50 @@
+# Daily Stale-PR Bump
+#
+# Runs every morning, asks the AI agent to scan open PRs (via local gh
+# CLI) and post a friendly nudge on any that have been idle for over a
+# week.
+#
+# Exercises: trigger.cron, ai.agent
+#
+# Usage:
+#   - name: stale-bump
+#     template: cron-stale-pr-bump
+
+description: "Cron — every morning, nudge stale PRs (idle 7+ days) via gh CLI"
+icon: ⏰
+
+trigger:
+  source: cron
+  event: daily
+
+graph:
+  nodes:
+    - id: trigger
+      type: trigger.cron
+      position: { x: 60, y: 240 }
+      # Sokuza's cron integration takes named schedules (daily, hourly,
+      # every-1m, every-5m, every-15m, every-30m), not crontab expressions.
+      # The trigger node's "Cron Expression" placeholder is misleading.
+      config:
+        schedule: daily
+    - id: nudge
+      type: ai.agent
+      position: { x: 360, y: 240 }
+      config:
+        max_turns: 25
+        allowed_tools: [Bash]
+        prompt: |
+          Use the local `gh` CLI to find PRs in this user's repos that
+          haven't been updated in 7+ days. For each one, post a friendly
+          nudge comment asking the author/reviewer for an update.
+
+          Output a one-line summary of what you did.
+    - id: log
+      type: utility.log
+      position: { x: 660, y: 240 }
+      config:
+        message: "stale-pr-bump finished: {{nodes.nudge.output}}"
+        level: info
+  edges:
+    - from: { node: nudge, port: output }
+      to: { node: log, port: __seq }

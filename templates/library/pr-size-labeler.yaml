@@ -1,0 +1,86 @@
+# PR Size Labeler
+#
+# When a PR opens, fetch its diff to compute size, then add or remove a
+# "size:large" label depending on whether the PR exceeds the threshold.
+#
+# `additions` isn't on data.pr-fields directly; we use json-pluck on the
+# raw PR object to read it. flow.if then drives the per-node `condition`
+# fields on add_large / remove_large so each label op only runs when its
+# branch is selected.
+#
+# Exercises: github.add-label, github.remove-label, flow.if,
+#            data.json-pluck, data.pr-fields
+#
+# Usage:
+#   - name: size-labels
+#     template: pr-size-labeler
+
+description: 'Tag PRs over 500 added lines with "size:large", remove otherwise'
+icon: 🏷️
+
+trigger:
+  source: github
+  event: pull_request.opened
+
+graph:
+  nodes:
+    - id: trigger
+      type: trigger.github
+      position: { x: 60, y: 240 }
+      config:
+        events: [pull_request.opened, pull_request.synchronize]
+    - id: pr
+      type: github.fetch-pr
+      position: { x: 360, y: 240 }
+      config: {}
+    - id: fields
+      type: data.pr-fields
+      position: { x: 660, y: 240 }
+      config: {}
+    - id: size_value
+      type: data.json-pluck
+      position: { x: 660, y: 480 }
+      config:
+        path: additions
+    - id: large_check
+      type: flow.if
+      position: { x: 960, y: 240 }
+      config:
+        condition: "{{nodes.size_value.value}}"
+    - id: add_large
+      type: github.add-label
+      position: { x: 1260, y: 120 }
+      condition: "{{nodes.large_check.then}}"
+      config:
+        label: "size:large"
+    - id: remove_large
+      type: github.remove-label
+      position: { x: 1260, y: 380 }
+      condition: "{{nodes.large_check.else}}"
+      config:
+        label: "size:large"
+  edges:
+    - from: { node: trigger, port: prNumber }
+      to: { node: pr, port: pr_number }
+    - from: { node: trigger, port: repo }
+      to: { node: pr, port: repo }
+    - from: { node: pr, port: pr }
+      to: { node: fields, port: pr }
+    - from: { node: pr, port: pr }
+      to: { node: size_value, port: from }
+    - from: { node: fields, port: number }
+      to: { node: add_large, port: pr_number }
+    - from: { node: fields, port: repo }
+      to: { node: add_large, port: repo }
+    - from: { node: fields, port: number }
+      to: { node: remove_large, port: pr_number }
+    - from: { node: fields, port: repo }
+      to: { node: remove_large, port: repo }
+    # large_check's condition interpolates size_value.value;
+    # add_large / remove_large conditions interpolate large_check branches.
+    - from: { node: size_value, port: value }
+      to: { node: large_check, port: __seq }
+    - from: { node: large_check, port: then }
+      to: { node: add_large, port: __seq }
+    - from: { node: large_check, port: else }
+      to: { node: remove_large, port: __seq }

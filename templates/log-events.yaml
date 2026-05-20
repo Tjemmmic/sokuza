@@ -1,6 +1,8 @@
 # Log Events
 #
 # Simple event logger — logs a message whenever an event fires.
+# Trigger → utility.log. Useful for debugging triggers / verifying that
+# Sokuza is wired up to the right repo and event types.
 #
 # Usage:
 #   - name: log-everything
@@ -8,11 +10,26 @@
 #     trigger:
 #       event: push
 
+description: Log every matching event to Sokuza's log
+icon: 📝
+
 trigger:
   source: github
   event: push
 
-steps:
-  - action: log
-    params:
-      message: "[{{event.source}}] {{event.event}} on {{event.metadata.repo}}"
+graph:
+  nodes:
+    - id: trigger
+      type: trigger.github
+      position: { x: 80, y: 200 }
+      config:
+        events: [push]
+    - id: log
+      type: utility.log
+      position: { x: 420, y: 200 }
+      config:
+        message: "[{{event.source}}] {{event.event}} on {{event.metadata.repo}}"
+        level: info
+  edges:
+    - from: { node: trigger, port: event }
+      to: { node: log, port: __seq }

@@ -9,58 +9,83 @@
 #     trigger:
 #       event: pull_request.opened
 
+description: Analyze PR diff and apply labels via gh CLI from the AI agent
+icon: 🏷️
+
 trigger:
   source: github
   event: pull_request.opened
 
-steps:
-  - id: clone
-    action: github-clone-repo
-    params: {}
+graph:
+  nodes:
+    - id: trigger
+      type: trigger.github
+      position: { x: 60, y: 200 }
+      config:
+        events: [pull_request.opened]
+    - id: clone
+      type: github.clone-repo
+      position: { x: 360, y: 200 }
+      config: {}
+    - id: diff
+      type: github.fetch-diff
+      position: { x: 660, y: 100 }
+      config: {}
+    - id: label
+      type: ai.agent
+      position: { x: 980, y: 200 }
+      config:
+        max_turns: 10
+        allowed_tools: [Read, Grep, Bash]
+        prompt: |
+          Analyze this PR and apply appropriate labels.
 
-  - id: diff
-    action: github-fetch-diff
-    params: {}
+          ## Label Rules
 
-  - id: label
-    action: ai-agent
-    params:
-      workdir: "{{steps.clone.path}}"
-      max_turns: 10
-      allowed_tools:
-        - Read
-        - Grep
-        - Bash
-      prompt: |
-        Analyze this PR and apply appropriate labels.
+          Based on the diff and files changed, apply labels:
 
-        ## Label Rules
+          - **bug** — Fixes a bug (commit messages with "fix:", error handling changes)
+          - **feature** — New functionality (new files, new exports, new routes)
+          - **docs** — Documentation changes (*.md, comments, JSDoc)
+          - **refactor** — Code restructuring without behavior change
+          - **tests** — Test additions or modifications
+          - **dependencies** — package.json, lock file changes
+          - **ci** — CI/CD config changes (.github/workflows, Dockerfile)
+          - **security** — Security-related changes
+          - **breaking** — Breaking API changes
 
-        Based on the diff and files changed, apply labels:
+          ## Steps
 
-        - **bug** — Fixes a bug (commit messages with "fix:", error handling changes)
-        - **feature** — New functionality (new files, new exports, new routes)
-        - **docs** — Documentation changes (*.md, comments, JSDoc)
-        - **refactor** — Code restructuring without behavior change
-        - **tests** — Test additions or modifications
-        - **dependencies** — package.json, lock file changes
-        - **ci** — CI/CD config changes (.github/workflows, Dockerfile)
-        - **security** — Security-related changes
-        - **breaking** — Breaking API changes
+          1. Analyze the diff to determine what kind of change this is
+          2. Apply labels using gh CLI:
+             `gh pr edit {{event.metadata.prNumber}} -R {{event.metadata.repo}} --add-label "feature,docs"`
+          3. Output which labels you applied and why
+    - id: post
+      type: github.comment
+      position: { x: 1300, y: 200 }
+      config:
+        body: |
+          ## 🏷️ Auto-Labels Applied
 
-        ## Steps
+          {{nodes.label.output}}
 
-        1. Analyze the diff to determine what kind of change this is
-        2. Apply labels using gh CLI:
-           `gh pr edit {{event.metadata.prNumber}} -R {{event.metadata.repo}} --add-label "feature,docs"`
-        3. Output which labels you applied and why
-
-  - action: github-comment
-    params:
-      body: |
-        ## 🏷️ Auto-Labels Applied
-
-        {{steps.label.review}}
-
-        ---
-        _Labeled by Sokuza AI_
+          ---
+          _Labeled by Sokuza AI_
+  edges:
+    - from: { node: trigger, port: repo }
+      to: { node: clone, port: repo }
+    - from: { node: trigger, port: branch }
+      to: { node: clone, port: ref }
+    - from: { node: trigger, port: prNumber }
+      to: { node: diff, port: pr_number }
+    - from: { node: trigger, port: repo }
+      to: { node: diff, port: repo }
+    - from: { node: clone, port: path }
+      to: { node: label, port: workdir }
+    - from: { node: trigger, port: prNumber }
+      to: { node: post, port: pr_number }
+    - from: { node: trigger, port: repo }
+      to: { node: post, port: repo }
+    # post's body interpolates label.output.
+    - from: { node: label, port: output }
+      to: { node: post, port: __seq }

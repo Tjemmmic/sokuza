@@ -13,33 +13,31 @@
  */
 
 import type { ActionHandler } from '../../../core/types.js';
+import { resolveRepoTarget, requireToken } from './_target.js';
 
 export const githubFetchReviewsAction: ActionHandler = async (params, context) => {
-    const owner = (params.owner as string)
-        ?? (context.event.metadata?.owner as string)
-        ?? (context.event.metadata?.repo as string)?.split('/')[0];
-    const repo = (params.repo as string)
-        ?? (context.event.metadata?.repoName as string)
-        ?? (context.event.metadata?.repo as string)?.split('/')[1];
-    const prNumber = (params.pr_number as number)
-        ?? (context.event.metadata?.prNumber as number)
-        ?? (context.event.payload?.pull_request as Record<string, unknown>)?.number as number;
-
-    if (!owner || !repo || !prNumber) {
-        throw new Error(
-            'github-fetch-reviews: could not resolve owner, repo, and pr_number. ' +
-            'Ensure the event has metadata.repo or pass params explicitly.',
-        );
-    }
-
-    // Get the GitHub token from integration configs
-    const ghConfig = context.integrationConfigs?.github as Record<string, unknown> | undefined;
+    // Same migration as comment.ts / fetch-diff.ts / create-review.ts —
+    // the bespoke resolver here would accept `params.repo = "owner/name"`
+    // and pass it through as the bare repo, producing
+    // `/repos/<owner>/owner/name/pulls/<n>/reviews` and a 404. The
+    // shared `_target.ts` resolver splits the slash form correctly and
+    // falls back to event metadata when params are unwired.
+    //
+    // For backwards compatibility we also fall back to the github-poll
+    // integration's token when github's isn't set — `requireToken`
+    // checks github + GITHUB_TOKEN env var, so add the poll fallback
+    // ourselves before delegating.
     const ghPollConfig = context.integrationConfigs?.['github-poll'] as Record<string, unknown> | undefined;
-    const token = (ghConfig?.token as string) ?? (ghPollConfig?.token as string);
-
-    if (!token) {
-        throw new Error('github-fetch-reviews: no GitHub token configured');
-    }
+    const pollToken = ghPollConfig?.token as string | undefined;
+    const paramsWithFallback = (() => {
+        if (params.token || (context.integrationConfigs?.github as Record<string, unknown> | undefined)?.token || process.env.GITHUB_TOKEN) {
+            return params;
+        }
+        return pollToken ? { ...params, token: pollToken } : params;
+    })();
+    const token = requireToken(paramsWithFallback, context, 'github-fetch-reviews');
+    const target = resolveRepoTarget(params, context, 'github-fetch-reviews');
+    const { owner, repo, number: prNumber } = target;
 
     const headers: Record<string, string> = {
         Authorization: `Bearer ${token}`,

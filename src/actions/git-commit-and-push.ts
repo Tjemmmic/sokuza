@@ -1,0 +1,276 @@
+import { isAbsolute, normalize, resolve as resolvePath } from 'node:path';
+import type { ActionContext, ActionHandler } from '../core/types.js';
+import { execGit, execGitOutput } from '../integrations/github/git-helpers.js';
+
+/**
+ * "git-commit-and-push" — generic git wrapper used by graph workflows
+ * after an AI agent or other action has edited files in a workdir.
+ * It is provider-agnostic (no GitHub API call) so the same node works
+ * for GitHub, GitLab, self-hosted git, etc.
+ *
+ * Behaviour:
+ *   - `workdir` is validated for shell-/flag-injection-shaped strings and
+ *     against a deny-list of obvious system paths. The visual editor
+ *     surfaces this field as freeform text, so a user-authored workflow
+ *     could otherwise point it at e.g. `/` and stage everything in a git
+ *     repo rooted there. We do *not* enforce a strict allowlist because
+ *     legitimate workdirs span tmpdir, the WorkdirManager root
+ *     (`~/.sokuza/auto-fix-workdirs/`), chat-session paths, and arbitrary
+ *     operator-chosen `destDir`s.
+ *   - If `paths` is supplied, only those paths are staged. Each path is
+ *     validated against escape (no absolute paths, no `..` segments,
+ *     no NUL). Empty list => fail loudly (callers passing [] almost
+ *     certainly mean nothing should happen — better to surface that as
+ *     an error than silently fall through to add -A).
+ *   - If the working tree has nothing to commit after staging, exits
+ *     cleanly with `pushed: false, hasChanges: false`.
+ *   - `branch` (optional) is checked out before staging. The previous
+ *     try-catch fallback masked dirty-tree errors; we now check
+ *     existence explicitly, prefer local branches over remote refs,
+ *     and surface the original error when checkout fails.
+ *   - Push target defaults to `origin`. If push fails after the local
+ *     commit lands, the commit is rolled back with `reset --soft HEAD~1`
+ *     so retries don't accumulate orphan commits in long-lived workdirs.
+ *   - Every git invocation is bound to `context.signal` so a workflow
+ *     timeout or cancel kills the child process instead of letting it
+ *     run to completion after the workflow has been declared aborted.
+ */
+export const gitCommitAndPushAction: ActionHandler = async (params, context) => {
+    const workdir = validateWorkdir(params.workdir);
+    const message = params.message as string;
+    if (!message) throw new Error('git-commit-and-push: message is required');
+
+    const remote = (typeof params.remote === 'string' && params.remote) ? params.remote : 'origin';
+    validateRemoteName(remote);
+    const branchOverride = typeof params.branch === 'string' && params.branch ? params.branch : undefined;
+    const paths = parsePaths(params.paths);
+    const signal = context.signal;
+
+    if (branchOverride) {
+        validateBranchName(branchOverride);
+        await switchToBranch(workdir, branchOverride, remote, signal);
+    }
+
+    if (paths !== null) {
+        await execGit(workdir, ['add', '--', ...paths], signal);
+    } else {
+        await execGit(workdir, ['add', '-A'], signal);
+    }
+
+    const status = await execGitOutput(workdir, ['status', '--porcelain'], signal);
+    if (!status.trim()) {
+        context.logger.info({ workdir }, 'No changes to commit, skipping push');
+        return { pushed: false, hasChanges: false, sha: '', branch: '' };
+    }
+
+    await execGit(workdir, ['commit', '-m', message], signal);
+    const sha = (await execGitOutput(workdir, ['rev-parse', 'HEAD'], signal)).trim();
+    const branch = branchOverride
+        ?? (await execGitOutput(workdir, ['rev-parse', '--abbrev-ref', 'HEAD'], signal)).trim();
+
+    context.logger.info({ workdir, branch, sha: sha.slice(0, 8), remote }, 'Pushing commit');
+    try {
+        await execGit(workdir, ['push', remote, branch], signal);
+    } catch (pushErr) {
+        await rollbackCommit(workdir, context, pushErr);
+        throw pushErr;
+    }
+
+    return { pushed: true, hasChanges: true, sha, branch };
+};
+
+/**
+ * Validate the user-supplied `workdir`. The previous version accepted
+ * any string and passed it straight to `git add -A`, which on a
+ * user-authored workflow YAML could point at any git repo on the host
+ * (e.g. operator's local projects) and commit-then-push that repo's
+ * contents under the action's identity. We can't pin to a single
+ * allowlist (tmpdir / WorkdirManager root / chat-session paths / custom
+ * destDir all legitimate), so this is a defensive deny-list that
+ * matches the spirit of the existing `validatePath`/`validateRemoteName`
+ * checks: refuse injection-shaped strings and obviously sensitive
+ * system paths.
+ */
+function validateWorkdir(raw: unknown): string {
+    if (typeof raw !== 'string' || raw.length === 0) {
+        throw new Error('git-commit-and-push: workdir is required');
+    }
+    if (raw.includes('\0')) {
+        throw new Error('git-commit-and-push: workdir contains NUL character');
+    }
+    if (/[\x00-\x1f\x7f]/.test(raw)) {
+        throw new Error('git-commit-and-push: workdir contains control characters');
+    }
+    if (raw.startsWith('-')) {
+        // Defence-in-depth: spawn passes cwd via the options object so a
+        // leading '-' can't reach argv as a flag, but a path that looks
+        // like a flag is almost certainly a misconfiguration we'd rather
+        // fail loudly on.
+        throw new Error(`git-commit-and-push: workdir must not start with "-" (got ${JSON.stringify(raw)})`);
+    }
+    if (!isAbsolute(raw)) {
+        throw new Error(`git-commit-and-push: workdir must be an absolute path (got ${JSON.stringify(raw)})`);
+    }
+    const resolved = resolvePath(raw);
+    if (resolved === '/' || resolved === '\\') {
+        throw new Error('git-commit-and-push: workdir must not be the filesystem root');
+    }
+    for (const denied of FORBIDDEN_WORKDIR_PREFIXES) {
+        if (resolved === denied || resolved.startsWith(denied + '/')) {
+            throw new Error(`git-commit-and-push: workdir resolves to a sensitive system path (${resolved})`);
+        }
+    }
+    return raw;
+}
+
+/** System paths that should never be operated on as a git working tree.
+ *  Order doesn't matter — we check exact match and prefix-with-slash so
+ *  `/etc-customer` won't accidentally match `/etc`. */
+const FORBIDDEN_WORKDIR_PREFIXES: readonly string[] = [
+    '/etc', '/proc', '/sys', '/dev', '/boot', '/root',
+    '/usr', '/bin', '/sbin',
+    '/lib', '/lib32', '/lib64',
+    '/var/log', '/var/lib', '/var/run',
+];
+
+/**
+ * Validate + normalise the user-supplied `paths` param. Returns:
+ *   - null if the user didn't supply paths at all (caller falls through to add -A)
+ *   - string[] of validated relative paths if they did
+ *
+ * Empty array AND empty/whitespace-only string both throw, so "the user
+ * said nothing" has consistent semantics: only `undefined`/`null` (the
+ * field genuinely wasn't supplied) opt into add -A.
+ */
+function parsePaths(raw: unknown): string[] | null {
+    if (raw === undefined || raw === null) return null;
+    if (typeof raw === 'string') {
+        const list = raw.split(',').map((s) => s.trim()).filter((s) => s.length > 0);
+        if (list.length === 0) {
+            throw new Error('git-commit-and-push: paths string was empty after trimming — refusing to fall back to add -A silently. Omit the param entirely to stage everything.');
+        }
+        return list.map((p) => validatePath(p));
+    }
+    if (!Array.isArray(raw)) {
+        throw new Error(`git-commit-and-push: paths must be an array or comma-separated string (got ${typeof raw})`);
+    }
+    const cleaned = raw.filter((p): p is string => typeof p === 'string' && p.length > 0);
+    if (cleaned.length === 0) {
+        throw new Error('git-commit-and-push: paths array was empty after dropping non-string entries — refusing to fall back to add -A silently. Omit the param entirely to stage everything.');
+    }
+    return cleaned.map((p) => validatePath(p));
+}
+
+function validatePath(p: string): string {
+    if (p.includes('\0')) {
+        throw new Error(`git-commit-and-push: path contains NUL character (got ${JSON.stringify(p)})`);
+    }
+    // Normalise Windows-style backslashes to forward slashes BEFORE the
+    // traversal check. On Linux, Node's path.normalize doesn't treat \ as
+    // a separator, so '..\\escape' would slip through and reach git as a
+    // literal filename — fine on Linux, real sandbox escape on Windows.
+    const unified = p.replace(/\\/g, '/');
+    if (isAbsolute(unified) || unified.startsWith('/')) {
+        throw new Error(`git-commit-and-push: absolute paths are not allowed (got ${JSON.stringify(p)})`);
+    }
+    const normalised = normalize(unified);
+    if (normalised === '..' || normalised.startsWith('../') || normalised.includes('/../')) {
+        throw new Error(`git-commit-and-push: path escapes workdir (got ${JSON.stringify(p)})`);
+    }
+    return p;
+}
+
+/**
+ * Reject remote names that git would interpret as flags. `git push` takes
+ * the repository as a positional arg with no `--` end-of-options escape,
+ * so a value like `--upload-pack=/usr/bin/evil` would be parsed as an
+ * option and could execute arbitrary commands during push. The visual
+ * editor exposes this field as freeform text, so we validate at the
+ * action boundary regardless of caller trust.
+ */
+function validateRemoteName(name: string): void {
+    if (name.startsWith('-')) {
+        throw new Error(`git-commit-and-push: remote must not start with "-" (got ${JSON.stringify(name)})`);
+    }
+    if (/\s/.test(name)) {
+        throw new Error(`git-commit-and-push: remote must not contain whitespace (got ${JSON.stringify(name)})`);
+    }
+    if (/[\x00-\x1f\x7f]/.test(name)) {
+        throw new Error(`git-commit-and-push: remote contains control characters (got ${JSON.stringify(name)})`);
+    }
+}
+
+/**
+ * Reject branch names that would confuse git (leading -, named HEAD,
+ * whitespace, control chars). We don't try to replicate every rule from
+ * git-check-ref-format — we just catch the cases that produce confusing
+ * downstream errors. Git itself will reject the rest at checkout time.
+ */
+function validateBranchName(name: string): void {
+    if (name.startsWith('-')) {
+        throw new Error(`git-commit-and-push: branch name must not start with "-" (got ${JSON.stringify(name)})`);
+    }
+    if (name === 'HEAD' || name === 'head') {
+        throw new Error(`git-commit-and-push: branch name "HEAD" is reserved — pick a different name`);
+    }
+    if (/\s/.test(name)) {
+        throw new Error(`git-commit-and-push: branch name must not contain whitespace (got ${JSON.stringify(name)})`);
+    }
+    // Disallow control chars (including NUL).
+    if (/[\x00-\x1f\x7f]/.test(name)) {
+        throw new Error(`git-commit-and-push: branch name contains control characters (got ${JSON.stringify(name)})`);
+    }
+}
+
+/**
+ * Idempotent branch switch:
+ *   1. If the branch exists locally → checkout
+ *   2. If it exists only as a remote ref → checkout -B from origin/<branch>
+ *   3. Else create a new branch off HEAD with checkout -B
+ *
+ * If a checkout fails (e.g. dirty worktree would be overwritten), the
+ * original error is propagated rather than masked.
+ */
+async function switchToBranch(workdir: string, branch: string, remote: string, signal?: AbortSignal): Promise<void> {
+    const localExists = await branchExistsLocally(workdir, branch, false, signal);
+    if (localExists) {
+        await execGit(workdir, ['checkout', branch], signal);
+        return;
+    }
+    const remoteRef = `${remote}/${branch}`;
+    const remoteExists = await branchExistsLocally(workdir, remoteRef, true, signal);
+    if (remoteExists) {
+        await execGit(workdir, ['checkout', '-B', branch, remoteRef], signal);
+        return;
+    }
+    // Create from HEAD. -B replaces an existing branch — but we just verified
+    // none exists, so this just creates.
+    await execGit(workdir, ['checkout', '-b', branch], signal);
+}
+
+async function branchExistsLocally(workdir: string, ref: string, asRemote = false, signal?: AbortSignal): Promise<boolean> {
+    const fullRef = asRemote ? `refs/remotes/${ref}` : `refs/heads/${ref}`;
+    try {
+        await execGitOutput(workdir, ['rev-parse', '--verify', '--quiet', fullRef], signal);
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+/** Best-effort: undo the local commit we just made so a push failure
+ *  doesn't leave an orphan commit in the workdir. `--soft` preserves
+ *  the staged index, so a retry sees the same diff and can re-commit
+ *  cleanly. We swallow + log the reset error (rather than letting it
+ *  shadow the original push error) because the push failure is what
+ *  the caller actually needs to see. */
+async function rollbackCommit(workdir: string, context: ActionContext, pushErr: unknown): Promise<void> {
+    try {
+        await execGit(workdir, ['reset', '--soft', 'HEAD~1']);
+    } catch (resetErr) {
+        context.logger.warn(
+            { resetErr, pushErr, workdir },
+            'git-commit-and-push: failed to roll back orphaned local commit after push failure',
+        );
+    }
+}

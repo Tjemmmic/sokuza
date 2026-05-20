@@ -1,12 +1,12 @@
 import type { ActionHandler } from '../core/types.js';
 import { truncateDiff, DEFAULT_MAX_CHARS } from '../core/diff-truncator.js';
 import {
-    generateCodeReviewPrompt,
     parseStructuredReviewExt,
     renderReviewMarkdown,
     buildRepairPrompt,
     type ParseFailureKind,
 } from './review-templates.js';
+import { getDefaultPrompt } from './default-prompts.js';
 import { runCompletionWithFallback } from '../core/ai-providers.js';
 import {
     recordAiReviewRun,
@@ -18,10 +18,13 @@ import {
 const DEFAULT_MAX_TOKENS = 4096;
 
 /**
- * Legacy system prompt maintained for backward compatibility.
- * New workflows should use generateCodeReviewPrompt() from review-templates.ts.
+ * Default system prompt — sourced through `default-prompts.ts` so the
+ * visual editor's "Load default" button (which hits the same registry
+ * via `GET /api/ai/defaults/:source`) shows the exact text the action
+ * runs when the `prompt` port is left blank. If these ever diverge, the
+ * user is being lied to about what the action will do.
  */
-const DEFAULT_SYSTEM_PROMPT = generateCodeReviewPrompt();
+const DEFAULT_SYSTEM_PROMPT = getDefaultPrompt('ai-review-system-prompt') ?? '';
 
 /**
  * "ai-review" action.
@@ -361,6 +364,21 @@ export const aiReviewAction: ActionHandler = async (params, context) => {
                 finalChars: truncation.finalChars,
             }
             : undefined,
+        // ─── Output ports the ai.review node declares ──────────────────
+        // `actionNode` spreads this return object onto the node's outputs
+        // (see wrapResult in core/nodes/builtins.ts). The graph editor's
+        // node definition advertises these specific port names; if any
+        // are missing, wires from `review.<port>` resolve to undefined
+        // and the runtime silently falls through to config defaults,
+        // which is how a wired `body` ended up empty on github.comment.
+        // Always emit them, even when parsing failed (markdown is still
+        // the rendered text; structured outputs degrade to undefined).
+        markdown: review,
+        structured: parsed ?? undefined,
+        summary: parsed?.summary,
+        issues: parsed?.issues,
+        mergeReady: parsed ? parsed.decision === 'APPROVE' : undefined,
+        runId,
     };
 };
 

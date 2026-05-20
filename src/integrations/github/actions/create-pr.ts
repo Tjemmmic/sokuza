@@ -1,6 +1,6 @@
-import { spawn } from 'node:child_process';
 import type { ActionHandler } from '../../../core/types.js';
 import { GitHubApiClient } from '../api.js';
+import { execGit, execGitOutput } from '../git-helpers.js';
 
 /**
  * "github-create-pr" action.
@@ -79,42 +79,15 @@ export const githubCreatePrAction: ActionHandler = async (params, context) => {
         'Pull request created',
     );
 
+    // Also expose `number`/`url`/`repo` so the new node port names match
+    // the audit and the rest of the system.
     return {
         has_changes: true,
         pr_number: pr.number,
+        number: pr.number,
         pr_url: pr.html_url,
+        url: pr.html_url,
         branch,
+        repo,
     };
 };
-
-// ─── Git helpers ────────────────────────────────────────────────────────────
-
-function execGit(cwd: string, args: string[]): Promise<void> {
-    return new Promise((resolve, reject) => {
-        const child = spawn('git', args, { cwd, stdio: ['pipe', 'pipe', 'pipe'] });
-        const stderrChunks: Buffer[] = [];
-        child.stderr.on('data', (c: Buffer) => stderrChunks.push(c));
-        child.on('close', (code) => {
-            if (code !== 0) {
-                const stderr = Buffer.concat(stderrChunks).toString();
-                reject(new Error(`git ${args[0]} failed (code ${code}): ${stderr}`));
-            } else {
-                resolve();
-            }
-        });
-        child.on('error', reject);
-    });
-}
-
-function execGitOutput(cwd: string, args: string[]): Promise<string> {
-    return new Promise((resolve, reject) => {
-        const child = spawn('git', args, { cwd, stdio: ['pipe', 'pipe', 'pipe'] });
-        const chunks: Buffer[] = [];
-        child.stdout.on('data', (c: Buffer) => chunks.push(c));
-        child.on('close', (code) => {
-            if (code !== 0) reject(new Error(`git ${args[0]} failed (code ${code})`));
-            else resolve(Buffer.concat(chunks).toString());
-        });
-        child.on('error', reject);
-    });
-}

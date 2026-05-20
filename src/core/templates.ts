@@ -10,7 +10,10 @@ import { toArray } from './types.js';
 
 interface TemplateDefinition {
     trigger?: Partial<TriggerDefinition>;
+    /** Linear-step form (legacy). Either steps or graph (or both) may be set. */
     steps: WorkflowStepDefinition[];
+    /** Visual graph form. Workflows that reference the template inherit it. */
+    graph?: WorkflowDefinition['graph'];
 }
 
 /** In-memory cache after loading */
@@ -51,6 +54,7 @@ export async function loadTemplates(
             templates[name] = {
                 trigger: parsed.trigger as Partial<TriggerDefinition> | undefined,
                 steps: (parsed.steps as WorkflowStepDefinition[]) ?? [],
+                graph: parsed.graph as WorkflowDefinition['graph'] | undefined,
             };
         }
     }
@@ -108,6 +112,7 @@ export async function normalizeWorkflow(
     const templateName = raw.template as string | undefined;
     let steps = raw.steps as WorkflowDefinition['steps'] | undefined;
     let trigger = raw.trigger as Record<string, unknown> | undefined;
+    let graph = raw.graph as WorkflowDefinition['graph'] | undefined;
 
     if (templateName) {
         const templates = await loadTemplates();
@@ -119,9 +124,15 @@ export async function normalizeWorkflow(
             );
         }
 
-        // Template provides steps; user can override with their own
-        if (!steps || (Array.isArray(steps) && steps.length === 0)) {
-            steps = template.steps;
+        const userHasSteps = Array.isArray(steps) && steps.length > 0;
+        const userHasGraph = !!graph && Array.isArray(graph.nodes) && graph.nodes.length > 0;
+
+        // Inherit only when the user hasn't provided either form. Inheriting
+        // graph alongside user steps would silently swap forms — the runtime
+        // prefers graph, so user steps would become dead code.
+        if (!userHasSteps && !userHasGraph) {
+            if (template.steps?.length) steps = template.steps;
+            if (template.graph?.nodes?.length) graph = template.graph;
         }
 
         // Template provides default trigger fields; user's trigger wins
@@ -133,15 +144,25 @@ export async function normalizeWorkflow(
         }
     }
 
-    if (!trigger) {
+    // Graph-form workflows store their executable definition under
+    // `graph:` instead of `steps:`. Accept either; treat them as
+    // mutually-sufficient alternatives.
+    const hasGraph = !!graph && Array.isArray(graph.nodes) && graph.nodes.length > 0;
+
+    if (!trigger && !hasGraph) {
         throw new Error(`Workflow "${raw.name}" must have a trigger`);
     }
-    if (!steps || steps.length === 0) {
-        throw new Error(`Workflow "${raw.name}" must have steps (or use a template)`);
+    if ((!steps || steps.length === 0) && !hasGraph) {
+        throw new Error(`Workflow "${raw.name}" must have steps, a template, or a graph`);
     }
 
     // ─── Shorthand resolution ────────────────────────────────────────────
-    const resolvedTrigger = resolveShorthands(trigger);
+    // Graph workflows can omit a top-level trigger — the runtime derives
+    // matching info from the graph's trigger node. Provide a placeholder
+    // here so downstream code that accesses `wf.trigger` doesn't blow up.
+    const resolvedTrigger = trigger
+        ? resolveShorthands(trigger)
+        : { source: 'manual', event: [] };
 
     return {
         name: raw.name as string,
@@ -150,6 +171,7 @@ export async function normalizeWorkflow(
         template: templateName,
         trigger: resolvedTrigger,
         steps,
+        graph,
         inputs: raw.inputs as WorkflowDefinition['inputs'],
         queue: raw.queue as WorkflowDefinition['queue'],
         ai: raw.ai as WorkflowDefinition['ai'],

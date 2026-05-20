@@ -155,7 +155,18 @@ export const addressReviewAction: ActionHandler = async (params, context) => {
             iteration: guard.iteration,
             context,
         });
-        return { halted: true, reason: guard.halt, message: guard.reason, run: stub };
+        return {
+            halted: true,
+            reason: guard.halt,
+            message: guard.reason,
+            run: stub,
+            // ai.address-review node contract: surface the two declared
+            // output ports so wires from `{{nodes.X.iterationsRun}}` /
+            // `{{nodes.X.finalState}}` resolve to real values instead
+            // of silently becoming undefined.
+            iterationsRun: guard.iteration,
+            finalState: guard.halt,
+        };
     }
     const iteration = guard.iteration;
 
@@ -338,7 +349,18 @@ export const addressReviewAction: ActionHandler = async (params, context) => {
             issueFingerprint: fingerprint,
         };
         await recordAddressReviewRun(record, context.logger);
-        return record;
+        // ai.address-review node contract: `iterationsRun` (number) and
+        // `finalState` (string) are the two declared output ports.
+        // `actionNode`'s wrapResult spreads our return onto the node
+        // outputs, so without these explicit keys both wires resolve to
+        // undefined. `finalState` is `haltReason` when the loop was
+        // halted early, otherwise the record completed naturally — emit
+        // 'completed' for that case so consumers can distinguish.
+        return {
+            ...record,
+            iterationsRun: record.iteration,
+            finalState: record.haltReason ?? 'completed',
+        };
     } finally {
         if (runningLabelSet && githubToken) {
             try {

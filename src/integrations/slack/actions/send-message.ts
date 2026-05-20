@@ -48,6 +48,10 @@ export const slackSendMessageAction: ActionHandler = async (params, context) => 
     );
 
     return {
+        // `timestamp` is the canonical port name (matches slack.react's
+        // input). `ts` stays as an alias so workflows authored before the
+        // rename keep resolving {{steps.x.ts}}.
+        timestamp: result.ts,
         ts: result.ts,
         channel: result.channel,
     };

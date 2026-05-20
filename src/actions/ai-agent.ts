@@ -56,19 +56,30 @@ export const aiAgentAction: ActionHandler = async (params, context) => {
         logger: context.logger,
     });
 
-    // When JSON parsing succeeded, spread the parsed fields into the
-    // result so downstream steps can reference them directly.
-    if (result.parsedJson && typeof result.parsedJson === 'object') {
-        return {
-            ...(result.parsedJson as Record<string, unknown>),
-            model: result.model,
-            provider: result.provider,
-        };
-    }
-
-    return {
+    // The ai.agent node (see core/nodes/builtins.ts) advertises two
+    // outputs: `output` (the agent's text) and `transcript` (the parsed
+    // JSON when output_format=json). The action's spread is what feeds
+    // those ports — if it doesn't return `output`, every wire from
+    // `{{nodes.X.output}}` resolves to undefined and downstream
+    // template-only configs (like the library auto-label-pr's
+    // github.comment body) silently get an empty string.
+    //
+    // Keep `review` for back-compat with older templates that wire
+    // `{{nodes.X.review}}`, and the parsed JSON fields are still
+    // spread at the top level so consumers that asked for json
+    // output can access them directly.
+    const base = {
+        output: result.output,
         review: result.output,
         model: result.model,
         provider: result.provider,
+        transcript: result.parsedJson ?? undefined,
     };
+    if (result.parsedJson && typeof result.parsedJson === 'object') {
+        return {
+            ...(result.parsedJson as Record<string, unknown>),
+            ...base,
+        };
+    }
+    return base;
 };

@@ -1,0 +1,65 @@
+# Push → Changelog PR
+#
+# On push to main, decompose the commits payload, pluck the latest SHA
+# explicitly via json-pluck (demonstrating the dot-path read), and pass
+# the message list to an AI agent that drafts a CHANGELOG entry.
+#
+# Exercises: data.commits-fields, data.json-pluck, data.template
+#
+# Usage:
+#   - name: changelog-pr
+#     template: push-changelog-pr
+
+description: On push to main, draft a CHANGELOG entry from the commit list
+icon: 📜
+
+trigger:
+  source: github
+  event: push
+  branch: main
+
+graph:
+  nodes:
+    - id: trigger
+      type: trigger.github
+      position: { x: 60, y: 240 }
+      config:
+        events: [push]
+        branches: main
+    - id: commits
+      type: data.commits-fields
+      position: { x: 360, y: 240 }
+      config: {}
+    - id: latest_sha
+      type: data.json-pluck
+      position: { x: 660, y: 100 }
+      config:
+        path: "0"
+    - id: header
+      type: data.template
+      position: { x: 660, y: 380 }
+      config:
+        template: |
+          ## Changelog draft for push to main
+
+          {{nodes.commits.count}} new commits — latest: {{nodes.commits.latestSha}}
+          ({{nodes.commits.latestAuthor}})
+    - id: log
+      type: utility.log
+      position: { x: 960, y: 240 }
+      config:
+        message: "{{nodes.header.text}} | first SHA via pluck: {{nodes.latest_sha.valueText}}"
+        level: info
+  edges:
+    - from: { node: trigger, port: commits }
+      to: { node: commits, port: commits }
+    - from: { node: commits, port: shas }
+      to: { node: latest_sha, port: from }
+    # header's template interpolates commits.* ; log's message interpolates
+    # both header.text and latest_sha.valueText.
+    - from: { node: commits, port: count }
+      to: { node: header, port: __seq }
+    - from: { node: header, port: text }
+      to: { node: log, port: __seq }
+    - from: { node: latest_sha, port: valueText }
+      to: { node: log, port: __seq }

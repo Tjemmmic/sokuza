@@ -498,6 +498,35 @@ describe('interpolateParams', () => {
         expect(result.missing).toBe('');
     });
 
+    it('preserves unknown-prefix placeholders as literals (matches the graph runtime — a typo like {{ndoes.x}} stays visible instead of silently becoming "")', () => {
+        const params = {
+            typo: 'before {{ndoes.review.sha}} after',
+            literal: 'see {{handlebars}} for syntax',
+            // Recognised but missing still collapses to empty so optional
+            // values don't surface placeholder text in real outputs.
+            missing: 'pre[{{steps.nope.gone}}]post',
+        };
+        const result = interpolateParams(params, baseContext);
+        expect(result.typo).toBe('before {{ndoes.review.sha}} after');
+        expect(result.literal).toBe('see {{handlebars}} for syntax');
+        expect(result.missing).toBe('pre[]post');
+    });
+
+    it('no longer accepts the bare `{{metadata.…}}` prefix — must use `{{event.metadata.…}}`', () => {
+        // `metadata.` used to be in ALLOWED_INTERPOLATION_PREFIXES but
+        // was never wired into the resolution context — it always
+        // resolved to undefined → empty string. Now it falls into the
+        // unknown-prefix branch and round-trips as a literal, which
+        // surfaces the typo instead of silently corrupting output.
+        const params = {
+            wrong: '{{metadata.repo}}',
+            right: '{{event.metadata.repo}}',
+        };
+        const result = interpolateParams(params, baseContext);
+        expect(result.wrong).toBe('{{metadata.repo}}');
+        expect(result.right).toBe('org/repo');
+    });
+
     it('handles multiple expressions in one string', () => {
         const params = { msg: 'PR #{{event.payload.pull_request.number}} in {{event.metadata.repo}}' };
         const result = interpolateParams(params, baseContext);
@@ -520,6 +549,20 @@ describe('interpolateParams', () => {
         expect(result.count).toBe(42);
         expect(result.flag).toBe(true);
         expect(result.items).toEqual([1, 2, 3]);
+    });
+
+    it('resolves templates inside arrays — same shape as the graph runtime', () => {
+        // Used to silently pass arrays through verbatim, leaving
+        // {{...}} placeholders intact and producing the wrong values
+        // downstream. The graph executor's interpolateValue has always
+        // walked arrays; the legacy executor now matches.
+        const params = {
+            items: ['{{event.metadata.repo}}', '{{steps.analysis.summary}}', 'literal'],
+            nested: [{ ref: '{{event.payload.pull_request.title}}' }],
+        };
+        const result = interpolateParams(params, baseContext);
+        expect(result.items).toEqual(['org/repo', 'Found issue', 'literal']);
+        expect((result.nested as Array<Record<string, unknown>>)[0].ref).toBe('Fix bug');
     });
 });
 

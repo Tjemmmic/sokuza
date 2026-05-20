@@ -2313,3 +2313,515 @@ tr:hover td {
 @keyframes spin {
     to { transform: rotate(360deg); }
 }
+
+/* ─── Visual Workflow Editor ──────────────────────────────────────────────── */
+.ge-root {
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    margin: -28px;
+    background: var(--bg-primary);
+    overflow: hidden;
+}
+
+.ge-topbar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 14px;
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--border-color);
+    flex-shrink: 0;
+}
+
+.ge-name-input {
+    background: var(--bg-input);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    padding: 7px 12px;
+    color: var(--text-primary);
+    font-family: var(--mono);
+    font-size: 13px;
+    font-weight: 600;
+    width: 200px;
+}
+.ge-name-input:focus { outline: none; border-color: var(--accent); }
+.ge-name-input[readonly] { opacity: 0.7; cursor: default; }
+
+.ge-desc-input {
+    background: var(--bg-input);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    padding: 7px 12px;
+    color: var(--text-primary);
+    font-size: 13px;
+    flex: 1;
+    max-width: 480px;
+}
+.ge-desc-input:focus { outline: none; border-color: var(--accent); }
+
+.ge-toggle {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--text-secondary);
+    cursor: pointer;
+    padding: 6px 10px;
+    background: var(--bg-input);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+}
+
+.ge-body {
+    display: grid;
+    grid-template-columns: 280px 1fr 360px;
+    flex: 1;
+    overflow: hidden;
+}
+
+/* Palette */
+.ge-palette {
+    background: var(--bg-secondary);
+    border-right: 1px solid var(--border-color);
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+}
+.ge-palette-header { padding: 12px; border-bottom: 1px solid var(--border-color); }
+.ge-palette-search {
+    width: 100%;
+    background: var(--bg-input);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    padding: 8px 12px;
+    color: var(--text-primary);
+    font-size: 13px;
+}
+.ge-palette-search:focus { outline: none; border-color: var(--accent); }
+.ge-palette-body { flex: 1; padding: 8px; }
+.ge-palette-group { margin-bottom: 8px; }
+.ge-palette-group-h {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 10px;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    color: var(--text-secondary);
+    cursor: pointer;
+    border-radius: var(--radius-xs);
+}
+.ge-palette-group-h:hover { background: var(--bg-card-hover); color: var(--text-primary); }
+.ge-palette-group-count { background: var(--border-color); color: var(--text-secondary); border-radius: 8px; padding: 1px 6px; font-size: 10px; font-weight: 600; }
+.ge-palette-group-caret { margin-left: auto; font-size: 9px; }
+.ge-palette-group-body { display: flex; flex-direction: column; gap: 4px; }
+.ge-palette-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 10px 12px;
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-left: 3px solid var(--node-color, var(--accent));
+    border-radius: var(--radius-xs);
+    cursor: grab;
+    transition: all 0.12s;
+    user-select: none;
+}
+.ge-palette-item:hover { background: var(--bg-card-hover); border-color: var(--border-active); transform: translateX(2px); }
+.ge-palette-item:active { cursor: grabbing; }
+.ge-palette-icon { font-size: 18px; line-height: 1; flex-shrink: 0; }
+.ge-palette-meta { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.ge-palette-title { font-size: 12px; font-weight: 600; color: var(--text-primary); }
+.ge-palette-desc { font-size: 10px; color: var(--text-muted); line-height: 1.3; overflow: hidden; text-overflow: ellipsis; }
+.ge-palette-footer { padding: 10px 14px; border-top: 1px solid var(--border-color); font-size: 11px; color: var(--text-muted); }
+
+/* Canvas */
+.ge-canvas-wrap {
+    position: relative;
+    overflow: hidden;
+    background:
+        radial-gradient(circle, rgba(99, 102, 241, 0.07) 1px, transparent 1px) 0 0 / 24px 24px,
+        var(--bg-primary);
+    cursor: grab;
+}
+.ge-canvas-wrap:active { cursor: grabbing; }
+.ge-canvas {
+    position: absolute;
+    top: 0; left: 0;
+    width: 4000px;
+    height: 4000px;
+    transform-origin: 0 0;
+    pointer-events: none;
+    z-index: 1;
+}
+.ge-canvas > * { pointer-events: auto; }
+.ge-edges {
+    /* Sibling of .ge-canvas, NOT a child — coordinates here are in viewport
+       pixel space relative to .ge-canvas-wrap, so wires line up with the
+       on-screen position of port handles regardless of pan/zoom. */
+    position: absolute;
+    top: 0; left: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    overflow: visible;
+    z-index: 2;
+}
+.ge-edges g { pointer-events: auto; }
+.ge-canvas-hint {
+    position: absolute;
+    bottom: 16px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: var(--bg-elevated);
+    border: 1px solid var(--border-active);
+    border-radius: var(--radius);
+    padding: 8px 14px;
+    font-size: 12px;
+    color: var(--text-secondary);
+    box-shadow: var(--shadow);
+    z-index: 5;
+}
+
+/* Node card */
+.ge-node {
+    position: absolute;
+    width: 220px;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    overflow: hidden;
+    user-select: none;
+    transition: box-shadow 0.15s, border-color 0.15s;
+}
+.ge-node:hover { border-color: var(--border-active); }
+.ge-node.selected {
+    border-color: var(--accent-hover);
+    box-shadow: 0 0 0 2px var(--accent-glow), var(--shadow-lg);
+}
+.ge-node-broken { border-color: var(--danger); }
+.ge-node-trigger { width: 240px; }
+.ge-node-control .ge-node-header { background: linear-gradient(135deg, var(--node-color, var(--warning)), transparent 200%); }
+.ge-node-trigger .ge-node-header { background: linear-gradient(135deg, var(--node-color, var(--info)), transparent 200%); }
+
+.ge-node-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 10px;
+    background: linear-gradient(135deg, var(--node-color, var(--accent)), transparent 220%);
+    cursor: grab;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+.ge-node-header:active { cursor: grabbing; }
+.ge-node-icon { font-size: 16px; }
+.ge-node-title { font-size: 13px; font-weight: 600; color: var(--text-primary); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ge-node-id { font-family: var(--mono); font-size: 10px; color: var(--text-muted); }
+.ge-node-body { display: flex; justify-content: space-between; gap: 6px; padding: 6px 0; min-height: 28px; }
+
+.ge-ports { display: flex; flex-direction: column; gap: 4px; }
+.ge-ports-in { align-items: flex-start; }
+.ge-ports-out { align-items: flex-end; }
+.ge-port {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 2px 6px;
+    cursor: pointer;
+    font-size: 11px;
+    color: var(--text-secondary);
+    border-radius: 4px;
+    transition: background 0.1s;
+}
+.ge-port:hover { background: rgba(99, 102, 241, 0.12); color: var(--text-primary); }
+.ge-port-in { padding-left: 0; }
+.ge-port-in .ge-port-dot { margin-right: 4px; margin-left: -6px; }
+.ge-port-out { padding-right: 0; flex-direction: row-reverse; }
+.ge-port-out .ge-port-dot { margin-left: 4px; margin-right: -6px; }
+.ge-port-dot {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: var(--bg-elevated);
+    border: 2px solid var(--accent-hover);
+    box-shadow: 0 0 6px rgba(99, 102, 241, 0.3);
+}
+.ge-port:hover .ge-port-dot { background: var(--accent-hover); }
+.ge-port-label { font-size: 11px; }
+
+/* Inspector */
+.ge-inspector {
+    background: var(--bg-secondary);
+    border-left: 1px solid var(--border-color);
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+}
+.ge-inspector-empty {
+    padding: 28px 22px;
+    text-align: center;
+    color: var(--text-muted);
+}
+.ge-inspector-empty-icon { font-size: 32px; margin-bottom: 12px; }
+.ge-inspector-empty h3 { color: var(--text-primary); font-size: 16px; margin-bottom: 8px; }
+.ge-inspector-empty p { font-size: 12px; line-height: 1.6; }
+.ge-inspector-empty hr { margin: 18px 0; border: 0; border-top: 1px solid var(--border-color); }
+.ge-inspector-empty h4 { color: var(--text-secondary); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; }
+.ge-stat { font-size: 13px; color: var(--text-secondary); margin-bottom: 4px; }
+
+.ge-inspector-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 14px 16px;
+    border-bottom: 1px solid var(--border-color);
+    background: linear-gradient(135deg, var(--node-color, var(--accent)) -100%, transparent 60%);
+}
+.ge-inspector-icon { font-size: 24px; }
+.ge-inspector-title { flex: 1; }
+.ge-inspector-title > div { font-size: 14px; font-weight: 600; color: var(--text-primary); }
+.ge-inspector-title small { color: var(--text-muted); font-family: var(--mono); font-size: 10px; }
+
+.ge-inspector-body { padding: 14px 16px; flex: 1; }
+.ge-inspector-desc { color: var(--text-muted); font-size: 12px; margin-bottom: 14px; line-height: 1.5; }
+.ge-inspector-section-h {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-muted);
+    margin: 16px 0 8px;
+    padding-bottom: 4px;
+    border-bottom: 1px solid var(--border-color);
+}
+.ge-inspector-fields > .form-group { margin-bottom: 12px; }
+.ge-port-list { list-style: none; padding: 0; }
+.ge-port-list li { padding: 6px 0; border-bottom: 1px dashed var(--border-color); font-size: 11px; display: flex; justify-content: space-between; gap: 8px; }
+.ge-port-list code { background: var(--bg-input); padding: 1px 5px; border-radius: 3px; font-size: 10px; color: var(--accent-hover); }
+
+.ge-multiselect { display: flex; flex-wrap: wrap; gap: 6px; padding: 6px; background: var(--bg-input); border: 1px solid var(--border-color); border-radius: var(--radius-sm); }
+.ge-chip {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 8px;
+    font-size: 11px;
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: 999px;
+    cursor: pointer;
+    color: var(--text-secondary);
+}
+.ge-chip input { display: none; }
+.ge-chip.checked { background: var(--accent); color: white; border-color: var(--accent); }
+.ge-multiselect-extra { width: 100%; margin-top: 6px; font-size: 11px; padding: 4px 8px; }
+.ge-multiselect-tags { display: flex; flex-wrap: wrap; gap: 4px; width: 100%; margin-top: 4px; }
+
+.ge-kv-rows { display: flex; flex-direction: column; gap: 6px; margin-bottom: 6px; }
+.ge-kv-row { display: grid; grid-template-columns: 1fr 1fr auto; gap: 6px; }
+
+.ge-manual-input-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr 110px auto auto;
+    gap: 6px;
+    margin-bottom: 6px;
+    align-items: center;
+}
+
+.ge-yaml-panel {
+    position: absolute;
+    right: 0; top: 0; bottom: 0;
+    width: 480px;
+    background: var(--bg-secondary);
+    border-left: 1px solid var(--border-active);
+    display: flex;
+    flex-direction: column;
+    z-index: 20;
+    box-shadow: var(--shadow-lg);
+}
+.ge-yaml-header { display: flex; align-items: center; justify-content: space-between; padding: 10px 14px; border-bottom: 1px solid var(--border-color); font-size: 12px; color: var(--text-secondary); }
+.ge-yaml-pre { flex: 1; padding: 16px; overflow: auto; font-family: var(--mono); font-size: 11px; color: var(--text-primary); white-space: pre; line-height: 1.5; }
+
+/* ─── Editor v2 polish ─────────────────────────────────────────────────── */
+
+/* Wider node card so titles like "Manual (run from dashboard)" fit. */
+.ge-node { width: 280px; }
+.ge-node-trigger { width: 290px; }
+
+/* Header: icon + stacked title/id, no truncation. */
+.ge-node-header { padding: 10px 12px; gap: 10px; align-items: center; }
+.ge-node-title-wrap { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.ge-node-title { font-size: 13px; font-weight: 600; color: var(--text-primary); line-height: 1.2; white-space: normal; overflow: visible; text-overflow: clip; }
+.ge-node-id { font-family: var(--mono); font-size: 10px; color: var(--text-muted); }
+
+/* Tighter port rows so a 5-output trigger doesn't go 200px tall. */
+.ge-node-body { padding: 8px 0; gap: 12px; }
+.ge-ports { gap: 6px; min-width: 0; flex: 1; }
+.ge-port { padding: 3px 8px; font-size: 11px; max-width: 140px; gap: 6px; }
+.ge-port-label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ge-port-required { color: var(--danger); font-weight: 700; margin-left: 2px; }
+.ge-port-type {
+    margin-left: auto; font-size: 9px; font-family: var(--mono); color: var(--text-muted);
+    background: rgba(99, 102, 241, 0.06); padding: 1px 5px; border-radius: 3px;
+}
+.ge-port-out .ge-port-type { margin-left: 0; margin-right: auto; }
+
+/* Required-input dots: red until satisfied, green when wired/configured. */
+.ge-port-missing .ge-port-dot {
+    border-color: var(--danger);
+    box-shadow: 0 0 6px rgba(239, 68, 68, 0.45);
+    background: rgba(239, 68, 68, 0.18);
+}
+.ge-port-ok .ge-port-dot {
+    border-color: var(--success);
+    box-shadow: 0 0 6px rgba(34, 197, 94, 0.35);
+}
+
+/* Wiring-in-progress: dim incompatible inputs, pulse compatible ones. */
+.ge-node.wiring .ge-port-incompat { opacity: 0.25; pointer-events: none; }
+.ge-node.wiring .ge-port-compat .ge-port-dot {
+    background: var(--success);
+    border-color: var(--success);
+    animation: ge-pulse 1s ease-in-out infinite;
+}
+@keyframes ge-pulse {
+    0%, 100% { box-shadow: 0 0 6px rgba(34, 197, 94, 0.45); }
+    50% { box-shadow: 0 0 14px rgba(34, 197, 94, 0.85); }
+}
+
+/* Inspector input-status panel: tells the user which inputs are connected,
+   which are missing, and how to satisfy them. */
+.ge-input-status-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 10px; }
+.ge-input-row {
+    background: var(--bg-input);
+    border: 1px solid var(--border-color);
+    border-left: 3px solid var(--text-muted);
+    border-radius: var(--radius-sm);
+    padding: 10px 12px;
+}
+.ge-input-row.ge-input-ok { border-left-color: var(--success); }
+.ge-input-row.ge-input-missing { border-left-color: var(--danger); }
+.ge-input-meta { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.ge-input-meta strong { color: var(--text-primary); }
+.ge-input-type { font-family: var(--mono); font-size: 10px; color: var(--text-muted); background: rgba(99,102,241,0.08); padding: 1px 6px; border-radius: 3px; }
+.ge-input-req { font-size: 10px; color: var(--danger); font-weight: 600; text-transform: uppercase; }
+.ge-input-help { font-size: 11px; color: var(--text-muted); margin-top: 4px; line-height: 1.4; }
+.ge-input-source { font-size: 11px; color: var(--text-secondary); margin-top: 6px; display: flex; align-items: center; gap: 6px; }
+.ge-input-source-warn { color: var(--danger); }
+.ge-input-source code { background: var(--bg-elevated); padding: 1px 5px; border-radius: 3px; font-size: 10px; color: var(--accent-hover); }
+.ge-input-suggest { margin-top: 8px; }
+.ge-input-suggest-h { font-size: 10px; text-transform: uppercase; color: var(--text-muted); letter-spacing: 0.5px; margin-bottom: 4px; }
+.ge-suggest-btn {
+    display: flex; align-items: center; gap: 8px; width: 100%;
+    background: var(--bg-card); border: 1px solid var(--border-color);
+    border-radius: var(--radius-xs); padding: 6px 10px; margin-bottom: 4px;
+    cursor: pointer; color: var(--text-primary); font-size: 11px;
+    text-align: left; transition: all 0.12s;
+}
+.ge-suggest-btn:hover { background: var(--bg-card-hover); border-color: var(--accent); }
+.ge-suggest-btn code { font-size: 10px; color: var(--accent-hover); }
+.ge-suggest-btn small { color: var(--text-muted); margin-left: auto; font-size: 10px; }
+
+/* Recipe picker (shown when creating a brand-new workflow). */
+.ge-recipe-page { padding: 60px 40px; max-width: 1200px; margin: 0 auto; }
+.ge-recipe-header { margin-bottom: 32px; }
+.ge-recipe-header button { margin-bottom: 24px; }
+.ge-recipe-header h1 { font-size: 28px; font-weight: 700; color: var(--text-primary); margin-bottom: 8px; }
+.ge-recipe-header p { color: var(--text-secondary); font-size: 14px; max-width: 600px; }
+.ge-recipe-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px; }
+.ge-recipe-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius);
+    padding: 22px;
+    cursor: pointer;
+    transition: all 0.15s;
+}
+.ge-recipe-card:hover { border-color: var(--accent); transform: translateY(-2px); box-shadow: var(--shadow-lg); }
+.ge-recipe-card.ge-recipe-blank { border-style: dashed; opacity: 0.85; }
+.ge-recipe-icon { font-size: 32px; margin-bottom: 12px; }
+.ge-recipe-card h3 { font-size: 16px; font-weight: 600; color: var(--text-primary); margin-bottom: 6px; }
+.ge-recipe-card p { font-size: 12px; color: var(--text-secondary); line-height: 1.5; margin-bottom: 12px; }
+.ge-recipe-card ul { font-size: 11px; color: var(--text-muted); list-style: none; padding-left: 0; }
+.ge-recipe-card ul li { padding: 2px 0; padding-left: 14px; position: relative; }
+.ge-recipe-card ul li::before { content: '·'; position: absolute; left: 4px; color: var(--accent); font-weight: bold; }
+
+/* ─── Inspector textarea ergonomics ────────────────────────────────────────
+   The sidebar form is narrow (~340px); prompts and code snippets are
+   miserable to edit there. `.form-label-row` keeps the inline label +
+   the "Edit in modal" affordance on one line; `.ge-expand-btn` is a
+   compact ghost button.
+*/
+.form-label-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 4px; }
+.form-label-row .form-label { margin: 0; }
+.ge-expand-btn { padding: 2px 8px !important; font-size: 11px !important; flex-shrink: 0; }
+
+/* Long absolute paths in System / Settings need to wrap at any
+   character — otherwise a long Linux path overruns the card and gets
+   clipped behind the next column. */
+.path-wrap {
+    display: inline-block;
+    max-width: 100%;
+    word-break: break-all;
+    overflow-wrap: anywhere;
+}
+
+/* Highlight a topbar input when save validation fails — the previous
+   feedback was a toast-only, which scrolled out of view before the
+   user could focus the field that needed fixing. */
+.ge-input-error {
+    border-color: var(--danger, #ef4444) !important;
+    box-shadow: 0 0 0 1px var(--danger, #ef4444) !important;
+}
+
+/* "Modified" dot on the Save button when the editor has unsaved
+   changes. Together with the close/unload confirmation, this gives
+   the user a continuous visual signal that pressing Save (or the
+   browser back button) matters right now. */
+#ge-save-btn { position: relative; }
+#ge-save-btn.ge-dirty::after {
+    content: '';
+    position: absolute;
+    top: 4px;
+    right: 4px;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: #f59e0b;
+    box-shadow: 0 0 0 2px var(--bg-primary, #0b0d12);
+}
+
+/* ─── Palette presets ──────────────────────────────────────────────────────
+   Presets render in their own group above the built-in node types. The
+   subtle accent border makes them visually distinct so a user notices
+   that installing a library workflow added something to the palette.
+*/
+.ge-palette-preset { border-left: 2px solid var(--node-color, var(--accent)); }
+.ge-palette-preset .ge-palette-desc code {
+    background: rgba(99, 102, 241, 0.08);
+    padding: 1px 4px;
+    border-radius: 3px;
+    color: var(--text-secondary);
+}
+
+/* ─── Fullscreen prompt editor modal ───────────────────────────────────────
+   Used by openPromptEditor(): a roomy textarea so multi-paragraph
+   prompts (e.g. the ai.review system prompt) are actually legible.
+   The toolbar carries the "Load default" affordance for ports whose
+   action falls back to a TS-generated default when blank.
+*/
+.ge-prompt-editor { display: flex; flex-direction: column; gap: 12px; height: calc(80vh - 200px); min-height: 320px; }
+.ge-prompt-editor-toolbar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.ge-prompt-editor-textarea {
+    flex: 1;
+    min-height: 280px;
+    font-family: var(--mono);
+    font-size: 13px;
+    line-height: 1.55;
+    resize: vertical;
+}

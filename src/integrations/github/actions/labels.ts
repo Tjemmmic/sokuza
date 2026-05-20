@@ -46,7 +46,9 @@ export const githubAddLabelAction: ActionHandler = async (params, context) => {
     if (cleaned.length === 0) throw new Error('github-add-label: at least one label required');
     const client = new GitHubApiClient(token);
     await client.addLabels(owner, repo, number, cleaned);
-    return { added: cleaned, owner, repo, number };
+    // `appliedLabels` is the canonical port name; `added` stays as an
+    // alias so workflows authored before the rename keep resolving.
+    return { success: true, appliedLabels: cleaned, added: cleaned, owner, repo, number };
 };
 
 export const githubRemoveLabelAction: ActionHandler = async (params, context) => {
@@ -55,5 +57,7 @@ export const githubRemoveLabelAction: ActionHandler = async (params, context) =>
     if (!label) throw new Error('github-remove-label: label required');
     const client = new GitHubApiClient(token);
     await client.removeLabel(owner, repo, number, label);
-    return { removed: label, owner, repo, number };
+    // `removedLabel` is the canonical port name; `removed` stays as an
+    // alias so workflows authored before the rename keep resolving.
+    return { success: true, removedLabel: label, removed: label, owner, repo, number };
 };

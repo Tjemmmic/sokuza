@@ -15,6 +15,63 @@ under a new `## [X.Y.Z] - YYYY-MM-DD` heading, bump `version` in
 `package.json`, commit, push to main. The release workflow tags +
 publishes automatically.
 
+### Added
+
+#### Visual editor and graph runtime
+
+- **Visual node-graph workflow editor.** Workflows can now be authored on a drag-and-drop canvas: drag node types from the palette, wire output ports to input ports, configure each node in the inspector. Supersedes the YAML/form editor as the default surface — the legacy editor is reachable via `openLegacyWorkflowEditor()` for power users. Existing workflows render as auto-laid-out graphs and can be re-wired visually.
+- **Pluggable node registry.** Adding a new feature is now a single `NodeDefinition` object in `src/core/nodes/builtins.ts` (or registered by an integration). The registry drives the palette (via `GET /api/nodes`), the inspector form, and the runtime — no parallel UI/runtime/schema edits.
+- **Graph runtime.** New `executeGraph()` runs node graphs with topo-sort layered parallelism, per-node `condition` / `on_error` / `timeout`, and `{{nodes.<id>.<port>}}` template interpolation alongside the legacy `{{steps.x}}` / `{{event.x}}` / `{{inputs.x}}`. Workflows opt in by setting `graph:` instead of `steps:`; the engine dispatches automatically.
+- **Trigger-as-node.** Each integration source has a `trigger.<source>` node (github, github-poll, gh-cli, slack, webhook, cron, manual). Trigger node config is bridged to the legacy `TriggerDefinition` so event matching keeps working unchanged.
+- **Recipe picker on `+ New Workflow`.** Pre-wired starter graphs for Manual PR Review, Auto PR Review, Auto-Fix Loop, Log Events, plus a Blank canvas. Replaces the empty-canvas onboarding cliff.
+- **Type-validated wiring.** Each port carries a semantic type (`pr`, `issue`, `review`, `diff`, `commits`, `event`, `string`, `number`, `boolean`, `json`, `any`). Incompatible wires are rejected on the canvas with a clear toast; compatible inputs pulse green while wiring. Required-port indicators (red dot when empty, green when wired/configured) plus an `Inputs (X/Y connected)` panel in the inspector.
+- **Per-input guidance.** Inspector lists every wireable input with its status, a "wire from existing node" picker, and a "or add a node that provides this" one-click action. Closes the "how do I get a diff?" question that the type system raised.
+- **Config-driven dynamic output ports.** Trigger nodes grow ports based on their config — selecting `pull_request.opened` on the GitHub trigger reveals `pr`/`prNumber`/`repo`/`branch`/`author`; defining a manual-trigger input creates a typed output port for it.
+
+#### New node groups
+
+- **Data group (7 nodes).** Bridges closed structural types into the scalars action nodes need:
+  - `data.json-pluck` — universal: dot-path into any object/JSON, emits `value` + `valueText` + `exists`. Numeric segments index arrays.
+  - `data.pr-fields` — splits a PR object into `number` / `repo` / `headRepo` / `isCrossRepo` / `headRepoDeleted` / `branch` / `headFullRef` / `baseBranch` / `headSha` / `baseSha` / `author` / `title` / `body` / `state` / `draft` / `url` / `labels`. `headFullRef` emits the GitHub-canonical `owner:branch` form for fork PRs. `headRepoDeleted` flags PRs whose head fork has been removed so downstream clone-repo doesn't silently target the wrong place.
+  - `data.issue-fields` — same shape for issues.
+  - `data.review-fields` — splits a structured AI review into `summary` / `issues` / `mergeReady` plus derived `blockingCount` (P0/P1) / `nonBlockingCount` / `totalCount`.
+  - `data.commits-fields` — pulls `count` / `latestSha` / `latestMessage` / `latestAuthor` / `messages` / `shas` from a push event's commits.
+  - `data.event-fields` — splits the canonical event envelope into `source` / `eventName` / `timestamp` / `payload` / `metadata`.
+  - `data.template` — visible composition node: textarea body with `{{nodes.x.y}}` placeholders, output `text`.
+- **Git group (1 node, provider-agnostic).**
+  - `git.commit-and-push` — stages (with optional `paths`), commits, and pushes from a workdir. Works against GitHub, GitLab, self-hosted git. Supports per-call branch override with explicit-existence detection (no try/catch swallow), validates paths against absolute / `..` / NUL / Windows-style backslash escape, validates branch names against leading `-` / `HEAD` / whitespace / control chars.
+- **GitHub round-trip nodes (5 new).**
+  - `github.fetch-pr` — number → full PR object (pipes into `data.pr-fields`).
+  - `github.fetch-issue` — number → full Issue object.
+  - `github.merge-pr` — merge / squash / rebase via API. Throws on `405` (not mergeable) and on a `200` response with `merged !== true` (silent-failure guard); distinguishes a missing `merged` field from explicit `false` so operators can triage API shape changes.
+  - `github.update-pr` — PATCH a PR's title / body / state / base. Client-side guards against an empty PATCH body and against empty-string title/base.
+  - `github.wait-for-checks` — polls Checks API + legacy combined-status until done or timeout. Dedupes statuses by `context` (keeping latest `updated_at`), folds aggregate combined `state` into the keep-polling decision so a queued context doesn't pass the success gate, validates `interval` ∈ [1s, 10min] and `interval ≤ timeout`, parallelises the two API calls, caps `getCheckRuns` pagination at 5 pages.
+- **Flow group: `flow.filter-list`.** Filter a JSON array by a per-item field test (`equals` / `not-equals` / `truthy` / `exists` / `contains`). Outputs `filtered` / `count` / `first`.
+
+### Changed
+
+- **Type-tagged every wireable input across the builtins.** Closed types (`pr`, `issue`, `review`, `diff`, `commits`) can no longer be silently coerced into a text field. A contract test now iterates every registered builtin and reports any wireable input missing its type tag, so this can never regress.
+- **`clone-repo` and `create-pr` re-emit construction-time fields.** Both now emit `repo` and `branch` so downstream nodes can wire from a single source instead of also wiring back to the trigger.
+- **`slack.send-message` output renamed `ts` → `timestamp`** to match `slack.react`'s input — the obvious wire now works.
+- **Label nodes expose typed success outputs.** `github.add-label` emits `success` + `appliedLabels`; `github.remove-label` emits `success` + `removedLabel`. Workflows can branch on label outcomes without parsing the synthetic `result` bag.
+- **`GitHubApiClient` extended** with `updatePullRequest`, `mergePullRequest`, `getIssue`, `getCheckRuns` (paginated, capped at `maxPages=5`), `getCombinedStatus`. All error responses run through `truncateErrorBody()` (compact-JSON form, 500-char cap, `[truncated, N total]` note) so pretty-printed GitHub errors don't waste the budget on whitespace.
+- **Shared `_target.ts` resolver** for owner/repo/number across all GitHub action handlers. Empty strings (`''`) and zero are treated as "not supplied" so a blank UI form field doesn't overshadow event metadata. Malformed `params.repo` (e.g. URL-paste fragments) is only flagged as an error when no other source resolved owner+repo.
+- **Shared `git-helpers.ts`** module replaces the `execGit` / `execGitOutput` copy-paste between `clone-repo` and `create-pr`.
+
+### Fixed
+
+- **Wire endpoints align at any pan/zoom.** Moved the wire SVG out of the transformed canvas so endpoints render in viewport pixel space.
+- **Workflow templates with `graph:` no longer fail "must have steps".** `templates.ts` now accepts either form; `engine.ts` and `api.ts` use `?? 0` fallbacks when reading `workflow.steps?.length`.
+- **`git.commit-and-push` validates `workdir`.** The visual editor exposed `workdir` as freeform text but the action passed it straight to `git add -A`; a user-authored YAML could point at any local git repo and commit-then-push under the action's identity. Now rejects NUL/control chars, leading `-`, relative paths, the filesystem root, and obvious system paths (`/etc`, `/proc`, `/sys`, `/dev`, `/boot`, `/root`, `/usr`, `/bin`, `/sbin`, `/lib*`, `/var/{log,lib,run}`).
+- **`git.commit-and-push` propagates `context.signal` to git subprocesses.** Previously a workflow timeout or cancel would unblock the runtime but leave `git push` running to completion against the network. The action now threads the signal through `execGit` / `execGitOutput`; on abort the child receives SIGTERM and the action rejects with `Workflow aborted` instead of letting the push outlive the workflow.
+- **`git.commit-and-push` rolls back the local commit on push failure.** When `git push` failed (network, auth, rejected pre-push hook), the action used to leave the commit in the workdir, polluting retries in long-lived workdirs (workdir-manager, chat-session). Now wraps the push in try/catch and runs `git reset --soft HEAD~1` on failure, preserving the staged index so the next attempt sees the same diff.
+- **`github.wait-for-checks` tolerates transient API errors.** A single failed `check-runs` or `combined-status` request (transient 5xx, brief 401 during token rotation) used to abort an entire multi-minute poll. The action now tolerates up to 3 consecutive failures, logging a warning each time and retrying on the next interval. A sustained outage still propagates so the caller sees the real error.
+- **Workflow CRUD endpoints reload the engine's in-memory config.** `POST` / `PUT` / `DELETE /api/workflows[/:name]` used to write the YAML on disk without telling the engine; `GET /api/workflows/:name/details` reads from the engine's cached config, so workflows installed or duplicated from the dashboard 404'd on the next "Edit" click. Each handler now calls `reloadConfig()` after a successful mutation.
+- **Visual editor: roomy prompt editor + "Load default".** Textarea ports (system prompts, code snippets) now have an "↗ Edit in modal" button that opens a full-width editor — the sidebar's 4-row box was unusable for multi-paragraph prompts. Ports that declare a `defaultSource` (currently only `ai.review.prompt`) get a "📥 Load default" button inside the modal that fetches the TS-generated default via the new `GET /api/ai/defaults/:source` endpoint, so the user can see what the action runs when the field is blank and customise from there. `ai-review.ts`'s default is now sourced through the same registry so the modal can't drift from the action.
+- **Visual editor: typed AI provider/model selects.** `ai.review` / `ai.agent` / `ai.address-review` exposed `provider` and `model` as blank text inputs — discoverable to nobody, configurable only by reading source. The provider field is now a select sourced from `/api/ai/providers`: its empty option labels itself "Use default (currently: X)" so the override semantics are obvious, each option shows a `✓ ready` / `⚠ no key` / `⚠ CLI missing` badge so the user picks from things that will actually work. The model field stays free-text (different providers have different model namespaces) but its placeholder reflects the chosen provider's `default_model` and the inspector re-renders on provider change so the hint isn't stale.
+- **Node presets — installable AI configurations from library templates.** New per-user store at `~/.sokuza/node-presets.json` exposes a "Presets" group in the editor's palette. Library install hook walks the template's graph, captures every non-empty `ai.*` node config, and saves it as a preset tagged `library:<id>` — so installing `security-audit` silently surfaces a pre-prompted `ai.agent` you can drag onto the canvas. New endpoints: `GET/POST /api/node-presets`, `DELETE /api/node-presets/:id`. Manually-created presets are tagged `user` and survive library churn.
+- **Workflow delete cascades to deck + library-extracted presets.** Manually deleting a workflow from the workflows page used to leave the library card stuck on "Installed" with no workflow behind it — the only recovery was uninstall-then-reinstall. The library card's "Installed" state now derives from actual workflow existence (via `getInstalledWorkflowName`), and `DELETE /api/workflows/:name` cascades: drops the deck entry and any presets that originated from the same `_libraryItem`, so the next render correctly shows "Install" again.
+
 ## [0.1.2] - 2026-04-27
 
 ### Fixed

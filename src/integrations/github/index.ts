@@ -26,6 +26,11 @@ import { githubCreatePrAction } from './actions/create-pr.js';
 import { githubFetchReviewsAction } from './actions/github-fetch-reviews.js';
 import { githubCreateReviewAction } from './actions/create-review.js';
 import { githubAddLabelAction, githubRemoveLabelAction } from './actions/labels.js';
+import { githubFetchPrAction } from './actions/fetch-pr.js';
+import { githubFetchIssueAction } from './actions/fetch-issue.js';
+import { githubMergePrAction } from './actions/merge-pr.js';
+import { githubUpdatePrAction } from './actions/update-pr.js';
+import { githubWaitForChecksAction } from './actions/wait-for-checks.js';
 
 interface GitHubConfig {
     webhookSecret: string;
@@ -45,6 +50,11 @@ export class GitHubIntegration implements Integration {
         'github-create-review': githubCreateReviewAction,
         'github-add-label': githubAddLabelAction,
         'github-remove-label': githubRemoveLabelAction,
+        'github-fetch-pr': githubFetchPrAction,
+        'github-fetch-issue': githubFetchIssueAction,
+        'github-merge-pr': githubMergePrAction,
+        'github-update-pr': githubUpdatePrAction,
+        'github-wait-for-checks': githubWaitForChecksAction,
     };
 
     private config: GitHubConfig = { webhookSecret: '' };

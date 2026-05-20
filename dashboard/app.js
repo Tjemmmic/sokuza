@@ -19,6 +19,19 @@ let libraryTemplates = [];
 let librarySearchQuery = '';
 let libraryActiveCategory = 'all';
 
+// graph-editor.js needs to flip the library badge when a user saves a
+// workflow that was staged from a library card. Expose a small helper on
+// window so the editor can update the deck without reaching into app.js
+// internals.
+window.notifyLibraryItemInstalled = async function (itemId) {
+    if (!itemId) return;
+    if (!deck.includes(itemId)) {
+        deck.push(itemId);
+        try { await api.post('/api/deck/add', { id: itemId }); }
+        catch { /* deck endpoint optional */ }
+    }
+};
+
 // ─── Event Catalog (source → events with friendly names) ───────────────────
 const eventCatalog = {
     github: [
@@ -178,7 +191,11 @@ const libraryCategories = [
     { key: 'custom', label: 'Custom', icon: '🛠️' },
 ];
 
-const libraryItems = [
+// Expose libraryItems so graph-editor.js can map template names to the
+// human-readable card titles when rendering recipes. Without this the
+// recipe picker shows prettified filenames ("Auto Label Pr") instead of
+// the curated display names ("Auto-Label PRs").
+const libraryItems = window.libraryItems = [
     // ── Code Quality ──
     { id: 'ai-pr-review', name: 'AI PR Review', description: 'Claude reviews every PR for bugs, security issues, and code quality — posts a detailed comment with approve/reject decision.', category: 'code-quality', icon: '🔍', tags: ['ai', 'review', 'pr', 'automated'], template: 'ai-pr-review', requiredIntegrations: ['github'], difficulty: 'easy', status: 'available', popular: true, defaultTrigger: { source: ['github', 'gh-cli'], event: ['pull_request.opened'] } },
     { id: 'review-on-update', name: 'Review on Update', description: 'Re-run AI review whenever new commits are pushed to an open PR.', category: 'code-quality', icon: '🔄', tags: ['ai', 'review', 'pr', 'synchronize'], template: 'ai-pr-review', requiredIntegrations: ['github'], difficulty: 'easy', status: 'available', popular: false, defaultTrigger: { source: ['github', 'gh-cli'], event: ['pull_request.synchronize'] } },
@@ -191,7 +208,7 @@ const libraryItems = [
     // ── Issue Management ──
     { id: 'fix-github-issue', name: 'Fix GitHub Issue', description: 'AI clones the repo, reads the issue, implements a fix, runs tests, and creates a PR — fully automated.', category: 'issue-management', icon: '🔧', tags: ['ai', 'agent', 'fix', 'pr'], template: 'fix-github-issue', requiredIntegrations: ['github'], difficulty: 'advanced', status: 'available', popular: true, defaultTrigger: { source: ['manual'], event: ['manual'] } },
     { id: 'issue-triage', name: 'Issue Triage Bot', description: 'Analyzes new issues, categorizes as bug/feature/question, assigns priority, and applies labels via gh CLI.', category: 'issue-management', icon: '🏷️', tags: ['ai', 'triage', 'labels', 'issues'], template: 'issue-triage', requiredIntegrations: ['github'], difficulty: 'medium', status: 'available', popular: true, defaultTrigger: { source: ['github', 'gh-cli'], event: ['issues.opened'] } },
-    { id: 'bug-report-validator', name: 'Bug Report Validator', description: 'Checks if bug reports have sufficient info: repro steps, expected/actual behavior, environment, errors.', category: 'issue-management', icon: '📝', tags: ['validation', 'bug', 'quality'], template: 'bug-report-validator', requiredIntegrations: ['github'], difficulty: 'easy', status: 'available', popular: false, defaultTrigger: { source: ['github'], event: ['issues.opened'] } },
+    { id: 'bug-report-validator', name: 'Bug Report Checklist', description: 'On every new issue, post a friendly checklist of what to include — repro steps, expected/actual behavior, environment, error output.', category: 'issue-management', icon: '📝', tags: ['checklist', 'bug', 'quality'], template: 'bug-report-validator', requiredIntegrations: ['github'], difficulty: 'easy', status: 'available', popular: false, defaultTrigger: { source: ['github'], event: ['issues.opened'] } },
     { id: 'stale-issue-cleanup', name: 'Stale Issue Cleanup', description: 'Daily scan for issues with no activity in 30+ days — posts reminders and optionally closes very stale ones.', category: 'issue-management', icon: '🧹', tags: ['maintenance', 'stale', 'cleanup', 'cron'], template: 'stale-issue-cleanup', requiredIntegrations: ['github'], difficulty: 'medium', status: 'available', popular: false, defaultTrigger: { source: ['cron'], event: ['daily'] } },
     { id: 'issue-to-pr', name: 'Issue → Auto-Fix PR', description: 'When an issue is labeled "autofix", AI clones the repo and creates a fix PR automatically.', category: 'issue-management', icon: '🚀', tags: ['ai', 'autofix', 'agent'], template: 'fix-github-issue', requiredIntegrations: ['github'], difficulty: 'advanced', status: 'available', popular: false, defaultTrigger: { source: ['github'], event: ['issues.labeled'] } },
 
@@ -237,6 +254,27 @@ const libraryItems = [
     { id: 'goal-pursuit', name: 'Goal Pursuit', description: 'Iterative goal engine: decompose → measure baseline → diagnose → hypothesize → execute → verify — repeats until measurable target met.', category: 'research', icon: '🎯', tags: ['iterative', 'goals', 'measurement', 'experiments'], template: 'goal-pursuit', requiredIntegrations: ['github'], difficulty: 'advanced', status: 'available', popular: false, defaultTrigger: { source: ['manual'], event: ['manual'] } },
     { id: 'experiment-runner', name: 'Experiment Runner', description: 'Data-driven improvement: audits internal metrics, generates hypotheses, runs controlled experiments, reports with before/after data.', category: 'research', icon: '🧪', tags: ['experiments', 'metrics', 'improvement', 'data-driven'], template: 'experiment-runner', requiredIntegrations: ['github'], difficulty: 'advanced', status: 'available', popular: false, defaultTrigger: { source: ['manual'], event: ['manual'] } },
     { id: 'repo-scout', name: 'Repo Scout', description: '4-phase codebase exploration: reads docs, explores structure, fills gaps, synthesizes a complete project briefing with architecture and dev guide.', category: 'productivity', icon: '🗺️', tags: ['onboarding', 'exploration', 'architecture', 'overview'], template: 'repo-scout', requiredIntegrations: ['github'], difficulty: 'easy', status: 'available', popular: true, defaultTrigger: { source: ['manual'], event: ['manual'] } },
+
+    // ── Node Coverage Templates ──
+    // Each entry below is a graph-form workflow that exercises specific
+    // dark-surface nodes (round-trip GitHub, data extractors, flow control,
+    // alternate triggers) so the visual editor + runtime get end-to-end
+    // proof for every node type. Open each in the editor to see how the
+    // node it covers is wired in practice.
+    { id: 'pr-merge-on-green', name: 'Auto-Merge on Green CI', description: 'On approving review, fetch PR, wait for CI checks, then squash-merge automatically. Notifies a Slack channel.', category: 'code-quality', icon: '🟣', tags: ['merge', 'ci', 'auto-merge', 'flow.if'], template: 'pr-merge-on-green', requiredIntegrations: ['github', 'slack'], difficulty: 'advanced', status: 'available', popular: false, defaultTrigger: { source: ['github'], event: ['pull_request_review.submitted'] } },
+    { id: 'pr-rename-title', name: 'Rewrite PR Titles', description: 'Decompose new PR fields and PATCH the title into "feat(branch): subject" via github.update-pr.', category: 'code-quality', icon: '✏️', tags: ['title', 'conventional-commits', 'data.template'], template: 'pr-rename-title', requiredIntegrations: ['github'], difficulty: 'medium', status: 'available', popular: false, defaultTrigger: { source: ['github'], event: ['pull_request.opened'] } },
+    { id: 'issue-autofix-pr', name: 'Issue → Autofix PR', description: 'When an issue gets the "autofix" label, fetch it, clone the repo, agent writes a fix, commit + push, open a PR.', category: 'issue-management', icon: '🔧', tags: ['autofix', 'agent', 'git.commit-and-push'], template: 'issue-autofix-pr', requiredIntegrations: ['github'], difficulty: 'advanced', status: 'available', popular: false, defaultTrigger: { source: ['github'], event: ['issues.labeled'] } },
+    { id: 'pr-size-labeler', name: 'PR Size Labeler', description: 'Read PR additions count via data.json-pluck and add/remove a "size:large" label based on a threshold.', category: 'productivity', icon: '🏷️', tags: ['labels', 'size', 'flow.if', 'data.json-pluck'], template: 'pr-size-labeler', requiredIntegrations: ['github'], difficulty: 'medium', status: 'available', popular: false, defaultTrigger: { source: ['github'], event: ['pull_request.opened'] } },
+    { id: 'slack-mention-react', name: 'Slack Mention React', description: 'React 👀 to every Slack @-mention so users see their message landed before the bot responds.', category: 'notifications', icon: '👀', tags: ['slack', 'react', 'trigger.slack'], template: 'slack-mention-react', requiredIntegrations: ['slack'], difficulty: 'easy', status: 'available', popular: false, defaultTrigger: { source: ['slack'], event: ['app_mention'] } },
+    { id: 'cron-stale-pr-bump', name: 'Cron — Stale PR Bump', description: 'Daily cron trigger — agent uses the local gh CLI to nudge PRs that have been idle for 7+ days.', category: 'productivity', icon: '⏰', tags: ['cron', 'stale', 'gh-cli'], template: 'cron-stale-pr-bump', requiredIntegrations: [], difficulty: 'medium', status: 'available', popular: false, defaultTrigger: { source: ['cron'], event: ['daily'] } },
+    { id: 'webhook-forwarder', name: 'Webhook Forwarder', description: 'Inbound webhook → outbound webhook. Decompose the event, build a payload via data.template, POST it onward. Requires a configured webhook endpoint.', category: 'productivity', icon: '🪝', tags: ['webhook', 'forwarder', 'utility.webhook'], template: 'webhook-forwarder', requiredIntegrations: [], difficulty: 'medium', status: 'available', popular: false, defaultTrigger: { source: ['webhook'], event: ['deploy-hook'] } },
+    { id: 'event-debug-tap', name: 'Event Debug Tap', description: 'Wires data.event-fields → utility.log to dump every incoming event\'s source/name/payload to the log.', category: 'diagnostics', icon: '🩺', tags: ['debug', 'data.event-fields', 'tap'], template: 'event-debug-tap', requiredIntegrations: ['github'], difficulty: 'easy', status: 'available', popular: false, defaultTrigger: { source: ['github'], event: ['pull_request.opened', 'push', 'issues.opened'] } },
+    { id: 'gh-cli-quick-review', name: 'gh-CLI Quick Review', description: 'Local gh-CLI poll — review each new PR and post a real GitHub Review (not just a comment).', category: 'code-quality', icon: '⚡', tags: ['gh-cli', 'review', 'local-only'], template: 'gh-cli-quick-review', requiredIntegrations: ['gh-cli'], difficulty: 'easy', status: 'available', popular: false, defaultTrigger: { source: ['gh-cli'], event: ['pull_request.opened'] } },
+    { id: 'address-review-on-changes', name: 'Auto-Address Review Feedback', description: 'When a reviewer requests changes, run ai.address-review in suggest-mode and post inline fix suggestions.', category: 'code-quality', icon: '🩹', tags: ['address-review', 'auto-fix', 'data.review-fields'], template: 'address-review-on-changes', requiredIntegrations: ['github', 'slack'], difficulty: 'advanced', status: 'available', popular: false, defaultTrigger: { source: ['github'], event: ['pull_request_review.submitted'] } },
+    { id: 'push-changelog-pr', name: 'Push Changelog Draft', description: 'On push to main, decompose commits, pluck the latest SHA, log a changelog header derived from the message list.', category: 'docs-release', icon: '📜', tags: ['push', 'commits', 'data.commits-fields'], template: 'push-changelog-pr', requiredIntegrations: ['github'], difficulty: 'medium', status: 'available', popular: false, defaultTrigger: { source: ['github'], event: ['push'] } },
+    { id: 'flow-merge-demo', name: 'Flow.merge Demo', description: 'Two flow.set values feed into flow.merge — the first defined wins. Demonstrates fan-in.', category: 'productivity', icon: '🔗', tags: ['flow.merge', 'flow.set', 'demo'], template: 'flow-merge-demo', requiredIntegrations: [], difficulty: 'easy', status: 'available', popular: false, defaultTrigger: { source: ['manual'], event: ['manual'] } },
+    { id: 'flow-filter-demo', name: 'Flow.filter-list Demo', description: 'Filter a JSON array by a per-item field test — count + first-match outputs flow downstream.', category: 'productivity', icon: '⚗️', tags: ['flow.filter-list', 'demo'], template: 'flow-filter-demo', requiredIntegrations: [], difficulty: 'easy', status: 'available', popular: false, defaultTrigger: { source: ['manual'], event: ['manual'] } },
+    { id: 'github-poll-watch', name: 'GitHub Poll Watch', description: 'No-webhook setup — Sokuza polls the GitHub REST API for events and logs each one.', category: 'productivity', icon: '🔄', tags: ['github-poll', 'log', 'no-webhook'], template: 'github-poll-watch', requiredIntegrations: ['github-poll'], difficulty: 'easy', status: 'available', popular: false, defaultTrigger: { source: ['github-poll'], event: ['pull_request.opened'] } },
 ];
 
 // ─── Array helpers ──────────────────────────────────────────────────────────
@@ -368,13 +406,23 @@ const api = {
         return r.json();
     },
     async post(p, b) {
-        const r = await authedFetch(p, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(b) });
+        const init = { method: 'POST' };
+        if (b !== undefined) {
+            init.headers = { 'Content-Type': 'application/json' };
+            init.body = JSON.stringify(b);
+        }
+        const r = await authedFetch(p, init);
         if (r.status === 401) { await handleAuthFailure(r); throw new Error('unauthorized'); }
         if (!r.ok) throw new Error(await readErrorMessage(r));
         return r.json();
     },
     async put(p, b) {
-        const r = await authedFetch(p, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(b) });
+        const init = { method: 'PUT' };
+        if (b !== undefined) {
+            init.headers = { 'Content-Type': 'application/json' };
+            init.body = JSON.stringify(b);
+        }
+        const r = await authedFetch(p, init);
         if (r.status === 401) { await handleAuthFailure(r); throw new Error('unauthorized'); }
         if (!r.ok) throw new Error(await readErrorMessage(r));
         return r.json();
@@ -419,6 +467,13 @@ function confirm(msg) {
 
 // ─── Router ─────────────────────────────────────────────────────────────────
 function navigate(page) {
+    // Give the visual editor (or any other surface with unsaved state)
+    // a chance to prompt before we tear it down. The editor registers
+    // `window.__beforeNavigate` while it's open and dirty; a `false`
+    // return means the user cancelled and we should stay where we are.
+    if (typeof window.__beforeNavigate === 'function' && !window.__beforeNavigate()) {
+        return;
+    }
     if (page === 'templates') page = 'library';
     if (queueRefreshTimer) { clearInterval(queueRefreshTimer); queueRefreshTimer = null; }
     if (logSource) { logSource.close(); logSource = null; }
@@ -1197,7 +1252,7 @@ async function renderWorkflows(el) {
                 <td>${sourceBadge(sources[0])}${sources.length > 1 ? `<span style="font-size:10px;color:var(--text-muted)"> +${sources.length - 1}</span>` : ''}</td>
                 <td><code style="font-size:12px;color:var(--text-secondary)">${esc((() => { const evts = Array.isArray(wf.trigger?.event) ? wf.trigger.event : [wf.trigger?.event].filter(Boolean); return evts.map(e => eventLabelMap[e] || e).join(', '); })())}</code>${wf.trigger?.repo ? `<br><span style="font-size:11px;color:var(--text-muted)">${esc(Array.isArray(wf.trigger.repo) ? wf.trigger.repo.join(', ') : wf.trigger.repo)}</span>` : ''}</td>
                 <td>${wf.template ? `<span class="badge badge-action">${esc(wf.template)}</span>` : '<span style="font-size:12px;color:var(--text-muted)">custom</span>'}${wf.enabled === false ? ' <span class="badge" style="background:rgba(239,68,68,0.15);color:#ef4444;border:1px solid rgba(239,68,68,0.3);font-size:10px">disabled</span>' : ''}</td>
-                <td>${wf.steps?.length ?? '—'}</td>
+                <td>${wf.graph?.nodes?.length ?? wf.steps?.length ?? (wf.template ? '<span style="color:var(--text-muted);font-size:11px">(from template)</span>' : '—')}</td>
                 <td>${renderHistory(wf.name)}</td>
                 <td style="text-align:right">
                     <div class="btn-group" style="justify-content:flex-end">
@@ -1212,12 +1267,25 @@ async function renderWorkflows(el) {
     `;
 }
 
-// ─── Workflow Editor (structured) ───────────────────────────────────────────
+// ─── Workflow Editor ────────────────────────────────────────────────────────
+//
+// The visual node-graph editor (dashboard/graph-editor.js) is now the
+// primary surface. The legacy YAML/form editor is still reachable via
+// `openLegacyWorkflowEditor()` so power users can fall back to text-based
+// authoring when they need it.
 window.openWorkflowEditor = function (existingName) {
+    if (typeof window.openGraphEditor === 'function') {
+        // Switch the router to a synthetic page so navigation back works.
+        currentPage = 'workflow-editor';
+        return window.openGraphEditor(existingName);
+    }
+    return window.openLegacyWorkflowEditor(existingName);
+};
+
+window.openLegacyWorkflowEditor = function (existingName) {
     const isEdit = !!existingName;
     const wf = isEdit ? workflows.find((w) => w.name === existingName) : null;
 
-    // If creating new and no name given, show Quick Start chooser
     if (!isEdit && !wf) {
         return openQuickStart();
     }
@@ -3197,10 +3265,13 @@ function getFilteredLibraryItems() {
             i.category.replace('-', ' ').includes(q)
         );
     }
-    // Sort: installed first, then popular, then available before coming-soon
+    // Sort: installed first, then popular, then available before coming-soon.
+    // "Installed" derives from actual workflow existence so the sort
+    // matches the visual badge — deck-only would float orphaned cards
+    // to the top after a manual workflow delete.
     items.sort((a, b) => {
-        const aInstalled = deck.includes(a.id) ? 1 : 0;
-        const bInstalled = deck.includes(b.id) ? 1 : 0;
+        const aInstalled = getInstalledWorkflowName(a.id) ? 1 : 0;
+        const bInstalled = getInstalledWorkflowName(b.id) ? 1 : 0;
         if (aInstalled !== bInstalled) return bInstalled - aInstalled;
         if (a.popular !== b.popular) return b.popular - a.popular;
         if (a.status !== b.status) return a.status === 'available' ? -1 : 1;
@@ -3240,7 +3311,13 @@ function getDeckIssueItems() {
 }
 
 function renderLibraryCard(item) {
-    const isInstalled = deck.includes(item.id);
+    // Source of truth: does a workflow that originated from this
+    // library item actually exist? `deck` can desync (e.g. user
+    // deletes the workflow via the workflows page) — using deck
+    // membership alone makes the card lie about state and strands
+    // the user with no install button. See getInstalledWorkflowName
+    // for the matching rules.
+    const isInstalled = getInstalledWorkflowName(item.id) !== null;
     const isComingSoon = item.status === 'coming-soon';
     const diffColors = { easy: '#22c55e', medium: '#f59e0b', advanced: '#a855f7' };
     const diffColor = diffColors[item.difficulty] || '#6b7280';
@@ -3269,18 +3346,82 @@ function renderLibraryCard(item) {
                 <button class="btn btn-ghost btn-sm" disabled>Not Available</button>
             ` : isInstalled ? `
                 <button class="btn btn-ghost btn-sm" style="color:#ef4444" onclick="uninstallLibraryItem('${item.id}')">Uninstall</button>
+                <button class="btn btn-ghost btn-sm" onclick="openLibraryItemInEditor('${item.id}')">✏️ Edit</button>
                 <button class="btn btn-ghost btn-sm" onclick="previewLibraryItem('${item.id}')">Preview</button>
             ` : `
                 <button class="btn btn-primary btn-sm" onclick="installLibraryItem('${item.id}')">⚡ Install</button>
+                <button class="btn btn-ghost btn-sm" onclick="openLibraryItemInEditor('${item.id}')">✏️ Open in Editor</button>
                 <button class="btn btn-ghost btn-sm" onclick="previewLibraryItem('${item.id}')">Preview</button>
             `}
         </div>
     </div>`;
 }
 
+// Library card → Visual Editor. For not-installed items: stage the
+// template's graph in the editor so the user can tweak before saving;
+// Save in the editor creates the workflow + flips the library badge.
+// For installed items: open the actual workflow that backs the card.
+window.openLibraryItemInEditor = async function (itemId) {
+    const item = libraryItems.find(i => i.id === itemId);
+    if (!item) { toast('Library item not found', 'error'); return; }
+
+    // Already installed → open the existing workflow.
+    const installedName = getInstalledWorkflowName(itemId);
+    if (installedName && typeof window.openGraphEditor === 'function') {
+        return window.openGraphEditor(installedName);
+    }
+
+    // Stage from the template. Prefer the graph form when the YAML has
+    // one; fall back to the legacy steps form (the editor's
+    // ensureGraphShape will linearize it).
+    try {
+        const res = await api.get(`/api/templates/library/${encodeURIComponent(item.template)}/graph`);
+        const stagedName = `my-${item.id}`;
+        const stagedShape = {
+            name: stagedName,
+            description: res.description || item.description,
+            enabled: true,
+            graph: res.graph,
+            steps: res.graph ? undefined : res.steps,
+            trigger: res.trigger,
+        };
+        return window.openGraphEditor(null, { staged: stagedShape, libraryItemId: item.id });
+    } catch (err) {
+        // Template not in library/ — fall back to root templates dir.
+        try {
+            const all = await api.get('/api/templates');
+            const tmpl = (all.templates || []).find(t => t.name === item.template);
+            if (!tmpl) throw new Error(`Template "${item.template}" not found`);
+            const stagedName = `my-${item.id}`;
+            const stagedShape = {
+                name: stagedName,
+                description: tmpl.description || item.description,
+                enabled: true,
+                graph: tmpl.graph,
+                steps: tmpl.graph ? undefined : tmpl.steps,
+                trigger: tmpl.trigger,
+            };
+            return window.openGraphEditor(null, { staged: stagedShape, libraryItemId: item.id });
+        } catch (err2) {
+            toast(`Could not load template: ${err2.message}`, 'error');
+        }
+    }
+};
+
 async function renderLibrary(el) {
     // If builder is active, render it instead
     if (builderState) { renderTemplateBuilder(el); return; }
+
+    // Refresh the workflows list before rendering: the library card's
+    // "Installed" badge derives from actual workflow existence (via
+    // `getInstalledWorkflowName`), so a stale module-scoped `workflows`
+    // would make the badge lie after a deletion that happened in
+    // another tab / via the API / via a workflow uninstall that
+    // navigated us elsewhere before refreshing.
+    try {
+        const wfData = await api.get('/api/workflows');
+        workflows = wfData.workflows || [];
+    } catch { /* keep stale data; rendering still completes */ }
 
     // Load custom templates
     try {
@@ -3547,7 +3688,8 @@ window.confirmUninstallLibraryItem = async function (itemId) {
 window.previewLibraryItem = async function (itemId) {
     const item = libraryItems.find(i => i.id === itemId);
     if (!item) return;
-    const isInstalled = deck.includes(item.id);
+    // Match renderLibraryCard: workflow existence is the source of truth.
+    const isInstalled = getInstalledWorkflowName(item.id) !== null;
     try {
         const tmpl = templates.find(t => t.name === item.template) || libraryTemplates.find(t => t.name === item.template);
         const yamlContent = tmpl?.content || `# Template: ${item.template}\n# (Template content will be loaded on install)`;
@@ -4729,6 +4871,28 @@ function esc(s) {
     return (s ?? '').toString().replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/'/g, '&#39;');
 }
 
+// Escape a value for a single-quoted JS string that itself sits inside a
+// double-quoted HTML attribute, e.g. onclick="fn('${jsEsc(x)}')". esc() is
+// wrong here: it encodes ' as &#39;, which the HTML parser decodes back to '
+// before the JS engine sees it, letting a crafted value break out of the JS
+// string. So escape JS-string metacharacters FIRST (\, ', line terminators),
+// then HTML-encode the chars that matter in a double-quoted attribute (& and
+// " plus < > defensively). The backslashes introduced by JS-escaping aren't
+// HTML-special, so they survive attribute decoding intact.
+function jsEsc(s) {
+    return (s ?? '').toString()
+        .replace(/\\/g, '\\\\')
+        .replace(/'/g, "\\'")
+        .replace(/\n/g, '\\n')
+        .replace(/\r/g, '\\r')
+        .replace(/\u2028/g, '\\u2028')
+        .replace(/\u2029/g, '\\u2029')
+        .replace(/&/g, '&amp;')
+        .replace(/"/g, '&quot;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+}
+
 function timeAgo(iso) {
     const diff = Date.now() - new Date(iso).getTime();
     if (diff < 60_000) return 'just now';
@@ -5718,7 +5882,7 @@ async function renderSystem(el) {
         : `
             <p><span style="color:var(--text-muted)">Version:</span> <code>${esc(info.version ?? '')}</code></p>
             <p><span style="color:var(--text-muted)">Platform:</span> <code>${esc(info.platform ?? '')}</code> (Node ${esc(info.nodeVersion ?? '')})</p>
-            <p><span style="color:var(--text-muted)">Config:</span> <code>${esc(info.configPath ?? '')}</code></p>
+            <p><span style="color:var(--text-muted)">Config:</span> <code class="path-wrap">${esc(info.configPath ?? '')}</code></p>
             <p><span style="color:var(--text-muted)">PID:</span> <code>${esc(String(info.pid ?? ''))}</code></p>
         `;
 
@@ -5729,7 +5893,7 @@ async function renderSystem(el) {
             <p><span style="color:var(--text-muted)">Installed:</span> ${svcStatus?.installed ? '<span class="badge badge-success">yes</span>' : '<span class="badge">no</span>'}</p>
             <p><span style="color:var(--text-muted)">Enabled:</span> ${svcStatus?.enabled ? '<span class="badge badge-success">yes — starts at login</span>' : '<span class="badge">no</span>'}</p>
             <p><span style="color:var(--text-muted)">Active:</span> ${svcStatus?.active ? '<span class="badge badge-success">yes — running now</span>' : '<span class="badge">no</span>'}</p>
-            <p><span style="color:var(--text-muted)">Unit file:</span> <code style="font-size:11px">${esc(svcStatus?.unitPath ?? '—')}</code></p>
+            <p><span style="color:var(--text-muted)">Unit file:</span> <code class="path-wrap" style="font-size:11px">${esc(svcStatus?.unitPath ?? '—')}</code></p>
             ${(svcStatus?.notes ?? []).map((n) => `<p style="color:var(--text-muted);font-size:12px">• ${esc(n)}</p>`).join('')}
             <div class="btn-group" style="margin-top:12px">
                 ${svcStatus?.installed
@@ -5860,7 +6024,13 @@ window.systemRunUpdate = async function () {
 // ═════════════════════════════════════════════════════════════════════════════
 async function renderSettings(el) {
     const data = await api.get('/api/config');
-    const configYaml = typeof data.config === 'string' ? data.config : toYaml(data.config);
+    // Use the server's raw YAML directly — re-serializing parsed-then-dumped
+    // YAML on the client is what corrupted configs in the past (the
+    // hand-rolled `toYaml` flattened nested keys inside array items to a
+    // single indent level, which `yaml.load` accepted silently until a
+    // duplicate-key collision made the whole file unparseable).
+    const configYaml = data.raw
+        ?? (typeof data.config === 'string' ? data.config : '# Failed to read config\n');
 
     el.innerHTML = `
         <div class="page-header">
@@ -5927,31 +6097,6 @@ async function renderSettings(el) {
             editor.selectionStart = editor.selectionEnd = start + 2;
         }
     });
-}
-
-function toYaml(obj, indent = 0) {
-    const pad = '  '.repeat(indent);
-    let out = '';
-    for (const [k, v] of Object.entries(obj)) {
-        if (v === null || v === undefined) continue;
-        if (Array.isArray(v)) {
-            out += `${pad}${k}:\n`;
-            for (const item of v) {
-                if (typeof item === 'object') {
-                    const lines = toYaml(item, indent + 2).split('\n').filter(Boolean);
-                    out += `${pad}  - ${lines[0].trim()}\n`;
-                    for (let i = 1; i < lines.length; i++) out += `${pad}    ${lines[i].trim()}\n`;
-                } else {
-                    out += `${pad}  - ${item}\n`;
-                }
-            }
-        } else if (typeof v === 'object') {
-            out += `${pad}${k}:\n${toYaml(v, indent + 1)}`;
-        } else {
-            out += `${pad}${k}: ${v}\n`;
-        }
-    }
-    return out;
 }
 
 window.saveConfig = async function () {

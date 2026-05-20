@@ -16,37 +16,57 @@
 #       event: pull_request.opened
 #       repo: "my-org/my-repo"
 
+description: AI review every new PR — fetch diff, run review, post comment
+icon: 🔍
+
 trigger:
   source: github
   event: pull_request.opened
 
-steps:
-  - id: clone
-    action: github-clone-repo
-    params: {}
+graph:
+  nodes:
+    - id: trigger
+      type: trigger.github
+      position: { x: 60, y: 200 }
+      config:
+        events: [pull_request.opened]
+    - id: fetch_diff
+      type: github.fetch-diff
+      position: { x: 360, y: 200 }
+      config: {}
+    - id: review
+      type: ai.review
+      position: { x: 660, y: 200 }
+      config: {}
+    - id: post
+      type: github.comment
+      position: { x: 980, y: 200 }
+      config:
+        body: |
+          ## 🤖 AI Code Review
 
-  - id: fetch_diff
-    action: github-fetch-diff
-    params: {}
+          {{nodes.review.markdown}}
 
-  - id: review
-    action: ai-review
-    # No `prompt` override — ai-review.ts uses generateCodeReviewPrompt()
-    # which asks the model for strict JSON matching the parser's schema.
-    # If you want to customize, see src/actions/review-templates.ts and
-    # ensure your prompt's "Output format" stays JSON, otherwise
-    # parseStructuredReview will fail and posts will fall back to raw
-    # text with a parse-failure label in the run log.
-    params:
-      workdir: "{{steps.clone.path}}"
-
-  # Fallback: Post as comment (default behavior for backward compatibility)
-  - action: github-comment
-    params:
-      body: |
-        ## 🤖 AI Code Review
-
-        {{steps.review.review}}
-
-        ---
-        _Reviewed by Sokuza AI ({{steps.review.model}}, via {{steps.review.provider}})_
+          ---
+          _Reviewed by Sokuza AI_
+  edges:
+    - from: { node: trigger, port: prNumber }
+      to: { node: fetch_diff, port: pr_number }
+    - from: { node: trigger, port: repo }
+      to: { node: fetch_diff, port: repo }
+    - from: { node: fetch_diff, port: diff }
+      to: { node: review, port: diff }
+    - from: { node: trigger, port: prNumber }
+      to: { node: review, port: pr_number }
+    - from: { node: trigger, port: repo }
+      to: { node: review, port: repo }
+    - from: { node: trigger, port: prNumber }
+      to: { node: post, port: pr_number }
+    - from: { node: trigger, port: repo }
+      to: { node: post, port: repo }
+    # Sequencing edge — post's body interpolates {{nodes.review.markdown}}
+    # so it must run after review. The runtime would now infer this from
+    # the config ref, but stating it explicitly keeps the dataflow visible
+    # in the editor and self-documents the dependency.
+    - from: { node: review, port: markdown }
+      to: { node: post, port: __seq }

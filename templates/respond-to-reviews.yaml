@@ -18,6 +18,9 @@
 #         - pull_request_review.submitted
 #       repo: "my-org/my-repo"
 
+description: AI reads review feedback, implements fixes, pushes, then responds
+icon: 💬
+
 trigger:
   source:
     - github
@@ -27,144 +30,73 @@ trigger:
     - issue_comment.created
     - pull_request_review.submitted
 
-steps:
-  # 1. Clone the repo at the PR's head ref
-  - id: clone
-    action: github-clone-repo
-    params: {}
+graph:
+  nodes:
+    - id: trigger
+      type: trigger.github
+      position: { x: 60, y: 240 }
+      config:
+        events: [issue_comment.created, pull_request_review.submitted]
+    - id: clone
+      type: github.clone-repo
+      position: { x: 380, y: 240 }
+      config: {}
+    - id: reviews
+      type: github.fetch-reviews
+      position: { x: 700, y: 240 }
+      config: {}
+    - id: response
+      type: ai.agent
+      position: { x: 1020, y: 240 }
+      config:
+        max_turns: 25
+        allowed_tools: [Read, Grep, Glob, LS, Edit, Write, Bash]
+        prompt: |
+          You are responding to review feedback on a pull request.
 
-  # 2. Fetch all review comments for the PR
-  - id: reviews
-    action: github-fetch-reviews
-    params: {}
+          ## FIRST: Check if this comment needs a response
 
-  # 3. AI agent analyzes the triggering comment, implements fixes, and pushes
-  - id: response
-    action: ai-agent
-    params:
-      workdir: "{{steps.clone.path}}"
-      max_turns: 25
-      allowed_tools:
-        - Read
-        - Grep
-        - Glob
-        - LS
-        - Edit
-        - Write
-        - Bash
-      prompt: |
-        You are responding to review feedback on a pull request.
+          **Comment author:** {{event.payload.comment.user.login}}
+          **Comment body:**
+          ```
+          {{event.payload.comment.body}}
+          ```
 
-        ## FIRST: Check if this comment needs a response
+          Output ONLY "NO_ACTION" if any of these are true:
+          1. The comment is a previous response from this workflow (contains
+             "🤖 Review Response" or "Automated response by Sokuza AI")
+          2. The comment has no actionable code review feedback (casual
+             messages, status updates, questions about timeline)
 
-        The following comment just triggered this workflow:
+          Otherwise, address each piece of code review feedback by:
+          - Understanding the issue, implementing the fix, or disputing it with
+            evidence.
+          - Running quality checks (typecheck, lint, tests).
+          - Committing with `git commit -m "fix: address PR review feedback"`
+            and pushing.
+          - Posting a structured "## 🤖 Review Response" with sections for
+            Addressed, Disputed, and Already Resolved.
+    - id: post
+      type: github.comment
+      position: { x: 1340, y: 240 }
+      condition: "{{nodes.response.output}}"
+      config:
+        body: |
+          {{nodes.response.output}}
 
-        **Author:** {{event.payload.comment.user.login}}
-        **Comment:**
-        ```
-        {{event.payload.comment.body}}
-        ```
-
-        **Output ONLY "NO_ACTION" (nothing else) if ANY of these are true:
-        1. The comment is a previous response from this workflow — contains
-           "🤖 Review Response" or "Automated response by Sokuza AI"
-        2. The comment has NO actionable code review feedback — e.g., it's
-           a casual/conversational message ("looks good", "continuing tomorrow",
-           "thanks", merge notifications, status updates, questions about
-           timeline, etc.)
-
-        Only proceed if the comment contains SPECIFIC code review feedback:
-        bug reports, suggested fixes, security concerns, style issues,
-        performance problems, or other concrete technical feedback about the
-        code in this PR.
-
-        ---
-
-        ## Your Task
-
-        The triggering comment above contains review feedback for this PR.
-        Here is all feedback on this PR for additional context:
-
-        {{steps.reviews.summary}}
-
-        Read and address EACH issue raised in the triggering comment:
-
-        ### A) Address valid feedback
-        If the review raised a legitimate issue:
-        1. Understand the problem by reading the relevant code
-        2. Implement the fix (edit the file)
-        3. Note what you changed and why
-
-        ### B) Dispute invalid feedback
-        If the concern is incorrect or doesn't apply:
-        1. Read the code they referenced to confirm your understanding
-        2. Prepare a clear, respectful explanation of why the concern doesn't apply
-        3. Reference specific code or documentation to support your position
-
-        ### C) Acknowledge already-addressed feedback
-        If the issue was already fixed:
-        1. Note which commit addressed it
-        2. Reference the specific change
-
-
-        ## After processing all feedback:
-
-        1. Check for project-specific quality requirements:
-           - Read `CLAUDE.md`, `CONTRIBUTING.md`, or `.github/CONTRIBUTING.md` if they exist
-           - Look for linting/formatting configs (biome.json, .eslintrc, prettier, etc.)
-
-        2. Run ALL relevant quality checks. Common ones include:
-           - `pnpm typecheck` or `npx tsc --noEmit` (TypeScript)
-           - `pnpm biome check .` or `npx biome check .` (Biome linting)
-           - `npm audit --audit-level=moderate` (security audit)
-           - `pnpm test` or `npm test` (if fast unit tests exist)
-           - Any project-specific checks mentioned in CLAUDE.md or CI configs
-
-        3. If any quality checks fail, fix the issues before proceeding.
-
-        4. Stage, commit, and push your changes:
-           ```bash
-           git add -A
-           git commit -m "fix: address PR review feedback"
-           git push
-           ```
-
-        5. Output a structured response in this EXACT format:
-
-        ## 🤖 Review Response
-
-        ### Summary
-        [One-sentence overview of what was addressed]
-
-        ### Issues Found
-        [Count] total issues: [X] addressed, [Y] disputed, [Z] already resolved
-
-        ---
-
-        ### Addressed
-        - **[reviewer] on `path/to/file.ts:L42`**: [what was wrong] → [what you fixed]
-
-        ### Disputed
-        - **[reviewer] on `path/to/file.ts:L78`**: [their concern] → [why it doesn't apply, with evidence]
-
-        ### Already Resolved
-        - **[reviewer] on `path/to/file.ts:L120`**: [addressed in commit abc123]
-
-        ---
-
-        ### Quality Checks
-        - TypeScript: ✓/✗
-        - Linting: ✓/✗
-        - Tests: ✓/✗ (or N/A)
-        - Security: ✓/✗ (or N/A)
-
-  # 4. Post the response (skip only if this was a loop — AI output NO_ACTION)
-  - action: github-comment
-    condition: "{{steps.response.review}}"
-    params:
-      skip_if_contains: "NO_ACTION"
-      body: |
-        {{steps.response.review}}
-
-        ---
-        _Automated response by Sokuza AI ({{steps.response.model}})_
+          ---
+          _Automated response by Sokuza AI_
+  edges:
+    - from: { node: trigger, port: prNumber }
+      to: { node: reviews, port: pr_number }
+    - from: { node: trigger, port: repo }
+      to: { node: reviews, port: repo }
+    - from: { node: clone, port: path }
+      to: { node: response, port: workdir }
+    - from: { node: trigger, port: prNumber }
+      to: { node: post, port: pr_number }
+    - from: { node: trigger, port: repo }
+      to: { node: post, port: repo }
+    # post's body and condition both interpolate response.output.
+    - from: { node: response, port: output }
+      to: { node: post, port: __seq }

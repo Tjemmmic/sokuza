@@ -41,6 +41,9 @@ interface ApiDeps {
     getChatStore: () => import('../core/chat-store.js').ChatStore;
     /** Persistent per-PR git workdir manager for the address-review action. */
     getWorkdirManager: () => import('../core/workdir-store.js').WorkdirManager;
+    /** Per-user node preset store — populated by library installs and
+     *  surfaced as a "Presets" group in the editor's node palette. */
+    getPresetStore: () => import('../core/preset-store.js').PresetStore;
 }
 
 function sanitizeFileName(name: string): string {
@@ -210,7 +213,15 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
     server.get('/api/config', async () => {
         const raw = await deps.configStore.readRaw();
         const parsed = yaml.load(raw) as Record<string, unknown>;
-        return { config: parsed };
+        // `raw` is the source of truth for the Settings page editor —
+        // the dashboard used to call its own hand-rolled YAML serializer
+        // on `parsed`, which flattened nested object values inside array
+        // items to one indent level (turning `trigger:\n  source: x`
+        // into `trigger:\n  source: x` at the wrong column, eventually
+        // corrupting workflows[].graph.nodes[].config and producing
+        // duplicate-mapping-key errors on the next reload). Returning
+        // the raw text lets the editor show exactly what's on disk.
+        return { config: parsed, raw };
     });
 
     server.put('/api/config', async (request, reply) => {
@@ -227,7 +238,14 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
                 return reply.status(400).send({ error: 'Missing config in body' });
             }
         } catch (e: any) {
-            if (e.message?.includes('YAML')) {
+            // js-yaml throws `YAMLException` with messages like "duplicated
+            // mapping key" or "bad indentation" that don't contain the
+            // word "YAML" — checking the constructor name catches every
+            // parse failure without false-positive on unrelated runtime
+            // errors (disk full, EACCES, etc.) which should propagate
+            // as 500.
+            const isYamlError = e?.name === 'YAMLException' || e?.message?.includes('YAML');
+            if (isYamlError) {
                 return reply.status(400).send({ error: `Invalid YAML: ${e.message}` });
             }
             throw e;
@@ -307,6 +325,39 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
             return reply.status(409).send({ error: `Workflow "${workflow.name}" already exists` });
         }
 
+        // Bring the engine's in-memory config into sync with the freshly-
+        // written YAML. Without this, `GET /:name/details` (which reads
+        // from `getConfig()`, not the raw YAML) would 404 on the workflow
+        // the dashboard just created — making installed/duplicated
+        // workflows un-editable until the next reload.
+        await deps.reloadConfig();
+
+        // Library install hook: when the dashboard tags a workflow with
+        // `_libraryItem` it means "this workflow comes from a library
+        // template". Walk that template's graph and replace any presets
+        // we previously extracted for it with a fresh set — silent
+        // auto-extraction so the security-audit prompt the template
+        // author wrote becomes a drop-in palette node on next editor
+        // open. Best-effort: a failure here logs but doesn't fail the
+        // install (presets are a discoverability nicety, not core).
+        const libraryItem = typeof workflow._libraryItem === 'string' ? workflow._libraryItem : null;
+        const templateName = typeof workflow.template === 'string' ? workflow.template : null;
+        if (libraryItem && templateName) {
+            try {
+                const { loadTemplates } = await import('../core/templates.js');
+                const { extractPresetsFromTemplate } = await import('../core/preset-store.js');
+                const templates = await loadTemplates(deps.getTemplateDir());
+                const tmpl = templates[templateName];
+                if (tmpl?.graph) {
+                    const presets = extractPresetsFromTemplate(templateName, tmpl.graph, {});
+                    await deps.getPresetStore().replaceBySource(`library:${libraryItem}`, presets);
+                    logger.info({ workflow: workflow.name, libraryItem, count: presets.length }, 'Extracted node presets from library template');
+                }
+            } catch (err) {
+                logger.warn({ err, workflow: workflow.name, libraryItem }, 'Failed to extract presets from library template');
+            }
+        }
+
         logger.info({ workflow: workflow.name }, 'Workflow created via dashboard');
         return { ok: true, workflow };
     });
@@ -328,6 +379,8 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
             return reply.status(404).send({ error: `Workflow "${name}" not found` });
         }
 
+        await deps.reloadConfig();
+
         logger.info({ workflow: name }, 'Workflow updated via dashboard');
         return { ok: true, workflow: result.workflow };
     });
@@ -335,16 +388,48 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
     server.delete('/api/workflows/:name', async (request, reply) => {
         const { name } = request.params as { name: string };
 
+        // Capture the workflow's library origin BEFORE deletion so we
+        // can cascade cleanup (deck + presets) afterwards. Without
+        // this, manually deleting an installed workflow via the
+        // workflows page would leave the library badge stuck on
+        // "Installed" with no workflow behind it — and the auto-
+        // extracted presets stranded with nothing to drop them onto.
+        let libraryItem: string | null = null;
         const found = await deps.configStore.updateRaw((config) => {
             const workflows = ((config.workflows as unknown[]) ?? []) as Record<string, unknown>[];
+            const target = workflows.find((w) => w.name === name);
+            if (!target) return false;
+            if (typeof target._libraryItem === 'string') libraryItem = target._libraryItem;
             const filtered = workflows.filter((w) => w.name !== name);
-            if (filtered.length === workflows.length) return false;
             config.workflows = filtered;
             return true;
         });
 
         if (!found) {
             return reply.status(404).send({ error: `Workflow "${name}" not found` });
+        }
+
+        await deps.reloadConfig();
+
+        if (libraryItem) {
+            // Remove the orphaned deck entry so the library card flips
+            // back to "Install" instead of getting stuck on "Installed".
+            try {
+                await deps.configStore.updateRaw((config) => {
+                    const deck = ((config.deck as string[]) ?? []).filter((d) => d !== libraryItem);
+                    config.deck = deck;
+                    return deck;
+                });
+            } catch (err) {
+                logger.warn({ err, libraryItem }, 'Failed to clean deck entry after workflow delete');
+            }
+            // Drop any presets that came from this library template.
+            try {
+                const removed = await deps.getPresetStore().deleteBySource(`library:${libraryItem}`);
+                if (removed > 0) logger.info({ libraryItem, removed }, 'Removed library-extracted presets on workflow delete');
+            } catch (err) {
+                logger.warn({ err, libraryItem }, 'Failed to clean presets after workflow delete');
+            }
         }
 
         logger.info({ workflow: name }, 'Workflow deleted via dashboard');
@@ -606,6 +691,8 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
                 name,
                 trigger: parsed.trigger,
                 steps: parsed.steps,
+                graph: parsed.graph,
+                description: parsed.description,
                 raw: content,
             });
         }
@@ -613,7 +700,9 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
         return { templates };
     });
 
-    // Library templates (separate from user templates)
+    // Library templates (separate from user templates). We surface the
+    // parsed graph + trigger so the dashboard's recipe picker can render
+    // graph-form templates as starter recipes without re-parsing YAML.
     server.get('/api/templates/library', async () => {
         const dir = join(deps.getTemplateDir(), 'library');
         let files: string[];
@@ -628,10 +717,48 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
             if (!file.endsWith('.yaml') && !file.endsWith('.yml')) continue;
             const name = basename(file, extname(file));
             const content = await readFile(join(dir, file), 'utf-8');
-            templates.push({ name, content });
+            let parsed: Record<string, unknown> = {};
+            try { parsed = (yaml.load(content) as Record<string, unknown>) || {}; }
+            catch { /* surface as content-only */ }
+            templates.push({
+                name,
+                content,
+                trigger: parsed.trigger,
+                steps: parsed.steps,
+                graph: parsed.graph,
+                description: parsed.description,
+                icon: parsed.icon,
+            });
         }
 
         return { templates };
+    });
+
+    // Single library template lookup — used by library cards' "Edit in
+    // Visual Editor" path. Returns the parsed graph (if any) so the editor
+    // can stage the workflow without round-tripping YAML.
+    server.get('/api/templates/library/:name/graph', async (request, reply) => {
+        const { name } = request.params as { name: string };
+        const safeName = sanitizeFileName(name);
+        const dir = join(deps.getTemplateDir(), 'library');
+        const filePath = join(dir, `${safeName}.yaml`);
+        let content: string;
+        try {
+            content = await readFile(filePath, 'utf-8');
+        } catch {
+            return reply.status(404).send({ error: `Library template "${safeName}" not found` });
+        }
+        let parsed: Record<string, unknown> = {};
+        try { parsed = (yaml.load(content) as Record<string, unknown>) || {}; }
+        catch (e: any) { return reply.status(400).send({ error: `Invalid YAML: ${e.message}` }); }
+        return {
+            name: safeName,
+            description: parsed.description,
+            icon: parsed.icon,
+            trigger: parsed.trigger,
+            graph: parsed.graph,
+            steps: parsed.steps,
+        };
     });
 
     server.post('/api/templates', async (request, reply) => {
@@ -706,6 +833,63 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
 
     server.get('/api/actions', async () => {
         return { actions: deps.getRegisteredActions() };
+    });
+
+    // ─── Visual-editor node registry ────────────────────────────────────
+    //
+    // Returns the serialized definitions for every node type the engine
+    // knows about. Drives the visual editor's palette and inspector form.
+    // No body — the palette refreshes the whole list on open.
+
+    server.get('/api/nodes', async () => {
+        const { getNodeRegistry } = await import('../core/nodes/registry.js');
+        return { nodes: getNodeRegistry().serialize() };
+    });
+
+    // ─── Node Presets ───────────────────────────────────────────────────
+    //
+    // Per-user preset store. Library installs auto-populate
+    // `source: library:<id>` entries; the editor can also POST a
+    // `source: user` preset when the user saves a configured node from
+    // the inspector. The dashboard fetches the whole list on editor
+    // open and slots them into the palette alongside built-in nodes.
+
+    server.get('/api/node-presets', async () => {
+        const presets = await deps.getPresetStore().list();
+        return { presets };
+    });
+
+    server.post('/api/node-presets', async (request, reply) => {
+        const body = (request.body ?? {}) as Record<string, unknown>;
+        if (typeof body.name !== 'string' || !body.name.trim()) {
+            return reply.status(400).send({ error: 'name is required' });
+        }
+        if (typeof body.nodeType !== 'string' || !body.nodeType.trim()) {
+            return reply.status(400).send({ error: 'nodeType is required' });
+        }
+        const config = body.config && typeof body.config === 'object' && !Array.isArray(body.config)
+            ? body.config as Record<string, unknown>
+            : {};
+        const preset = await deps.getPresetStore().create({
+            name: body.name.trim(),
+            description: typeof body.description === 'string' ? body.description : undefined,
+            icon: typeof body.icon === 'string' ? body.icon : undefined,
+            nodeType: body.nodeType.trim(),
+            config,
+            // Manually-created presets are always tagged `user` to keep
+            // them out of the library cascade cleanup. The library
+            // import path uses `replaceBySource` directly and never
+            // hits this endpoint.
+            source: 'user',
+        });
+        return { ok: true, preset };
+    });
+
+    server.delete('/api/node-presets/:id', async (request, reply) => {
+        const { id } = request.params as { id: string };
+        const removed = await deps.getPresetStore().deleteOne(id);
+        if (!removed) return reply.status(404).send({ error: `Preset "${id}" not found` });
+        return { ok: true };
     });
 
     // ─── System: autostart service + updates ────────────────────────────
@@ -969,6 +1153,24 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
 
         return entry;
     }
+
+    // Named default prompts the visual editor can surface as "Load default"
+    // affordances in the inspector. Returns the actual TypeScript-generated
+    // text so the user sees what the action runs when their override port
+    // is empty — and gets a sane starting point if they want to customise.
+    server.get('/api/ai/defaults/:source', async (request, reply) => {
+        const { source } = request.params as { source: string };
+        try {
+            const { getDefaultPrompt } = await import('../actions/default-prompts.js');
+            const text = getDefaultPrompt(source);
+            if (text == null) {
+                return reply.status(404).send({ error: `Unknown default prompt source "${source}"` });
+            }
+            return { source, text };
+        } catch (err) {
+            return reply.status(500).send({ error: (err as Error).message });
+        }
+    });
 
     server.get('/api/ai/providers', async () => {
         const config = await deps.configStore.read();
@@ -2160,8 +2362,8 @@ function serializeJob(job: import('../core/types.js').QueueJob) {
         workflowSnapshot: {
             name: job.workflow.name,
             trigger: job.workflow.trigger,
-            stepCount: job.workflow.steps.length,
-            stepActions: job.workflow.steps.map(s => s.action),
+            stepCount: job.workflow.steps?.length ?? job.workflow.graph?.nodes.length ?? 0,
+            stepActions: job.workflow.steps?.map(s => s.action) ?? job.workflow.graph?.nodes.map(n => n.type) ?? [],
         },
         event: {
             source: job.event.source,

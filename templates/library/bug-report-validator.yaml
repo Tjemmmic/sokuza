@@ -1,8 +1,16 @@
 # Bug Report Validator
 #
-# Checks if a new bug report has sufficient information for debugging:
-# reproduction steps, expected vs actual behavior, environment details.
-# Posts a helpful comment if information is missing.
+# Posts a friendly checklist comment on every new issue reminding the
+# reporter what info helps debugging (repro steps, expected vs actual,
+# environment, error output). The body is static — no AI required —
+# which keeps the workflow zero-cost and reliable.
+#
+# Why static text and not an AI judge?
+#   `ai.review` requires a code diff and the issue text isn't one;
+#   `ai.agent` requires a cloned repo workdir, which is overkill for a
+#   one-shot text check. A predictable checklist comment ends up being
+#   more useful in practice — reporters edit the issue with the missing
+#   bits without needing the model to nag.
 #
 # Usage:
 #   - name: validate-bugs
@@ -10,44 +18,44 @@
 #     trigger:
 #       event: issues.opened
 
+description: 'Post a "what to include" checklist on every new issue'
+icon: 📝
+
 trigger:
   source: github
   event: issues.opened
 
-steps:
-  - id: validate
-    action: ai-review
-    params:
-      prompt: |
-        You are validating a bug report for completeness.
+graph:
+  nodes:
+    - id: trigger
+      type: trigger.github
+      position: { x: 60, y: 200 }
+      config:
+        events: [issues.opened]
+    - id: post
+      type: github.comment
+      position: { x: 360, y: 200 }
+      config:
+        body: |
+          ## 📝 Thanks for the report!
 
-        Analyze the issue and check for these required elements:
+          To help us reproduce and fix this quickly, please make sure
+          your issue includes:
 
-        1. **Description**: Is the problem clearly described?
-        2. **Steps to Reproduce**: Are there specific steps to reproduce?
-        3. **Expected Behavior**: What should happen?
-        4. **Actual Behavior**: What actually happens?
-        5. **Environment**: OS, browser, version, etc.?
-        6. **Error Messages**: Stack traces, console output?
+          - [ ] **Description** — what's broken, in plain language
+          - [ ] **Steps to reproduce** — the exact actions that trigger it
+          - [ ] **Expected behavior** — what *should* have happened
+          - [ ] **Actual behavior** — what happens instead
+          - [ ] **Environment** — OS, browser, version, anything relevant
+          - [ ] **Error output** — stack traces, console logs, screenshots
 
-        ## Rules
-        - If ALL required elements are present: output "COMPLETE"
-        - If elements are missing: list what's missing and provide a
-          friendly template for the reporter to fill in.
-        - Be helpful, not demanding. Acknowledge the report.
-        - If this doesn't look like a bug report (feature request, question),
-          note that and still provide guidance.
+          Edit the issue body to fill in anything missing — that's
+          usually faster than a back-and-forth in the comments.
 
-  - action: github-comment
-    condition: "{{steps.validate.review}}"
-    params:
-      skip_if_contains: "COMPLETE"
-      issue_number: "{{event.metadata.issueNumber}}"
-      repo: "{{event.metadata.repo}}"
-      body: |
-        ## 📝 Bug Report Review
-
-        {{steps.validate.review}}
-
-        ---
-        _Validated by Sokuza AI_
+          ---
+          _Posted automatically by Sokuza_
+  edges:
+    - from: { node: trigger, port: issueNumber }
+      to: { node: post, port: issue_number }
+    - from: { node: trigger, port: repo }
+      to: { node: post, port: repo }

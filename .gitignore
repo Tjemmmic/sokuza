@@ -10,3 +10,5 @@ coverage/
 # The committable template is sokuza.config.example.yaml.
 sokuza.config.yaml
 .playwright-mcp
+# Playwright/manual smoke-test screenshots
+*.png

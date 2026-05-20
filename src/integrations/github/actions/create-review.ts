@@ -1,6 +1,7 @@
 import { GitHubApiClient } from '../api.js';
 import type { ActionHandler } from '../../../core/types.js';
 import { renderReviewForApi, type StructuredReview } from '../../../actions/review-templates.js';
+import { resolveRepoTarget, requireToken } from './_target.js';
 
 /**
  * "github-create-review" action.
@@ -37,26 +38,16 @@ import { renderReviewForApi, type StructuredReview } from '../../../actions/revi
  * Returns: { event, html_url, review_id, inline_comments, fallback_used }
  */
 export const githubCreateReviewAction: ActionHandler = async (params, context) => {
-    const githubConfig = context.integrationConfigs.github;
-    const token = (params.token as string) ?? (githubConfig?.token as string);
-    if (!token) {
-        throw new Error(
-            'github-create-review requires a GitHub token. Set integrations.github.token in config or pass params.token.',
-        );
-    }
-
-    const pr = context.event.payload?.pull_request as Record<string, unknown> | undefined;
-    const issue = context.event.payload?.issue as Record<string, unknown> | undefined;
-    const owner = (params.owner as string) ?? (context.event.metadata?.owner as string);
-    const repo = (params.repo as string) ?? (context.event.metadata?.repoName as string);
-    const prNumber =
-        (params.pr_number as number) ??
-        (context.event.metadata?.prNumber as number) ??
-        (pr?.number as number) ??
-        (issue?.number as number);
-    if (!owner || !repo || !prNumber) {
-        throw new Error('github-create-review: could not determine owner, repo, or pr_number.');
-    }
+    const token = requireToken(params, context, 'github-create-review');
+    // `resolveRepoTarget` accepts `params.repo` as either "owner/name"
+    // (what `data.pr-fields.repo` outputs and what the editor's
+    // "Repository" port label implies) or just the bare name when
+    // paired with `params.owner`. The previous bespoke resolver read
+    // `params.repo` as the bare name only — wiring `pr_fields.repo`
+    // (= "owner/name") into this action would produce a URL like
+    // `/repos/<owner>/owner/name/pulls/<n>/reviews` and 404.
+    const target = resolveRepoTarget(params, context, 'github-create-review');
+    const { owner, repo, number: prNumber } = target;
 
     const structured = params.structured as StructuredReview | undefined;
     const runId = params.run_id as string | undefined;

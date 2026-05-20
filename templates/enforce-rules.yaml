@@ -14,76 +14,92 @@
 #       event: pull_request.opened
 #       repo: "my-org/my-repo"
 
+description: AI reads your repo's rules and checks PRs for compliance + auto-fixes
+icon: 📏
+
 trigger:
   source: github
   event: pull_request.opened
 
-steps:
-  # 1. Clone the repo
-  - id: repo
-    action: github-clone-repo
-    params: {}
+graph:
+  nodes:
+    - id: trigger
+      type: trigger.github
+      position: { x: 60, y: 240 }
+      config:
+        events: [pull_request.opened]
+    - id: clone
+      type: github.clone-repo
+      position: { x: 360, y: 240 }
+      config: {}
+    - id: analysis
+      type: ai.agent
+      position: { x: 700, y: 240 }
+      config:
+        prompt: |
+          You have access to a repository. Do the following:
 
-  # 2. Claude reads the rules and checks for compliance
-  - id: analysis
-    action: ai-agent
-    params:
-      workdir: "{{steps.repo.path}}"
-      prompt: |
-        You have access to a repository. Do the following:
+          1. Look for project rules and guidelines. Check common locations:
+             - .github/RULES.md, .github/CONTRIBUTING.md, .github/guidelines/
+             - CONTRIBUTING.md, RULES.md, docs/guidelines/
 
-        1. Look for project rules and guidelines. Check common locations:
-           - .github/RULES.md, .github/CONTRIBUTING.md, .github/guidelines/
-           - CONTRIBUTING.md, RULES.md, docs/guidelines/
-           - Any rule or guideline files you find
+          2. Read and understand those rules.
 
-        2. Read and understand those rules.
+          3. Check the current state of the codebase against those rules.
+             Identify violations and missing items.
 
-        3. Check the current state of the codebase against those rules.
-           Identify any violations or missing items.
+          4. Produce a structured report:
+             - VIOLATIONS
+             - MISSING_ACTIONS
+             - CHANGES_NEEDED: "true" or "false"
+             - SUMMARY
+    - id: fix
+      type: ai.agent
+      position: { x: 1040, y: 120 }
+      condition: "{{nodes.analysis.output}}"
+      config:
+        prompt: |
+          Based on the rules and guidelines in this repo,
+          implement the missing actions and fix any violations.
+          Make clean, minimal changes.
+        allowed_tools: [Read, Grep, Glob, LS, Edit, Write]
+    - id: open_pr
+      type: github.create-pr
+      position: { x: 1380, y: 120 }
+      condition: "{{nodes.analysis.output}}"
+      config:
+        title: "🤖 Auto-fix: Rule compliance updates"
+        body: |
+          ## Automated fixes by Sokuza
 
-        4. Produce a structured report:
-           - VIOLATIONS: List any rule violations found
-           - MISSING_ACTIONS: Things the rules say should exist but don't
-           - CHANGES_NEEDED: "true" if a follow-up PR should fix these, "false" otherwise
-           - SUMMARY: A concise summary of findings
+          {{nodes.analysis.output}}
+    - id: report
+      type: github.comment
+      position: { x: 1040, y: 380 }
+      config:
+        body: |
+          ## 📋 Rule Compliance Report
 
-  # 3. If fixes are needed, have Claude make the changes
-  - id: fix
-    action: ai-agent
-    condition: "{{steps.analysis.changes_needed}}"
-    params:
-      workdir: "{{steps.repo.path}}"
-      prompt: |
-        Based on the rules and guidelines in this repo,
-        implement the missing actions and fix any violations.
-        Make clean, minimal changes.
-      allowed_tools:
-        - Read
-        - Grep
-        - Glob
-        - LS
-        - Edit
-        - Write
+          {{nodes.analysis.output}}
 
-  # 4. Create a PR with the fixes (Sokuza controls the push)
-  - action: github-create-pr
-    condition: "{{steps.analysis.changes_needed}}"
-    params:
-      workdir: "{{steps.repo.path}}"
-      title: "🤖 Auto-fix: Rule compliance updates"
-      body: |
-        ## Automated fixes by Sokuza
-
-        {{steps.analysis.review}}
-
-  # 5. Post a compliance report on the original PR
-  - action: github-comment
-    params:
-      body: |
-        ## 📋 Rule Compliance Report
-
-        {{steps.analysis.review}}
-
-        ---
-        _Analyzed by Sokuza AI_
+          ---
+          _Analyzed by Sokuza AI_
+  edges:
+    - from: { node: clone, port: path }
+      to: { node: analysis, port: workdir }
+    - from: { node: clone, port: path }
+      to: { node: fix, port: workdir }
+    - from: { node: clone, port: path }
+      to: { node: open_pr, port: workdir }
+    - from: { node: trigger, port: prNumber }
+      to: { node: report, port: pr_number }
+    - from: { node: trigger, port: repo }
+      to: { node: report, port: repo }
+    # Sequencing edges — fix/open_pr/report all interpolate analysis.output
+    # in either condition or config, so they must run after analysis.
+    - from: { node: analysis, port: output }
+      to: { node: fix, port: __seq }
+    - from: { node: analysis, port: output }
+      to: { node: open_pr, port: __seq }
+    - from: { node: analysis, port: output }
+      to: { node: report, port: __seq }

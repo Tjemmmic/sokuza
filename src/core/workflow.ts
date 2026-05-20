@@ -12,6 +12,12 @@ import type {
 import type { AIProviderRegistry } from './ai-providers.js';
 import { loadAIProviders } from './ai-providers.js';
 import { toArray } from './types.js';
+import { executeGraph } from './nodes/runtime.js';
+import { getNodeRegistry } from './nodes/registry.js';
+import { extractTriggerFromGraph, isGraphWorkflow } from './nodes/graph-trigger.js';
+import { abortErrorFromSignal } from './abort-error.js';
+import { isStringTruthy } from './nodes/truthy.js';
+import { isWorkflowTempPath } from './temp-paths.js';
 
 /**
  * Determines whether a workflow's trigger matches an incoming event.
@@ -34,7 +40,13 @@ export function matchesTrigger(
     // Disabled workflows never match
     if (workflow.enabled === false) return false;
 
-    const { trigger } = workflow;
+    // Graph workflows store trigger config inside a trigger.<source> node;
+    // bridge that to the legacy TriggerDefinition shape so the matching
+    // logic below stays unchanged.
+    const trigger = isGraphWorkflow(workflow) && workflow.graph
+        ? (extractTriggerFromGraph(workflow.graph) ?? workflow.trigger)
+        : workflow.trigger;
+    if (!trigger) return false;
 
     // ─── Source matching (any of the trigger sources) ────────────────────
     // Each source is distinct: github (webhooks), github-poll (token polling),
@@ -235,9 +247,7 @@ function makeContext(
 
 function shouldSkip(step: WorkflowStepDefinition, ctx: ActionContext): boolean {
     if (!step.condition) return false;
-    const condValue = interpolateString(step.condition, ctx);
-    const isTruthy = condValue !== '' && condValue !== 'false' && condValue !== '0' && condValue !== 'undefined' && condValue !== 'null';
-    return !isTruthy;
+    return !isStringTruthy(interpolateString(step.condition, ctx));
 }
 
 /**
@@ -268,20 +278,46 @@ export async function executeWorkflow(
     recordWebhookDelivery?: import('./types.js').ActionContext['recordWebhookDelivery'],
     extras?: MakeContextExtras,
 ): Promise<WorkflowExecutionResult> {
+    const aiRegistry: AIProviderRegistry = ai ?? loadAIProviders(undefined);
+
+    // ── Graph-form workflows go through the node runtime ───────────────
+    if (isGraphWorkflow(workflow)) {
+        const graphTempPaths: string[] = [];
+        try {
+            const graphResult = await executeGraph(
+                workflow.graph!, event, actionRegistry, getNodeRegistry(), logger,
+                {
+                    workflowName: workflow.name,
+                    integrationConfigs,
+                    ai: aiRegistry,
+                    recordWebhookDelivery,
+                    workdirManager: extras?.workdirManager,
+                    getConfig: extras?.getConfig,
+                    signal: _signal,
+                },
+            );
+            for (const out of Object.values(graphResult.nodeOutputs)) {
+                collectTempPath(out, graphTempPaths);
+            }
+            return { results: graphResult.results, steps: graphResult.steps };
+        } finally {
+            await cleanupTempDirs(graphTempPaths, logger);
+        }
+    }
+
+    // ── Legacy steps form ──────────────────────────────────────────────
     const results: Record<number, unknown> = {};
     const steps: Record<string, unknown> = {};
     const tempPaths: string[] = [];
 
-    const aiRegistry: AIProviderRegistry = ai ?? loadAIProviders(undefined);
-
     logger.info({ workflow: workflow.name }, 'Executing workflow');
 
     try {
-        const groups = groupSteps(workflow.steps);
+        const groups = groupSteps(workflow.steps ?? []);
 
         for (const group of groups) {
             if (_signal?.aborted) {
-                throw new Error('Workflow aborted');
+                throw abortErrorFromSignal(_signal);
             }
 
             if (group.kind === 'sequential') {
@@ -429,7 +465,7 @@ async function runParallelGroup(
 function collectTempPath(result: unknown, paths: string[]): void {
     if (!result || typeof result !== 'object') return;
     const obj = result as Record<string, unknown>;
-    if (typeof obj.path === 'string' && obj.path.includes('sokuza-repo-')) {
+    if (typeof obj.path === 'string' && isWorkflowTempPath(obj.path)) {
         paths.push(obj.path);
     }
 }
@@ -449,39 +485,54 @@ async function cleanupTempDirs(paths: string[], logger: Logger): Promise<void> {
 
 /**
  * Recursively resolve `{{event.payload.foo}}` and `{{steps.id.field}}`
- * expressions in params.
+ * expressions in params. Walks strings, arrays, and plain objects so a
+ * config like `params: { items: ['{{steps.a.val}}'] }` resolves the
+ * template inside the array — matches the graph runtime's
+ * interpolateValue (runtime.ts), keeping legacy and graph executors
+ * consistent.
  */
 export function interpolateParams(
     params: Record<string, unknown>,
     context: ActionContext,
 ): Record<string, unknown> {
     const result: Record<string, unknown> = {};
-
     for (const [key, value] of Object.entries(params)) {
-        if (typeof value === 'string') {
-            result[key] = interpolateString(value, context);
-        } else if (value && typeof value === 'object' && !Array.isArray(value)) {
-            result[key] = interpolateParams(
-                value as Record<string, unknown>,
-                context,
-            );
-        } else {
-            result[key] = value;
-        }
+        result[key] = interpolateValue(value, context);
     }
-
     return result;
 }
 
-const ALLOWED_INTERPOLATION_PREFIXES = ['event.', 'results.', 'steps.', 'metadata.', 'inputs.'];
+function interpolateValue(value: unknown, context: ActionContext): unknown {
+    if (typeof value === 'string') return interpolateString(value, context);
+    if (Array.isArray(value)) return value.map((v) => interpolateValue(v, context));
+    if (value && typeof value === 'object') {
+        return interpolateParams(value as Record<string, unknown>, context);
+    }
+    return value;
+}
+
+// `metadata.` is deliberately omitted — see core/nodes/runtime.ts for
+// the rationale. Use `event.metadata.…` (what every template already
+// does).
+const ALLOWED_INTERPOLATION_PREFIXES = ['event.', 'results.', 'steps.', 'inputs.'];
 
 const INPUTS_ALIAS_RE = /^inputs\.(.+)$/;
 
 function interpolateString(template: string, context: ActionContext): string {
-    return template.replace(/\{\{(.+?)\}\}/g, (_match, path: string) => {
+    return template.replace(/\{\{(.+?)\}\}/g, (match, path: string) => {
         const trimmed = path.trim();
+        // Anything outside the known prefixes is left intact — keeps
+        // the legacy executor in lockstep with the graph runtime
+        // (core/nodes/runtime.ts#interpolateString). A typo like
+        // `{{ndoes.review.sha}}` stays visible in logs and downstream
+        // string compares instead of silently becoming "", and literal
+        // `{{...}}` in user-authored content (Markdown handlebars
+        // examples, JSX snippets, doc bodies that legitimately mention
+        // template syntax) round-trips unchanged. Recognised-but-empty
+        // refs still resolve to "" so a missing optional value doesn't
+        // pollute output with placeholder text.
         if (!ALLOWED_INTERPOLATION_PREFIXES.some(p => trimmed.startsWith(p))) {
-            return '';
+            return match;
         }
         const resolved = INPUTS_ALIAS_RE.test(trimmed)
             ? `event.payload.${trimmed}`
@@ -497,6 +548,9 @@ function resolvePath(obj: unknown, path: string): unknown {
 
     for (const part of parts) {
         if (current === null || current === undefined) return undefined;
+        // {{steps.x.__proto__.…}} resolves to a missing value rather than
+        // climbing the prototype chain — consistent with the graph runtime.
+        if (part === '__proto__' || part === 'constructor') return undefined;
         current = (current as Record<string, unknown>)[part];
     }
 
