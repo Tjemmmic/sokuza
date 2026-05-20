@@ -452,6 +452,220 @@ describe('matchesTrigger', () => {
             expect(matchesTrigger(wf, event)).toBe(true);
         });
     });
+
+    describe('glob support in shorthand multi-value matching', () => {
+        it('matches when a glob entry covers the event repo', () => {
+            const wf = makeWorkflow({
+                trigger: {
+                    source: 'github',
+                    event: 'pull_request.opened',
+                    repo: ['my-org/*', 'specific/repo'],
+                },
+            });
+            expect(matchesTrigger(wf, makeEvent({ metadata: { repo: 'my-org/anything' } }))).toBe(true);
+            expect(matchesTrigger(wf, makeEvent({ metadata: { repo: 'specific/repo' } }))).toBe(true);
+            expect(matchesTrigger(wf, makeEvent({ metadata: { repo: 'other/repo' } }))).toBe(false);
+        });
+
+        it('matches a glob branch entry', () => {
+            const wf = makeWorkflow({
+                trigger: {
+                    source: 'github',
+                    event: 'pull_request.opened',
+                    branch: ['releases/*', 'main'],
+                },
+            });
+            expect(matchesTrigger(wf, makeEvent({
+                payload: { pull_request: { base: { ref: 'releases/2026-01' } } },
+            }))).toBe(true);
+            expect(matchesTrigger(wf, makeEvent({
+                payload: { pull_request: { base: { ref: 'develop' } } },
+            }))).toBe(false);
+        });
+
+        it('matches a glob author entry with case-insensitive comparison', () => {
+            const wf = makeWorkflow({
+                trigger: {
+                    source: 'github',
+                    event: 'pull_request.opened',
+                    author: ['*[bot]', 'TjEmmes'],
+                },
+            });
+            expect(matchesTrigger(wf, makeEvent({
+                payload: { pull_request: { user: { login: 'dependabot[bot]' } } },
+            }))).toBe(true);
+            // Mixed-case author: case-insensitive compare wins.
+            expect(matchesTrigger(wf, makeEvent({
+                payload: { pull_request: { user: { login: 'tjemmes' } } },
+            }))).toBe(true);
+            expect(matchesTrigger(wf, makeEvent({
+                payload: { pull_request: { user: { login: 'someone-else' } } },
+            }))).toBe(false);
+        });
+    });
+
+    describe('multi-value labels include matching', () => {
+        // Single-value labels are converted to a filter; multi-value used
+        // to be silently dropped. This pins the fix.
+        it('matches when at least one trigger label is on the PR', () => {
+            const wf = makeWorkflow({
+                trigger: {
+                    source: 'github',
+                    event: 'pull_request.opened',
+                    labels: ['needs-review', 'priority'],
+                },
+            });
+            expect(matchesTrigger(wf, makeEvent({
+                payload: { pull_request: { labels: [{ name: 'priority' }, { name: 'frontend' }] } },
+            }))).toBe(true);
+        });
+
+        it('rejects when no trigger label is on the PR', () => {
+            const wf = makeWorkflow({
+                trigger: {
+                    source: 'github',
+                    event: 'pull_request.opened',
+                    labels: ['needs-review', 'priority'],
+                },
+            });
+            expect(matchesTrigger(wf, makeEvent({
+                payload: { pull_request: { labels: [{ name: 'frontend' }] } },
+            }))).toBe(false);
+        });
+
+        it('also reads labels from payload.issue (issue events)', () => {
+            const wf = makeWorkflow({
+                trigger: {
+                    source: 'github',
+                    event: 'issues.opened',
+                    labels: ['triage', 'bug'],
+                },
+            });
+            expect(matchesTrigger(wf, makeEvent({
+                event: 'issues.opened',
+                payload: { issue: { labels: [{ name: 'bug' }] } },
+            }))).toBe(true);
+        });
+    });
+
+    describe('exclude (negation) filters', () => {
+        it('rejects when exclude.author matches the PR author (case-insensitive)', () => {
+            const wf = makeWorkflow({
+                trigger: {
+                    source: 'github',
+                    event: 'pull_request.opened',
+                    exclude: { author: 'Dependabot[bot]' },
+                },
+            });
+            expect(matchesTrigger(wf, makeEvent({
+                payload: { pull_request: { user: { login: 'dependabot[bot]' } } },
+            }))).toBe(false);
+        });
+
+        it('passes when exclude.author does not match', () => {
+            const wf = makeWorkflow({
+                trigger: {
+                    source: 'github',
+                    event: 'pull_request.opened',
+                    exclude: { author: ['dependabot[bot]', 'renovate[bot]'] },
+                },
+            });
+            expect(matchesTrigger(wf, makeEvent({
+                payload: { pull_request: { user: { login: 'a-human' } } },
+            }))).toBe(true);
+        });
+
+        it('rejects via exclude.author glob (e.g. all bots)', () => {
+            const wf = makeWorkflow({
+                trigger: {
+                    source: 'github',
+                    event: 'pull_request.opened',
+                    exclude: { author: '*[bot]' },
+                },
+            });
+            expect(matchesTrigger(wf, makeEvent({
+                payload: { pull_request: { user: { login: 'dependabot[bot]' } } },
+            }))).toBe(false);
+            expect(matchesTrigger(wf, makeEvent({
+                payload: { pull_request: { user: { login: 'human-user' } } },
+            }))).toBe(true);
+        });
+
+        it('rejects when exclude.labels matches any present label', () => {
+            const wf = makeWorkflow({
+                trigger: {
+                    source: 'github',
+                    event: 'pull_request.opened',
+                    exclude: { labels: ['wip', 'do-not-review'] },
+                },
+            });
+            expect(matchesTrigger(wf, makeEvent({
+                payload: { pull_request: { labels: [{ name: 'wip' }, { name: 'frontend' }] } },
+            }))).toBe(false);
+        });
+
+        it('passes when exclude.labels are all absent', () => {
+            const wf = makeWorkflow({
+                trigger: {
+                    source: 'github',
+                    event: 'pull_request.opened',
+                    exclude: { labels: ['wip'] },
+                },
+            });
+            expect(matchesTrigger(wf, makeEvent({
+                payload: { pull_request: { labels: [{ name: 'frontend' }] } },
+            }))).toBe(true);
+        });
+
+        it('rejects via exclude.repo glob (e.g. carve out legacy repos)', () => {
+            const wf = makeWorkflow({
+                trigger: {
+                    source: 'github',
+                    event: 'pull_request.opened',
+                    repo: ['my-org/*'],
+                    exclude: { repo: ['my-org/legacy-*'] },
+                },
+            });
+            // Include matches (my-org/*) but exclude wins.
+            expect(matchesTrigger(wf, makeEvent({ metadata: { repo: 'my-org/legacy-billing' } }))).toBe(false);
+            // Include matches and exclude doesn't → passes.
+            expect(matchesTrigger(wf, makeEvent({ metadata: { repo: 'my-org/active' } }))).toBe(true);
+        });
+
+        it('rejects via exclude.branch glob', () => {
+            const wf = makeWorkflow({
+                trigger: {
+                    source: 'github',
+                    event: 'pull_request.opened',
+                    exclude: { branch: ['releases/*'] },
+                },
+            });
+            expect(matchesTrigger(wf, makeEvent({
+                payload: { pull_request: { base: { ref: 'releases/2026-01' } } },
+            }))).toBe(false);
+            expect(matchesTrigger(wf, makeEvent({
+                payload: { pull_request: { base: { ref: 'main' } } },
+            }))).toBe(true);
+        });
+
+        it('skips exclude evaluation for manual triggers', () => {
+            // Manual triggers explicitly bypass filtering; exclude must
+            // not sneak in as a backdoor that blocks them.
+            const wf = makeWorkflow({
+                trigger: {
+                    source: ['github', 'manual'],
+                    event: 'pull_request.opened',
+                    exclude: { author: 'tjemmes' },
+                },
+            });
+            expect(matchesTrigger(wf, makeEvent({
+                source: 'manual',
+                event: 'pull_request.opened',
+                payload: { pull_request: { user: { login: 'tjemmes' } } },
+                metadata: {},
+            }))).toBe(true);
+        });
+    });
 });
 
 // ─── interpolateParams ──────────────────────────────────────────────────────

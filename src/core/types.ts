@@ -142,6 +142,24 @@ export interface TriggerDefinition {
     // ─── Power-user: raw dot-path filters ───────────────────────────────
     /** Raw key/value filters applied against the full event payload */
     filters?: Record<string, string>;
+
+    // ─── Negation / exclude (any match rejects the event) ───────────────
+    /** Symmetric to the include shorthand. An event is rejected if ANY
+     *  field here matches the event — e.g. `exclude.author: dependabot[bot]`
+     *  drops dependabot PRs; `exclude.labels: [wip]` drops drafts marked WIP.
+     *  Globs are supported in repo/branch/author values (e.g. `releases/*`). */
+    exclude?: TriggerExclude;
+}
+
+export interface TriggerExclude {
+    /** Reject if the event's repo (metadata.repo) matches any entry. */
+    repo?: OneOrMany<string>;
+    /** Reject if payload.pull_request.base.ref matches any entry. */
+    branch?: OneOrMany<string>;
+    /** Reject if payload.pull_request.user.login matches any entry (case-insensitive). */
+    author?: OneOrMany<string>;
+    /** Reject if any of these labels is present on the PR/issue. */
+    labels?: string[];
 }
 
 export interface WorkflowStepDefinition {

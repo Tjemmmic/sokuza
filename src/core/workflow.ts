@@ -69,7 +69,10 @@ export function matchesTrigger(
     }
 
     // ─── Multi-value shorthand matching (repo/branch/author arrays) ─────
-    // When these have >1 value, they weren't converted to single-value filters
+    // Single-value variants are already converted to filters in
+    // resolveShorthands(), so this only runs for multi-value triggers.
+    // Globs (e.g. `my-org/*`) are honoured here so multi-value behaves
+    // the same as the single-value path which already globs via filters.
     if (event.source !== 'manual') {
         const shorthandChecks: Array<{ values: string[]; path: string }> = [
             { values: toArray(trigger.repo), path: 'metadata.repo' },
@@ -78,13 +81,72 @@ export function matchesTrigger(
         ];
         for (const { values, path } of shorthandChecks) {
             if (values.length <= 1) continue; // Single values handled by filters above
-            const actual = String(resolvePath(event, path) ?? '');
-            const caseInsensitive = path === 'payload.pull_request.user.login';
-            if (!values.some(v => caseInsensitive ? v.toLowerCase() === actual.toLowerCase() : v === actual)) return false;
+            if (!matchesAnyShorthand(event, path, values)) return false;
+        }
+
+        // Labels: include requires AT LEAST ONE of the listed labels to
+        // be present. Single-value labels are converted to a filter by
+        // resolveShorthands; multi-value would silently be ignored
+        // without this branch.
+        const includeLabels = trigger.labels ?? [];
+        if (includeLabels.length > 1 && !eventLabelsContainAny(event, includeLabels)) {
+            return false;
+        }
+    }
+
+    // ─── Exclude (any match rejects) ────────────────────────────────────
+    // Evaluated last so a workflow can write `repo: my-org/*` plus
+    // `exclude.repo: my-org/legacy-*` to carve out exceptions.
+    if (trigger.exclude && event.source !== 'manual') {
+        const excludeChecks: Array<{ values: string[]; path: string }> = [
+            { values: toArray(trigger.exclude.repo), path: 'metadata.repo' },
+            { values: toArray(trigger.exclude.branch), path: 'payload.pull_request.base.ref' },
+            { values: toArray(trigger.exclude.author), path: 'payload.pull_request.user.login' },
+        ];
+        for (const { values, path } of excludeChecks) {
+            if (values.length === 0) continue;
+            if (matchesAnyShorthand(event, path, values)) return false;
+        }
+
+        const excludeLabels = trigger.exclude.labels ?? [];
+        if (excludeLabels.length > 0 && eventLabelsContainAny(event, excludeLabels)) {
+            return false;
         }
     }
 
     return true;
+}
+
+/** Match a value list against a single dot-path on the event, honoring
+ *  glob (`*` wildcard) and case-insensitivity for the GitHub-username path. */
+function matchesAnyShorthand(event: EventPayload, path: string, values: string[]): boolean {
+    const actual = String(resolvePath(event, path) ?? '');
+    const caseInsensitive = CASE_INSENSITIVE_PATHS.has(path);
+    const actualNormalized = caseInsensitive ? actual.toLowerCase() : actual;
+    return values.some((v) => {
+        const expected = caseInsensitive ? v.toLowerCase() : v;
+        if (expected.includes('*')) return globMatch(expected, actualNormalized);
+        return expected === actualNormalized;
+    });
+}
+
+/** True if any of the requested label names is present on the PR/issue
+ *  attached to the event. Mirrors the array-contains filter syntax. */
+function eventLabelsContainAny(event: EventPayload, labels: string[]): boolean {
+    const candidates = [
+        resolvePath(event, 'payload.pull_request.labels'),
+        resolvePath(event, 'payload.issue.labels'),
+    ];
+    for (const list of candidates) {
+        if (!Array.isArray(list)) continue;
+        for (const item of list) {
+            if (!item || typeof item !== 'object') continue;
+            const name = (item as Record<string, unknown>).name;
+            if (typeof name !== 'string') continue;
+            if (labels.includes(name)) return true;
+        }
+    }
+    return false;
 }
 
 /** Paths where comparison should be case-insensitive (GitHub usernames) */
