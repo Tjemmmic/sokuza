@@ -59,8 +59,14 @@ export interface AiReviewRunRecord {
     provider: string;
     model: string;
     usage?: { input_tokens?: number; output_tokens?: number };
-    /** Context-handling strategy. Future values: 'rlm'. */
-    strategy: 'truncate';
+    /** How the review was produced.
+     *   - 'truncate': one-shot completion against a (possibly truncated)
+     *      diff. Produced by `ai-review`.
+     *   - 'agentic':  tool-using agent that explored a cloned workdir and
+     *      returned a structured review. Produced by `ai-agent` with
+     *      `parse_as_review: true`. The truncation block is zero in this
+     *      mode (agent reads files directly; nothing to truncate). */
+    strategy: 'truncate' | 'agentic';
     input: {
         /** 'full' | 'file-patches' | 'summary' — from upstream fetch step. */
         diffSource?: string;
