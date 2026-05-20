@@ -820,7 +820,7 @@ const shellExecNode = actionNode({
         { name: 'args', label: 'Args (exec mode)', role: 'input', wire: true, config: true, control: 'text', type: 'string',
           helpText: 'Comma-separated argv. When set, Command is the executable and no shell parsing happens. Use when interpolating untrusted values into Command would be unsafe.' },
         { name: 'timeout_seconds', label: 'Timeout (seconds)', role: 'input', config: true, control: 'number', type: 'number',
-          default: 300, helpText: 'SIGTERM at this mark, SIGKILL 5s later. Default 300.' },
+          default: 300, helpText: 'SIGTERM at this mark, SIGKILL ~1.5s later. Default 300.' },
         { name: 'max_output_bytes', label: 'Max Output Bytes', role: 'input', config: true, control: 'number', type: 'number',
           default: 10485760, helpText: 'Cap on captured stdout/stderr. Process is killed when exceeded. Default 10MB.' },
         { name: 'env', label: 'Env Vars', role: 'input', config: true, control: 'kv',

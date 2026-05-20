@@ -35,7 +35,7 @@ const SIGKILL_BACKSTOP_MS = 1500;
  *     wants `success: false`, not a halted workflow. Wire `success` /
  *     `exitCode` into downstream flow.if to react.
  *   - **Timeout** doesn't throw either — sets `timedOut: true`,
- *     `success: false`. SIGTERM first, then SIGKILL after a 5s grace.
+ *     `success: false`. SIGTERM first, then SIGKILL after a 1.5s grace.
  *   - **AbortSignal** throws (workflow was cancelled).
  *
  * Output bytes are capped (`max_output_bytes`, default 10MB). When the
@@ -79,12 +79,34 @@ export const shellExecAction: ActionHandler = async (params, context) => {
     );
 
     return new Promise((resolve, reject) => {
-        // Defensive: shell mode passes command as a single string to
-        // `/bin/sh -c` (Node's spawn behavior when shell:true). Exec
-        // mode spawns `command` directly with `explicitArgs` as argv.
+        // `detached: true` makes the child a process group leader on
+        // Linux/macOS. Critical for shell mode: `/bin/sh -c "sleep 5"`
+        // on dash (Ubuntu /bin/sh) forks sleep rather than exec'ing it,
+        // so SIGTERM to the shell PID alone leaves sleep alive holding
+        // the stdio pipes — and Node's `close` event waits for those
+        // pipes to drain. By making the shell a process group leader,
+        // `process.kill(-pid, signal)` reaches the whole tree.
+        // (Pinned by the timeout test which previously took 5003ms in
+        // CI — exactly `sleep 5`'s natural duration — because SIGTERM
+        // killed the shell but not sleep.)
+        const spawnOpts = { cwd: workdir, env, shell: useShell, detached: true };
         const child = useShell
-            ? spawn(command, [], { cwd: workdir, env, shell: true })
-            : spawn(command, explicitArgs!, { cwd: workdir, env, shell: false });
+            ? spawn(command, [], spawnOpts)
+            : spawn(command, explicitArgs!, spawnOpts);
+
+        // Kill the entire process group (shell + any children it
+        // forked) instead of just the shell PID. Best-effort: ESRCH
+        // means the group is already gone, which is fine.
+        const killTree = (sig: 'SIGTERM' | 'SIGKILL'): void => {
+            if (!child.pid) return;
+            try {
+                process.kill(-child.pid, sig);
+            } catch {
+                // Common cases: ESRCH (group gone), EPERM (kernel
+                // dropped the right). Either way we've done what we
+                // can — propagating wouldn't help the caller.
+            }
+        };
 
         const stdoutChunks: Buffer[] = [];
         const stderrChunks: Buffer[] = [];
@@ -105,20 +127,20 @@ export const shellExecAction: ActionHandler = async (params, context) => {
         const killHard = () => {
             if (killTimer) clearTimeout(killTimer);
             killTimer = setTimeout(() => {
-                try { child.kill('SIGKILL'); } catch { /* already dead */ }
+                killTree('SIGKILL');
             }, SIGKILL_BACKSTOP_MS);
         };
 
         const timeoutTimer = setTimeout(() => {
             timedOut = true;
-            try { child.kill('SIGTERM'); } catch { /* already dead */ }
+            killTree('SIGTERM');
             killHard();
         }, timeoutMs);
 
         const onAbort = () => {
             if (settled) return;
             settled = true;
-            try { child.kill('SIGTERM'); } catch { /* already dead */ }
+            killTree('SIGTERM');
             killHard();
             clearTimeout(timeoutTimer);
             reject(abortErrorFromSignal(signal!));
@@ -137,7 +159,7 @@ export const shellExecAction: ActionHandler = async (params, context) => {
             capturedBytes += accepted.length;
             if (chunk.length > remaining && !truncated) {
                 truncated = true;
-                try { child.kill('SIGTERM'); } catch { /* already dead */ }
+                killTree('SIGTERM');
                 killHard();
             }
         };

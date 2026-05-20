@@ -182,6 +182,28 @@ describe('shell-exec — timeout', () => {
         expect(result.durationMs).toBeLessThan(5000);
     });
 
+    it('kills the whole process tree, not just the shell PID', { timeout: 15000 }, async () => {
+        // Regression test for the CI failure where `sh -c "sleep 5"` on
+        // dash (Ubuntu /bin/sh) forks sleep rather than exec'ing it.
+        // SIGTERM to the shell PID alone leaves sleep alive holding the
+        // stdio pipes, so Node's close event waits for sleep's natural
+        // 5s exit. Solution: spawn detached + process-group kill.
+        //
+        // The `sleep 5 & wait` pattern guarantees the fork+wait
+        // scenario regardless of which shell /bin/sh is, so this
+        // exercises the problematic path on every platform — not just
+        // Ubuntu CI.
+        const result = await shellExecAction(
+            { workdir, command: 'sleep 5 & wait', timeout_seconds: 0.3 },
+            ctx(),
+        ) as Output;
+        expect(result.timedOut).toBe(true);
+        // Must have killed the orphan: total wall-clock well under
+        // sleep's 5s. Without the process-group fix, duration would
+        // be ~5003ms (sleep's natural completion).
+        expect(result.durationMs).toBeLessThan(3000);
+    });
+
     it('rejects timeout_seconds <= 0', async () => {
         await expect(
             shellExecAction(
