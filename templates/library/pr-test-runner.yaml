@@ -1,0 +1,84 @@
+# Run Tests on PR
+#
+# Clones the PR head and runs your test command. Posts the result as a
+# PR comment with the captured stdout. Use as a building block: pair
+# with `flow.if` on `tests.success` to gate a downstream merge / review
+# / approval step on the test outcome.
+#
+# Exercises: trigger.gh-cli, github.clone-repo, utility.shell-exec,
+#            github.comment
+#
+# Usage:
+#   - name: pr-test-runner
+#     template: pr-test-runner
+#     params:
+#       command: "npm test"          # override per repo
+#       timeout_seconds: 600
+
+description: Clone the PR, run your test command, comment the result
+icon: ⚙️
+
+trigger:
+  source: gh-cli
+  event: pull_request.opened
+
+graph:
+  nodes:
+    - id: trigger
+      type: trigger.gh-cli
+      position: { x: 60, y: 240 }
+      config:
+        events: [pull_request.opened]
+    - id: clone
+      type: github.clone-repo
+      position: { x: 360, y: 240 }
+      config: {}
+    - id: tests
+      type: utility.shell-exec
+      position: { x: 680, y: 240 }
+      config:
+        # Override in `params:` at install time for non-Node projects
+        # (e.g. `cargo test`, `pytest -q`, `go test ./...`).
+        command: npm test
+        timeout_seconds: 600
+    - id: post
+      type: github.comment
+      position: { x: 1020, y: 240 }
+      config:
+        body: |
+          ## Test run
+
+          - exit code: `{{nodes.tests.exitCode}}`
+          - duration: {{nodes.tests.durationMs}} ms
+          - timed out: {{nodes.tests.timedOut}}
+          - output truncated: {{nodes.tests.truncated}}
+
+          <details><summary>stdout</summary>
+
+          ```
+          {{nodes.tests.stdout}}
+          ```
+
+          </details>
+
+          <details><summary>stderr</summary>
+
+          ```
+          {{nodes.tests.stderr}}
+          ```
+
+          </details>
+  edges:
+    - from: { node: trigger, port: repo }
+      to: { node: clone, port: repo }
+    - from: { node: trigger, port: branch }
+      to: { node: clone, port: ref }
+    - from: { node: clone, port: path }
+      to: { node: tests, port: workdir }
+    - from: { node: trigger, port: prNumber }
+      to: { node: post, port: pr_number }
+    - from: { node: trigger, port: repo }
+      to: { node: post, port: repo }
+    # post's body interpolates several nodes.tests.* outputs.
+    - from: { node: tests, port: exitCode }
+      to: { node: post, port: __seq }
