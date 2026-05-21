@@ -1,0 +1,75 @@
+# Fail Workflow on Test Failure
+#
+# Demonstrates `flow.fail`: actively terminate the workflow with a
+# custom error when an upstream condition is met. Here we clone the PR,
+# run tests via `utility.shell-exec`, and if the tests fail we call
+# `flow.fail` to surface the failure as a workflow error (visible in
+# the run viewer + queue, paged on by external monitoring). Without
+# this node the workflow would silently continue with `success: false`
+# data flowing through.
+#
+# The gate is the node-level `condition:` field — `flow.fail` is
+# unconditional when executed, so use `condition:` to decide when it
+# fires. Pair with a `flow.if` to invert the test signal (we want to
+# fail when `success` is FALSE).
+#
+# Exercises: flow.fail, utility.shell-exec, flow.if
+#
+# Usage:
+#   - name: fail-on-test-failure
+#     template: flow-fail-demo
+
+description: Run tests after a PR opens; fail the workflow loudly if they don't pass
+icon: 🛑
+
+trigger:
+  source: gh-cli
+  event: pull_request.opened
+
+graph:
+  nodes:
+    - id: trigger
+      type: trigger.gh-cli
+      position: { x: 60, y: 240 }
+      config:
+        events: [pull_request.opened]
+    - id: clone
+      type: github.clone-repo
+      position: { x: 360, y: 240 }
+      config: {}
+    - id: tests
+      type: utility.shell-exec
+      position: { x: 680, y: 240 }
+      config:
+        command: npm test
+        timeout_seconds: 600
+    # Invert the test signal: when tests.success is true, take `then`
+    # (no failure); when false, take `else` (failure path). We use
+    # `elseFired` downstream because it's an always-"true" sentinel,
+    # safe to wire into a condition: field (unlike `else` which carries
+    # the pass-through value and could itself be falsy).
+    - id: invert
+      type: flow.if
+      position: { x: 1000, y: 240 }
+      config:
+        condition: "{{nodes.tests.success}}"
+    - id: fail_on_red
+      type: flow.fail
+      position: { x: 1340, y: 240 }
+      condition: "{{nodes.invert.elseFired}}"
+      config:
+        message: "PR tests failed — investigate before merging"
+  edges:
+    - from: { node: trigger, port: repo }
+      to: { node: clone, port: repo }
+    - from: { node: trigger, port: branch }
+      to: { node: clone, port: ref }
+    - from: { node: clone, port: path }
+      to: { node: tests, port: workdir }
+    - from: { node: tests, port: success }
+      to: { node: invert, port: value }
+    # Wire stderr as the cause for context — JSON-stringified into the
+    # error tail. Could also wire exitCode/durationMs depending on
+    # which detail you want on the page that fires when this throws.
+    - from: { node: tests, port: stderr }
+      to: { node: fail_on_red, port: cause }

@@ -223,7 +223,8 @@ it's noted in parens. Completed items are marked `[x]` with the PR number
 that shipped them.
 
 **Shipped so far:** PR #4 (trigger filter parity + glob + exclude), PR #5
-(`ai.agent` loop compat via `parse_as_review`), PR #6 (`utility.shell-exec`).
+(`ai.agent` loop compat via `parse_as_review`), PR #6 (`utility.shell-exec`),
+PR #7 (`flow.switch` + `flow.delay` + `flow.fail`).
 
 ## A. Trigger nodes — filter parity & scoping
 
@@ -306,10 +307,10 @@ that shipped them.
 - [ ] **`flow.foreach`** — fan-out: run downstream nodes once per array element, then fan-in
 - [ ] **`flow.parallel-foreach`** — same but concurrent with a `max_concurrency`
 - [ ] **`flow.while`** / **`flow.repeat-until`** — bounded loop with break condition
-- [ ] **`flow.switch`** — N-way branch on a value (not just binary `if`)
-- [ ] **`flow.delay`** / `flow.sleep` — pause N seconds
+- [x] **`flow.switch`** — N-way branch via kv `matchValue→portName` map; deduplicated case ports; `default` + `matched` outputs — **PR #7**
+- [x] **`flow.delay`** / `flow.sleep` — pause N seconds; respects `context.signal` for abort — **PR #7**
 - [ ] **`flow.wait-until`** — pause until a templated condition becomes true (polling)
-- [ ] **`flow.fail`** — terminate the workflow with a custom error message
+- [x] **`flow.fail`** — actively throw with a custom message; gate via node-level `condition:`; optional `cause` JSON-stringified into the error tail — **PR #7**
 - [ ] **`flow.retry`** — wrap a subgraph in a retry policy *(today retry is queue-level, not per-subgraph)*
 - [ ] **`flow.try-catch`** — alternative subgraph runs on error *(today only `on_error: continue` swallows the error)*
 - [ ] **`flow.human-approval`** — pause the run, await a dashboard click or PR comment, then resume
@@ -430,8 +431,8 @@ These are the gaps most often hit by realistic auto-PR-reviewer workflows
 - A10 org-wide repo scoping — engine half ✅ PR #4; **poller half still missing**
 - ~~D8 `ai.agent` emits `parsed` / `runId`~~ ✅ PR #5
 - ~~F1 shell-exec node~~ ✅ PR #6
-- E1 `flow.foreach` — **next**
-- E4 `flow.switch` — **next**
+- E1 `flow.foreach` — **next** (still genuine engine surgery)
+- ~~E4 `flow.switch`~~ ✅ PR #7 (bundled with `flow.delay` + `flow.fail`)
 
 **P1 — frequently asked, currently painful:**
 - C1/C3/C4 request reviewers, assign/unassign, close issue

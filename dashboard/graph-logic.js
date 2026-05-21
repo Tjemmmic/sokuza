@@ -93,6 +93,23 @@
                         out.push(p);
                     }
                 }
+            } else if (spec.kind === 'per-config-value') {
+                // kv map → one port per unique value. Mirrors the runtime
+                // resolver in src/core/nodes/types.ts.
+                const map = node.config?.[spec.configKey];
+                if (!map || typeof map !== 'object' || Array.isArray(map)) continue;
+                for (const value of Object.values(map)) {
+                    if (typeof value !== 'string' || !value || seen.has(value)) continue;
+                    seen.add(value);
+                    out.push({
+                        name: value,
+                        label: value,
+                        role: 'output',
+                        wire: true,
+                        type: spec.portType || 'any',
+                        helpText: `${spec.helpTextPrefix || 'Case branch'}: ${value}`,
+                    });
+                }
             }
         }
         return out;

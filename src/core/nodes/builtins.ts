@@ -1,6 +1,7 @@
 import type { NodeDefinition, NodePort, DynamicOutputSpec } from './types.js';
 import type { NodeRegistry } from './registry.js';
 import { isStringTruthy } from './truthy.js';
+import { abortErrorFromSignal } from '../abort-error.js';
 
 // ─── Built-in node definitions ───────────────────────────────────────────────
 //
@@ -978,6 +979,171 @@ const mergeNode: NodeDefinition = {
     },
 };
 
+// ─── flow.switch — N-way branch ─────────────────────────────────────────────
+//
+// The partner to `flow.if`. Where `if` is binary (then / else), `switch`
+// routes a value through N user-defined cases. The `cases` config is a
+// kv map of `matchValue → portName`; each unique port name becomes a
+// dynamic output port that downstream nodes can wire from. Multiple
+// match values can share a port (e.g. `OPEN: active, REOPENED: active`).
+// Anything that doesn't match a case flows to the always-on `default`
+// port; `matched` always reports which port fired (or "default").
+
+const switchNode: NodeDefinition = {
+    type: 'flow.switch',
+    category: 'control',
+    group: 'Flow',
+    title: 'Switch (N-way branch)',
+    description: 'Route a value to one of N case branches based on equality match',
+    icon: '🎚️',
+    color: COLOR_FLOW,
+    ports: [
+        { name: 'value', label: 'Value', role: 'input', wire: true, config: true, control: 'text', type: 'any', required: true,
+          helpText: 'The value to match against each case key.' },
+        { name: 'cases', label: 'Cases (matchValue → portName)', role: 'input', config: true, control: 'kv',
+          helpText: 'Each row is a case. Left = the value to match. Right = the output port name that fires for that value. Unique port names become wireable outputs on this node; matching uses string equality after trimming.' },
+        { name: 'default', label: 'Default (no match)', role: 'output', wire: true, type: 'any',
+          helpText: 'Fires the pass-through value when no case key matches.' },
+        { name: 'matched', label: 'Matched Port Name', role: 'output', wire: true, type: 'string',
+          helpText: 'The port that fired ("default" if no case matched). Safe to use in downstream condition: fields.' },
+    ],
+    dynamicOutputs: [
+        { kind: 'per-config-value', configKey: 'cases', portType: 'any', helpTextPrefix: 'Case branch' },
+    ],
+    execute: async (inputs, ctx) => {
+        const valueStr = inputs.value === undefined || inputs.value === null
+            ? ''
+            : String(inputs.value).trim();
+        const cases = (inputs.cases && typeof inputs.cases === 'object' && !Array.isArray(inputs.cases))
+            ? inputs.cases as Record<string, unknown>
+            : {};
+        // Find the first case whose key equals the trimmed input value.
+        // Iteration order is insertion order — same order the user sees
+        // in the kv editor, so a duplicate key (which JS rejects anyway)
+        // behaves predictably.
+        for (const [matchValue, portName] of Object.entries(cases)) {
+            if (matchValue.trim() !== valueStr) continue;
+            if (typeof portName !== 'string' || !portName) continue;
+            // Reserved port names collide with the static outputs. Returning
+            // `{ matched: <value>, matched: portName }` would silently
+            // discard the value (JS duplicate-key rule: last wins), and
+            // returning `{ default: <value>, matched: 'default' }` is
+            // indistinguishable from the no-match fallback. Log a warning
+            // and treat the case as if it didn't exist — the user will see
+            // the value flow to `default` instead, which surfaces the
+            // misconfiguration in their workflow inspector.
+            if (SWITCH_RESERVED_PORTS.has(portName)) {
+                ctx.logger.warn(
+                    { matchValue, portName },
+                    `flow.switch: case port name "${portName}" collides with a reserved static output; skipping. Rename the case to use a different port name.`,
+                );
+                continue;
+            }
+            return { [portName]: inputs.value ?? true, matched: portName };
+        }
+        return { default: inputs.value ?? true, matched: 'default' };
+    },
+};
+
+/** Static output port names that case configs must not clobber. Kept as a
+ *  module-level constant so the resolver in types.ts could share it if we
+ *  ever want editor-side validation. */
+const SWITCH_RESERVED_PORTS = new Set(['default', 'matched']);
+
+// ─── flow.delay — pause N seconds ───────────────────────────────────────────
+//
+// Useful for rate-limiting (don't hammer an external API), backoff
+// between retries, and scheduled delays. Respects the workflow's
+// AbortSignal so timeouts and cancellation actually interrupt the wait
+// — otherwise a long `flow.delay` would outlive the abort.
+
+const delayNode: NodeDefinition = {
+    type: 'flow.delay',
+    category: 'control',
+    group: 'Flow',
+    title: 'Delay',
+    description: 'Pause for N seconds, then pass the input through. Respects workflow abort.',
+    icon: '⏲️',
+    color: COLOR_FLOW,
+    ports: [
+        { name: 'seconds', label: 'Seconds', role: 'input', wire: true, config: true, control: 'number', type: 'number', required: true,
+          helpText: 'How long to wait before forwarding `value`. Zero or negative skips the wait.' },
+        // Input named `input` to avoid colliding with the output port
+        // `value`. Matches the convention used by `flow.set` (input port
+        // `input`, output port `value`); without distinct names, tooling
+        // that looks up ports by name alone — without the role filter —
+        // can't reliably tell them apart.
+        { name: 'input', label: 'Pass-through Value', role: 'input', wire: true, config: true, control: 'textarea', type: 'any',
+          helpText: 'Optional. Forwarded as-is on `value` after the delay.' },
+        { name: 'value', label: 'Value (after delay)', role: 'output', wire: true, type: 'any' },
+        { name: 'delayed', label: 'Delayed?', role: 'output', wire: true, type: 'boolean',
+          helpText: 'False if seconds was zero or negative (no actual wait); true otherwise.' },
+    ],
+    execute: async (inputs, ctx) => {
+        const rawSeconds = inputs.seconds;
+        const seconds = typeof rawSeconds === 'number'
+            ? rawSeconds
+            : Number(rawSeconds);
+        if (!Number.isFinite(seconds) || seconds <= 0) {
+            return { value: inputs.input, delayed: false };
+        }
+        const signal = ctx.signal;
+        if (signal?.aborted) {
+            throw abortErrorFromSignal(signal);
+        }
+        await new Promise<void>((resolve, reject) => {
+            const timer = setTimeout(() => {
+                if (signal) signal.removeEventListener('abort', onAbort);
+                resolve();
+            }, seconds * 1000);
+            const onAbort = () => {
+                clearTimeout(timer);
+                reject(abortErrorFromSignal(signal!));
+            };
+            if (signal) signal.addEventListener('abort', onAbort, { once: true });
+        });
+        return { value: inputs.input, delayed: true };
+    },
+};
+
+// ─── flow.fail — terminate with a custom error ──────────────────────────────
+//
+// The active counterpart to `on_error: continue`. Use cases:
+//   - "If the AI review's mergeReady is false → fail with that summary"
+//   - "If shell-exec's exit code is not 0 → fail loudly so on-call sees it"
+// Combine with the node-level `condition:` field to gate when it fires.
+// Without a condition this node ALWAYS throws — that's by design; the
+// gating belongs on the graph node, not duplicated inside the executor.
+
+const failNode: NodeDefinition = {
+    type: 'flow.fail',
+    category: 'control',
+    group: 'Flow',
+    title: 'Fail Workflow',
+    description: 'Throw a custom error to halt the workflow. Pair with the node-level `condition:` field to gate when it fires.',
+    icon: '🛑',
+    color: COLOR_FLOW,
+    ports: [
+        { name: 'message', label: 'Error Message', role: 'input', wire: true, config: true, control: 'textarea', type: 'string', required: true,
+          helpText: 'Surfaced in run logs and (when paired with on_error: continue) on downstream `__error` ports.' },
+        { name: 'cause', label: 'Cause Value (optional)', role: 'input', wire: true, type: 'any',
+          helpText: 'Optional pass-through for context. JSON-stringified into the error message tail when wired.' },
+    ],
+    execute: async (inputs) => {
+        const message = typeof inputs.message === 'string' && inputs.message
+            ? inputs.message
+            : 'flow.fail invoked';
+        if (inputs.cause !== undefined) {
+            const tail = (() => {
+                try { return JSON.stringify(inputs.cause); }
+                catch { return String(inputs.cause); }
+            })();
+            throw new Error(`${message} (cause: ${tail})`);
+        }
+        throw new Error(message);
+    },
+};
+
 // ─── Data nodes ─────────────────────────────────────────────────────────────
 //
 // Closed structural types (pr, issue, review, commits, event, json) carry
@@ -1339,6 +1505,7 @@ const ALL_BUILTINS: NodeDefinition[] = [
     logNode, webhookNode, shellExecNode,
     // Flow
     ifNode, setNode, mergeNode, filterListNode,
+    switchNode, delayNode, failNode,
     // Data
     jsonPluckNode,
     prFieldsNode, issueFieldsNode, reviewFieldsNode, commitsFieldsNode, eventFieldsNode,
