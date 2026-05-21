@@ -7,8 +7,11 @@
  * Config:
  *   github-poll:
  *     token: ${GITHUB_TOKEN}
- *     repos:
- *       - owner/repo
+ *     repos:             # explicit repos to watch (at least one of
+ *       - owner/repo     # `repos` or `orgs` is required)
+ *     orgs:              # OPTIONAL: orgs whose repos to auto-enumerate
+ *       - my-org         # — refreshed every `org_refresh` seconds so
+ *                        # newly-created org repos start being watched.
  *     events:
  *       - pull_request.opened
  *       - pull_request.synchronize
@@ -17,7 +20,8 @@
  *       - issues.opened
  *       - issues.closed
  *       - issue_comment.created
- *     interval: 60  # seconds
+ *     interval: 60         # seconds between polls
+ *     org_refresh: 3600    # seconds between org-repo re-enumerations
  */
 
 import type { FastifyInstance, FastifyRequest } from 'fastify';
@@ -31,9 +35,20 @@ import type { Logger } from 'pino';
 
 interface PollConfig {
     token: string;
-    repos: string[];
+    /** Explicit repos to watch (always included). Either this or `orgs`
+     *  — or both — must be supplied. Order: explicit repos are always
+     *  watched; org-enumerated repos are added on top. */
+    repos?: string[];
+    /** Orgs whose accessible repos to auto-enumerate via
+     *  `GET /orgs/{org}/repos`. Refreshed every `org_refresh` seconds. */
+    orgs?: string[];
     events?: string[];
     interval?: number;
+    /** Seconds between re-enumerations of `orgs`. Defaults to 3600 (1h).
+     *  Orgs don't churn often; the refresh primarily exists so a newly-
+     *  created repo eventually shows up in the watch set without a
+     *  restart. */
+    org_refresh?: number;
 }
 
 interface PollState {
@@ -59,6 +74,11 @@ interface PollState {
 
 const GITHUB_API = 'https://api.github.com';
 const DEFAULT_INTERVAL = 60;
+/** Default cadence for re-enumerating orgs. 1 hour is well below the
+ *  rate-limit budget for `/orgs/{org}/repos` (5000/h authenticated) for
+ *  any realistic number of orgs, and is short enough that newly-created
+ *  org repos start being watched within an hour without a restart. */
+const DEFAULT_ORG_REFRESH = 3600;
 
 const SUPPORTED_EVENTS = [
     'pull_request.opened',
@@ -88,28 +108,53 @@ export class GitHubPollIntegration implements Integration {
         seeded: false,
     };
     private timer: ReturnType<typeof setInterval> | null = null;
+    private orgRefreshTimer: ReturnType<typeof setInterval> | null = null;
     private onEvent: EventHandler | null = null;
     private enabledEvents: Set<string> = new Set();
+    /** Repos supplied verbatim in `config.repos`. Never mutated after init —
+     *  these are always watched regardless of org-refresh outcomes. */
+    private explicitRepos = new Set<string>();
+    /** Per-org enumerated repo sets, keyed by org name. Each entry is
+     *  REPLACED on every refresh so repos that were removed or made
+     *  private silently drop out of the watch set instead of accumulating. */
+    private orgRepos = new Map<string, Set<string>>();
 
     async initialize(config: IntegrationConfig, _logger: Logger): Promise<void> {
         this.config = config as unknown as PollConfig;
         if (!this.config.token) {
             throw new Error('github-poll: token is required');
         }
-        if (!this.config.repos?.length) {
-            throw new Error('github-poll: at least one repo is required');
+        if (!this.config.repos?.length && !this.config.orgs?.length) {
+            throw new Error('github-poll: at least one of `repos` or `orgs` is required');
         }
         this.enabledEvents = new Set(this.config.events ?? SUPPORTED_EVENTS);
+
+        // Seed explicit repos immediately. Org enumeration is async and
+        // happens in registerRoutes (we don't want initialize to block on
+        // network during engine startup).
+        this.explicitRepos = new Set(this.config.repos ?? []);
     }
 
     registerRoutes(server: FastifyInstance, onEvent: EventHandler): void {
         this.onEvent = onEvent;
-        // No HTTP routes needed — polling is timer-based
-        // Start polling after a short delay to let the server finish booting
+        // No HTTP routes needed — polling is timer-based.
+        // Start polling after a short delay to let the server finish booting.
         const interval = (this.config.interval ?? DEFAULT_INTERVAL) * 1000;
+        const orgRefreshMs = (this.config.org_refresh ?? DEFAULT_ORG_REFRESH) * 1000;
         setTimeout(() => {
-            this.poll(); // Initial poll to seed state
-            this.timer = setInterval(() => this.poll(), interval);
+            // Block the first poll on the initial org enumeration so the
+            // seed run sees the full repo set. Subsequent refreshes
+            // happen on a separate timer in the background.
+            void this.refreshOrgRepos().then(() => {
+                void this.poll();
+                this.timer = setInterval(() => this.poll(), interval);
+                if ((this.config.orgs?.length ?? 0) > 0) {
+                    this.orgRefreshTimer = setInterval(
+                        () => this.refreshOrgRepos(),
+                        orgRefreshMs,
+                    );
+                }
+            });
         }, 2000);
     }
 
@@ -124,12 +169,60 @@ export class GitHubPollIntegration implements Integration {
             clearInterval(this.timer);
             this.timer = null;
         }
+        if (this.orgRefreshTimer) {
+            clearInterval(this.orgRefreshTimer);
+            this.orgRefreshTimer = null;
+        }
+    }
+
+    /** Union of explicit repos + every org's enumerated repos. Computed
+     *  on demand so the poll loop always sees the latest refresh state. */
+    private allRepos(): Set<string> {
+        const out = new Set<string>(this.explicitRepos);
+        for (const repos of this.orgRepos.values()) {
+            for (const r of repos) out.add(r);
+        }
+        return out;
+    }
+
+    /** Re-enumerate every configured org and REPLACE its slot in
+     *  `this.orgRepos`. A network failure for one org logs and keeps
+     *  that org's previous set in place — beats blanking the watch
+     *  list because of a transient API hiccup. */
+    private async refreshOrgRepos(): Promise<void> {
+        for (const org of this.config.orgs ?? []) {
+            try {
+                const repos = await this.enumerateOrgRepos(org);
+                this.orgRepos.set(org, new Set(repos));
+            } catch (err) {
+                console.error(
+                    `github-poll: failed to refresh repos for org "${org}":`,
+                    (err as Error).message,
+                );
+            }
+        }
+    }
+
+    private async enumerateOrgRepos(org: string): Promise<string[]> {
+        // `type=all` returns public + private repos the token can see;
+        // `sort=updated` puts active repos first which doesn't matter
+        // for correctness but makes the early-pagination cancel paths
+        // (rate-limit, network blip) skew toward useful entries.
+        const url = `${GITHUB_API}/orgs/${encodeURIComponent(org)}/repos?per_page=100&type=all&sort=updated`;
+        const data = await this.apiGet(url);
+        if (!Array.isArray(data)) return [];
+        return data
+            .map((r) => (r as Record<string, unknown>).full_name)
+            .filter((n): n is string => typeof n === 'string' && n.length > 0);
     }
 
     // ─── Polling Logic ──────────────────────────────────────────────────
 
     private async poll(): Promise<void> {
-        for (const repoFull of this.config.repos) {
+        // Iterate the union of explicit + org-enumerated repos. Computed
+        // fresh each poll so a background org refresh that landed
+        // between cycles is picked up immediately.
+        for (const repoFull of this.allRepos()) {
             try {
                 await this.pollRepo(repoFull);
             } catch (err) {

@@ -224,7 +224,8 @@ that shipped them.
 
 **Shipped so far:** PR #4 (trigger filter parity + glob + exclude), PR #5
 (`ai.agent` loop compat via `parse_as_review`), PR #6 (`utility.shell-exec`),
-PR #7 (`flow.switch` + `flow.delay` + `flow.fail`).
+PR #7 (`flow.switch` + `flow.delay` + `flow.fail`), PR #8 (`github-poll`
+auto-enumerates orgs).
 
 ## A. Trigger nodes — filter parity & scoping
 
@@ -238,9 +239,10 @@ PR #7 (`flow.switch` + `flow.delay` + `flow.fail`).
 - [ ] **Draft-PR filter** as a first-class port *(workaround: `filters: { "payload.pull_request.draft": "false" }`)*
 - [ ] **Comment-author filter** on `issue_comment.created`. Today `trigger.author` only matches PR/issue authors, not commenters.
 - [ ] **Bot-author exclusion** as a built-in (e.g. `skip_bots: true`)
-- [ ] **Org-wide repo scoping** — "watch all repos in `my-org`":
+- [x] **Org-wide repo scoping** — "watch all repos in `my-org`":
   - [x] Engine: glob in `trigger.repo` shorthand — **PR #4** (`repo: my-org/*` now matches via `globMatch`)
-  - [ ] Pollers: auto-enumerate repos via `/orgs/{org}/repos` or `gh repo list <org>` — still missing
+  - [x] `github-poll` auto-enumerate via `/orgs/{org}/repos` — **PR #8** (`orgs: [my-org]` config + 1h refresh + per-org Set replacement on refresh)
+  - [ ] `gh-cli` org-wide enumeration — still missing; current `gh search prs --author @me` polling needs restructure to support all-author org watching (separate design)
 - [ ] **"All repos I have access to"** mode for `gh-cli`
 - [ ] **PR base-branch filter** distinct from `trigger.branch` semantics (currently overloaded — `trigger.branch` already matches base ref; head-branch filter is missing)
 - [ ] **Path filter** — only fire when files matching `src/**/*.ts` changed
@@ -431,8 +433,9 @@ These are the gaps most often hit by realistic auto-PR-reviewer workflows
 - A10 org-wide repo scoping — engine half ✅ PR #4; **poller half still missing**
 - ~~D8 `ai.agent` emits `parsed` / `runId`~~ ✅ PR #5
 - ~~F1 shell-exec node~~ ✅ PR #6
-- E1 `flow.foreach` — **next** (still genuine engine surgery)
+- E1 `flow.foreach` — **the last remaining P0** (genuine engine surgery)
 - ~~E4 `flow.switch`~~ ✅ PR #7 (bundled with `flow.delay` + `flow.fail`)
+- ~~A10 poller half (github-poll)~~ ✅ PR #8 (gh-cli half deferred — different polling shape)
 
 **P1 — frequently asked, currently painful:**
 - C1/C3/C4 request reviewers, assign/unassign, close issue

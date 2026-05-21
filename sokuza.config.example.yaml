@@ -59,6 +59,19 @@ integrations:
     webhookSecret: "${GITHUB_WEBHOOK_SECRET}"
     token: "${GITHUB_TOKEN}"
 
+  # GitHub Polling — alternative to webhooks. Polls the REST API on a
+  # timer to detect new PRs / issues / pushes / etc. No public URL
+  # required. Supply at least one of `repos` (explicit list) or `orgs`
+  # (auto-enumerated). The two are unioned + deduplicated.
+  # github-poll:
+  #   token: "${GITHUB_TOKEN}"
+  #   repos:                          # explicit repos to watch
+  #     - my-team/critical-service
+  #   orgs:                           # auto-enumerate whole orgs
+  #     - my-org                      # repos refreshed every org_refresh seconds
+  #   interval: 60                    # poll cadence (default 60s)
+  #   org_refresh: 3600               # org re-enumeration cadence (default 1h)
+
   # Slack — receives events at /webhooks/slack/events
   #         receives slash commands at /webhooks/slack/commands
   # slack:

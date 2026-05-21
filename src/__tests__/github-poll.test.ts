@@ -102,11 +102,24 @@ describe('GitHubPollIntegration', () => {
             ).rejects.toThrow('token is required');
         });
 
-        it('should throw if repos is empty', async () => {
+        it('should throw if both repos and orgs are empty', async () => {
+            // Validation widened to accept either source — but at least
+            // one of them must be supplied, otherwise there's nothing
+            // for the poll loop to iterate over.
             const integration = new GitHubPollIntegration();
             await expect(
                 integration.initialize({ token: 'tok', repos: [] }),
-            ).rejects.toThrow('at least one repo');
+            ).rejects.toThrow('at least one of `repos` or `orgs`');
+        });
+
+        it('accepts orgs-only config (no explicit repos)', async () => {
+            // The new path: a user wants to watch all repos in an org
+            // without listing them. Validation must accept this even
+            // though `repos` is empty / unset.
+            const integration = new GitHubPollIntegration();
+            await expect(
+                integration.initialize({ token: 'tok', orgs: ['my-org'] }),
+            ).resolves.toBeUndefined();
         });
     });
 
@@ -470,6 +483,178 @@ describe('GitHubPollIntegration', () => {
 
             // Should still get the event from good-repo
             expect(emitted).toHaveLength(1);
+        });
+    });
+
+    // ─── Org enumeration ────────────────────────────────────────────────────
+    //
+    // The integration polls a union of `config.repos` (explicit list) and
+    // `config.orgs` (auto-enumerated via /orgs/{org}/repos). The enumeration
+    // happens in registerRoutes (after server boot), which the existing
+    // setupAndPoll helper bypasses by driving poll() directly. These tests
+    // drive `refreshOrgRepos()` explicitly so we can observe the resulting
+    // watch set without spinning up a real timer.
+
+    describe('org enumeration', () => {
+        async function makeIntegrationWithOrgs(opts: {
+            repos?: string[];
+            orgs?: string[];
+            apiResponses: (url: string) => unknown;
+        }): Promise<{ integration: GitHubPollIntegration; emitted: EventPayload[] }> {
+            const emitted: EventPayload[] = [];
+            const integration = new GitHubPollIntegration();
+            await integration.initialize({
+                token: 'tok',
+                repos: opts.repos,
+                orgs: opts.orgs,
+            });
+            const fakeServer = {} as any;
+            integration.registerRoutes(fakeServer, async (e) => { emitted.push(e); });
+            integration.stop(); // We'll drive poll() + refreshOrgRepos() by hand.
+
+            const fetchMock = vi.fn(async (url: string | URL | Request) => ({
+                ok: true,
+                status: 200,
+                statusText: 'OK',
+                headers: { get: () => null },
+                json: async () => opts.apiResponses(String(url)),
+            })) as unknown as typeof globalThis.fetch;
+            globalThis.fetch = fetchMock;
+
+            return { integration, emitted };
+        }
+
+        it('enumerates /orgs/{org}/repos and adds them to the watch set', async () => {
+            const { integration } = await makeIntegrationWithOrgs({
+                orgs: ['my-org'],
+                apiResponses: (url) => {
+                    if (url.includes('/orgs/my-org/repos')) {
+                        return [
+                            { full_name: 'my-org/alpha' },
+                            { full_name: 'my-org/beta' },
+                        ];
+                    }
+                    return [];
+                },
+            });
+
+            await (integration as any).refreshOrgRepos();
+            const watched = (integration as any).allRepos() as Set<string>;
+
+            expect(watched.has('my-org/alpha')).toBe(true);
+            expect(watched.has('my-org/beta')).toBe(true);
+            expect(watched.size).toBe(2);
+        });
+
+        it('merges explicit repos with enumerated org repos (dedup on overlap)', async () => {
+            // Real-world setup: a workflow watches a specific repo plus
+            // the rest of an org. The watch set must be the union, with
+            // overlap deduplicated so the poll loop doesn't hit the same
+            // repo twice per cycle.
+            const { integration } = await makeIntegrationWithOrgs({
+                repos: ['my-org/alpha', 'other-org/standalone'],
+                orgs: ['my-org'],
+                apiResponses: (url) => {
+                    if (url.includes('/orgs/my-org/repos')) {
+                        return [
+                            { full_name: 'my-org/alpha' },     // overlap
+                            { full_name: 'my-org/beta' },
+                        ];
+                    }
+                    return [];
+                },
+            });
+
+            await (integration as any).refreshOrgRepos();
+            const watched = (integration as any).allRepos() as Set<string>;
+
+            expect(watched.has('my-org/alpha')).toBe(true);
+            expect(watched.has('my-org/beta')).toBe(true);
+            expect(watched.has('other-org/standalone')).toBe(true);
+            expect(watched.size).toBe(3);
+        });
+
+        it('REPLACES (not merges) per-org sets on refresh — removed repos drop out', async () => {
+            // The point of refresh: if a repo is removed from the org or
+            // made private, it should stop being polled. Implemented by
+            // REPLACING the org's Set on each refresh, not accumulating.
+            // Without this guard, a deleted-and-recreated repo would be
+            // permanently watched even after admin action.
+            let call = 0;
+            const { integration } = await makeIntegrationWithOrgs({
+                orgs: ['my-org'],
+                apiResponses: (url) => {
+                    if (!url.includes('/orgs/my-org/repos')) return [];
+                    call++;
+                    if (call === 1) {
+                        return [
+                            { full_name: 'my-org/alpha' },
+                            { full_name: 'my-org/beta' },
+                        ];
+                    }
+                    // Second call: beta is gone (deleted / made private).
+                    return [{ full_name: 'my-org/alpha' }];
+                },
+            });
+
+            await (integration as any).refreshOrgRepos();
+            expect(((integration as any).allRepos() as Set<string>).size).toBe(2);
+
+            await (integration as any).refreshOrgRepos();
+            const watched = (integration as any).allRepos() as Set<string>;
+            expect(watched.has('my-org/alpha')).toBe(true);
+            expect(watched.has('my-org/beta')).toBe(false);
+            expect(watched.size).toBe(1);
+        });
+
+        it('keeps the prior org set on refresh failure (transient API error)', async () => {
+            // Defense: an org-enumeration failure shouldn't blank the
+            // watch list. We log and keep the previous Set so the next
+            // poll still has work to do.
+            let call = 0;
+            const { integration } = await makeIntegrationWithOrgs({
+                orgs: ['my-org'],
+                apiResponses: (url) => {
+                    if (!url.includes('/orgs/my-org/repos')) return [];
+                    call++;
+                    if (call === 1) {
+                        return [{ full_name: 'my-org/alpha' }];
+                    }
+                    // Second call: simulate transient failure.
+                    throw new Error('rate limit exceeded');
+                },
+            });
+            // First refresh succeeds; second throws but is caught.
+            await (integration as any).refreshOrgRepos();
+            await (integration as any).refreshOrgRepos();
+
+            const watched = (integration as any).allRepos() as Set<string>;
+            expect(watched.has('my-org/alpha')).toBe(true);
+            expect(watched.size).toBe(1);
+        });
+
+        it('isolates one failing org from another (one org down does not blank others)', async () => {
+            // Two orgs configured. If the API blows up on the first, the
+            // second should still enumerate. Pin this so a future
+            // refactor that uses Promise.all instead of sequential
+            // iteration would have to deliberately re-add the isolation.
+            const { integration } = await makeIntegrationWithOrgs({
+                orgs: ['bad-org', 'good-org'],
+                apiResponses: (url) => {
+                    if (url.includes('/orgs/bad-org/repos')) {
+                        throw new Error('API error');
+                    }
+                    if (url.includes('/orgs/good-org/repos')) {
+                        return [{ full_name: 'good-org/healthy' }];
+                    }
+                    return [];
+                },
+            });
+
+            await (integration as any).refreshOrgRepos();
+            const watched = (integration as any).allRepos() as Set<string>;
+            expect(watched.has('good-org/healthy')).toBe(true);
+            expect(watched.size).toBe(1);
         });
     });
 });
