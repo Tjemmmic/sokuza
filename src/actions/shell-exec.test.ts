@@ -233,7 +233,11 @@ describe('shell-exec — max_output_bytes', () => {
         ) as Output;
         expect(result.truncated).toBe(true);
         expect(result.success).toBe(false);
-        expect(result.stdout.length).toBeLessThanOrEqual(1024);
+        // The cap is enforced on UTF-8 bytes (not UTF-16 code units),
+        // so the assertion must use Buffer.byteLength too — otherwise
+        // a future test-data change to include multi-byte UTF-8 would
+        // silently weaken this test.
+        expect(Buffer.byteLength(result.stdout, 'utf8')).toBeLessThanOrEqual(1024);
         // Should have terminated well under the 10s timeout — the cap,
         // not the timeout, is what killed it.
         expect(result.durationMs).toBeLessThan(5000);
@@ -254,9 +258,13 @@ describe('shell-exec — max_output_bytes', () => {
             ctx(),
         ) as Output;
         expect(result.truncated).toBe(true);
-        // Allow a small slack for the final chunk that landed before
-        // SIGTERM took effect, but assert we're nowhere near 2× the cap.
-        const totalBytes = result.stdout.length + result.stderr.length;
+        // The cap is enforced on UTF-8 bytes. Use Buffer.byteLength so
+        // this test stays correct if test data ever includes multi-byte
+        // characters — otherwise we'd be measuring UTF-16 code units
+        // and could pass even with a per-stream tracking regression.
+        const totalBytes =
+            Buffer.byteLength(result.stdout, 'utf8') +
+            Buffer.byteLength(result.stderr, 'utf8');
         expect(totalBytes).toBeLessThanOrEqual(2048);
     });
 });
