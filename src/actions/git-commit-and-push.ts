@@ -1,6 +1,7 @@
-import { isAbsolute, normalize, resolve as resolvePath } from 'node:path';
+import { isAbsolute, normalize } from 'node:path';
 import type { ActionContext, ActionHandler } from '../core/types.js';
 import { execGit, execGitOutput } from '../integrations/github/git-helpers.js';
+import { validateWorkdir } from './_workdir-validation.js';
 
 /**
  * "git-commit-and-push" — generic git wrapper used by graph workflows
@@ -36,7 +37,7 @@ import { execGit, execGitOutput } from '../integrations/github/git-helpers.js';
  *     run to completion after the workflow has been declared aborted.
  */
 export const gitCommitAndPushAction: ActionHandler = async (params, context) => {
-    const workdir = validateWorkdir(params.workdir);
+    const workdir = validateWorkdir(params.workdir, 'git-commit-and-push');
     const message = params.message as string;
     if (!message) throw new Error('git-commit-and-push: message is required');
 
@@ -78,60 +79,6 @@ export const gitCommitAndPushAction: ActionHandler = async (params, context) => 
 
     return { pushed: true, hasChanges: true, sha, branch };
 };
-
-/**
- * Validate the user-supplied `workdir`. The previous version accepted
- * any string and passed it straight to `git add -A`, which on a
- * user-authored workflow YAML could point at any git repo on the host
- * (e.g. operator's local projects) and commit-then-push that repo's
- * contents under the action's identity. We can't pin to a single
- * allowlist (tmpdir / WorkdirManager root / chat-session paths / custom
- * destDir all legitimate), so this is a defensive deny-list that
- * matches the spirit of the existing `validatePath`/`validateRemoteName`
- * checks: refuse injection-shaped strings and obviously sensitive
- * system paths.
- */
-function validateWorkdir(raw: unknown): string {
-    if (typeof raw !== 'string' || raw.length === 0) {
-        throw new Error('git-commit-and-push: workdir is required');
-    }
-    if (raw.includes('\0')) {
-        throw new Error('git-commit-and-push: workdir contains NUL character');
-    }
-    if (/[\x00-\x1f\x7f]/.test(raw)) {
-        throw new Error('git-commit-and-push: workdir contains control characters');
-    }
-    if (raw.startsWith('-')) {
-        // Defence-in-depth: spawn passes cwd via the options object so a
-        // leading '-' can't reach argv as a flag, but a path that looks
-        // like a flag is almost certainly a misconfiguration we'd rather
-        // fail loudly on.
-        throw new Error(`git-commit-and-push: workdir must not start with "-" (got ${JSON.stringify(raw)})`);
-    }
-    if (!isAbsolute(raw)) {
-        throw new Error(`git-commit-and-push: workdir must be an absolute path (got ${JSON.stringify(raw)})`);
-    }
-    const resolved = resolvePath(raw);
-    if (resolved === '/' || resolved === '\\') {
-        throw new Error('git-commit-and-push: workdir must not be the filesystem root');
-    }
-    for (const denied of FORBIDDEN_WORKDIR_PREFIXES) {
-        if (resolved === denied || resolved.startsWith(denied + '/')) {
-            throw new Error(`git-commit-and-push: workdir resolves to a sensitive system path (${resolved})`);
-        }
-    }
-    return raw;
-}
-
-/** System paths that should never be operated on as a git working tree.
- *  Order doesn't matter — we check exact match and prefix-with-slash so
- *  `/etc-customer` won't accidentally match `/etc`. */
-const FORBIDDEN_WORKDIR_PREFIXES: readonly string[] = [
-    '/etc', '/proc', '/sys', '/dev', '/boot', '/root',
-    '/usr', '/bin', '/sbin',
-    '/lib', '/lib32', '/lib64',
-    '/var/log', '/var/lib', '/var/run',
-];
 
 /**
  * Validate + normalise the user-supplied `paths` param. Returns:
