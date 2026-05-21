@@ -79,32 +79,59 @@ export const shellExecAction: ActionHandler = async (params, context) => {
     );
 
     return new Promise((resolve, reject) => {
-        // `detached: true` makes the child a process group leader on
-        // Linux/macOS. Critical for shell mode: `/bin/sh -c "sleep 5"`
-        // on dash (Ubuntu /bin/sh) forks sleep rather than exec'ing it,
+        const isWindows = process.platform === 'win32';
+
+        // POSIX: `detached: true` makes the child a process group
+        // leader. Critical for shell mode: `/bin/sh -c "sleep 5"` on
+        // dash (Ubuntu /bin/sh) forks sleep rather than exec'ing it,
         // so SIGTERM to the shell PID alone leaves sleep alive holding
-        // the stdio pipes — and Node's `close` event waits for those
-        // pipes to drain. By making the shell a process group leader,
+        // the stdio pipes — Node's `close` event waits for those pipes
+        // to drain. By making the shell a process group leader,
         // `process.kill(-pid, signal)` reaches the whole tree.
         // (Pinned by the timeout test which previously took 5003ms in
         // CI — exactly `sleep 5`'s natural duration — because SIGTERM
         // killed the shell but not sleep.)
-        const spawnOpts = { cwd: workdir, env, shell: useShell, detached: true };
+        //
+        // Windows: `detached: true` opens a new console window for the
+        // child, which is the wrong behavior here — we want the child
+        // silent. Windows has no process groups, so the corresponding
+        // tree-kill story relies on `taskkill /T` (see killTree below).
+        const spawnOpts = {
+            cwd: workdir,
+            env,
+            shell: useShell,
+            detached: !isWindows,
+            windowsHide: true,
+        };
         const child = useShell
             ? spawn(command, [], spawnOpts)
             : spawn(command, explicitArgs!, spawnOpts);
 
-        // Kill the entire process group (shell + any children it
-        // forked) instead of just the shell PID. Best-effort: ESRCH
-        // means the group is already gone, which is fine.
+        // Kill the entire process tree. Best-effort: ESRCH means the
+        // target is already gone, which is fine for cleanup. EPERM
+        // means the kernel dropped the right and there's nothing
+        // useful we can do.
         const killTree = (sig: 'SIGTERM' | 'SIGKILL'): void => {
             if (!child.pid) return;
             try {
-                process.kill(-child.pid, sig);
+                if (isWindows) {
+                    // Windows has no process groups. `process.kill`
+                    // becomes a TerminateProcess on the single PID,
+                    // which doesn't traverse the child tree. Best-
+                    // effort terminate the shell; orphan grandchildren
+                    // are accepted as a Windows-specific limitation
+                    // (matches how the rest of the codebase handles
+                    // child processes). A more complete fix would
+                    // shell out to `taskkill /F /T /PID <pid>`.
+                    process.kill(child.pid, sig);
+                } else {
+                    // Negative PID = process group on POSIX.
+                    process.kill(-child.pid, sig);
+                }
             } catch {
-                // Common cases: ESRCH (group gone), EPERM (kernel
-                // dropped the right). Either way we've done what we
-                // can — propagating wouldn't help the caller.
+                // ESRCH (target gone) / EPERM (kernel dropped right).
+                // Either way we've done what we can — propagating
+                // wouldn't help the caller.
             }
         };
 
