@@ -1,0 +1,99 @@
+# Switch on PR Review Decision
+#
+# Demonstrates `flow.switch`: routing a value to one of N case branches
+# based on equality match. Here we run an AI review, then switch on the
+# review's `decision` field to take different actions depending on
+# whether the AI approved, requested changes, or returned something
+# unrecognised.
+#
+# Exercises: flow.switch
+#
+# Usage:
+#   - name: switch-review-decision
+#     template: flow-switch-demo
+
+description: Branch the workflow N ways on the AI review's decision
+icon: 🎚️
+
+trigger:
+  source: github
+  event: pull_request.opened
+
+graph:
+  nodes:
+    - id: trigger
+      type: trigger.github
+      position: { x: 60, y: 240 }
+      config:
+        events: [pull_request.opened]
+    - id: diff
+      type: github.fetch-diff
+      position: { x: 360, y: 240 }
+      config: {}
+    - id: review
+      type: ai.review
+      position: { x: 660, y: 240 }
+      config: {}
+    # The review's full structured object isn't a useful switch input
+    # (stringifies to "[object Object]"). Extract the `decision` scalar
+    # so the switch can equality-match on it.
+    - id: decision
+      type: data.json-pluck
+      position: { x: 980, y: 240 }
+      config:
+        path: decision
+    - id: route
+      type: flow.switch
+      position: { x: 1280, y: 240 }
+      config:
+        # Each row is a case. Left = the value to match against `value`.
+        # Right = the output port name that fires for that value.
+        # Multiple match values can share a port (e.g. mapping both
+        # "OPEN" and "REOPENED" to a single "active" branch).
+        cases:
+          APPROVE: approved
+          CHANGES_REQUESTED: blocked
+    - id: notify_approved
+      type: utility.log
+      position: { x: 1620, y: 80 }
+      config:
+        message: "AI approved PR"
+        level: info
+    - id: notify_blocked
+      type: utility.log
+      position: { x: 1620, y: 240 }
+      config:
+        message: "AI requested changes — needs follow-up"
+        level: warn
+    - id: notify_unknown
+      type: utility.log
+      position: { x: 1620, y: 400 }
+      config:
+        message: "AI returned an unrecognised decision — investigate the review record"
+        level: warn
+  edges:
+    - from: { node: trigger, port: prNumber }
+      to: { node: diff, port: pr_number }
+    - from: { node: trigger, port: repo }
+      to: { node: diff, port: repo }
+    - from: { node: diff, port: diff }
+      to: { node: review, port: diff }
+    - from: { node: trigger, port: prNumber }
+      to: { node: review, port: pr_number }
+    - from: { node: trigger, port: repo }
+      to: { node: review, port: repo }
+    # Pluck `decision` out of the structured review, then feed that
+    # scalar into the switch.
+    - from: { node: review, port: structured }
+      to: { node: decision, port: from }
+    - from: { node: decision, port: value }
+      to: { node: route, port: value }
+    # Each downstream branch gates on the `*Fired`-style sentinel: the
+    # case port fires only when that match was taken, so wiring its
+    # output to a condition: gate keeps the other branches dormant.
+    - from: { node: route, port: approved }
+      to: { node: notify_approved, port: __seq }
+    - from: { node: route, port: blocked }
+      to: { node: notify_blocked, port: __seq }
+    - from: { node: route, port: default }
+      to: { node: notify_unknown, port: __seq }

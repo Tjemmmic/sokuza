@@ -1,0 +1,53 @@
+# Delayed Slack Notification
+#
+# Demonstrates `flow.delay`: pause for N seconds before continuing.
+# Useful for rate-limiting against external APIs, giving downstream
+# webhooks time to settle, or scheduling a follow-up touch on a PR.
+#
+# Exercises: flow.delay
+#
+# Usage:
+#   - name: delayed-notify
+#     template: flow-delay-demo
+
+description: Wait 30 seconds after a PR opens before posting the welcome comment
+icon: ⏲️
+
+trigger:
+  source: github
+  event: pull_request.opened
+
+graph:
+  nodes:
+    - id: trigger
+      type: trigger.github
+      position: { x: 60, y: 240 }
+      config:
+        events: [pull_request.opened]
+    # Brief settle period before commenting — for the "welcome!" use
+    # case bump this to e.g. 30 so the comment doesn't land in the
+    # middle of a follow-up push burst. Kept tiny in the shipped demo
+    # so the library-execution smoke test stays fast.
+    - id: wait
+      type: flow.delay
+      position: { x: 360, y: 240 }
+      config:
+        seconds: 0.1
+    - id: greet
+      type: github.comment
+      position: { x: 660, y: 240 }
+      config:
+        body: |
+          👋 Thanks for the PR! A reviewer will take a look shortly.
+  edges:
+    - from: { node: trigger, port: event }
+      to: { node: wait, port: value }
+    - from: { node: trigger, port: prNumber }
+      to: { node: greet, port: pr_number }
+    - from: { node: trigger, port: repo }
+      to: { node: greet, port: repo }
+    # __seq edge enforces order: greet runs only after the delay
+    # resolves. Without this the greet would be scheduled in the same
+    # graph layer and could fire before the delay finishes.
+    - from: { node: wait, port: delayed }
+      to: { node: greet, port: __seq }
