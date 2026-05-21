@@ -149,7 +149,7 @@ export const shellExecAction: ActionHandler = async (params, context) => {
 
         const captureFromStream = (stream: 'stdout' | 'stderr') => (chunk: Buffer) => {
             const remaining = maxBytes - capturedBytes;
-            if (remaining <= 0) return; // already full
+            if (remaining <= 0) return; // cap already hit, kill already in flight
             const accepted = chunk.length > remaining ? chunk.subarray(0, remaining) : chunk;
             if (stream === 'stdout') {
                 stdoutChunks.push(accepted);
@@ -157,7 +157,15 @@ export const shellExecAction: ActionHandler = async (params, context) => {
                 stderrChunks.push(accepted);
             }
             capturedBytes += accepted.length;
-            if (chunk.length > remaining && !truncated) {
+            // Trigger truncation + kill when capturedBytes reaches the
+            // cap — not only when a chunk overflows it. Subtle but
+            // load-bearing: when a chunk's length exactly equals
+            // `remaining` (e.g. a 5-byte write into 5 remaining bytes),
+            // `chunk.length > remaining` is false but we DID hit the
+            // cap. The previous strict-`>` check left `truncated: false`
+            // and never SIGTERM'd — the process then kept running and
+            // silently dropped subsequent output.
+            if (capturedBytes >= maxBytes && !truncated) {
                 truncated = true;
                 killTree('SIGTERM');
                 killHard();

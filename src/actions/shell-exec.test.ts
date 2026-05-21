@@ -243,6 +243,32 @@ describe('shell-exec — max_output_bytes', () => {
         expect(result.durationMs).toBeLessThan(5000);
     });
 
+    it('triggers truncation + kill when bytes exactly fill the cap', { timeout: 15000 }, async () => {
+        // Boundary regression: when a chunk's length exactly equals
+        // `remaining` (capturedBytes incrementally reaches maxBytes
+        // without any single chunk exceeding it), the previous strict-
+        // `>` check left `truncated: false` and never SIGTERM'd. The
+        // child then ran to natural completion, silently dropping any
+        // subsequent output. Here, `printf hello` writes exactly 5
+        // bytes — matching maxBytes — then `sleep 10` would normally
+        // run to completion. With the fix, the cap is detected after
+        // printf and the sleep is killed promptly.
+        const result = await shellExecAction(
+            {
+                workdir,
+                command: 'printf hello; sleep 10',
+                max_output_bytes: 5,
+                timeout_seconds: 30,
+            },
+            ctx(),
+        ) as Output;
+        expect(result.truncated).toBe(true);
+        expect(result.success).toBe(false);
+        // Killed promptly after hitting the cap, NOT after sleep's
+        // natural 10s — pre-fix would clock in around 10000ms.
+        expect(result.durationMs).toBeLessThan(3000);
+    });
+
     it('caps total bytes across stdout + stderr (not per-stream)', { timeout: 15000 }, async () => {
         // Pin against the per-stream-tracking bug where stdout could
         // grow to maxBytes AND stderr could independently grow to
