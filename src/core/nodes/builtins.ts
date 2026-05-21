@@ -1010,7 +1010,7 @@ const switchNode: NodeDefinition = {
     dynamicOutputs: [
         { kind: 'per-config-value', configKey: 'cases', portType: 'any', helpTextPrefix: 'Case branch' },
     ],
-    execute: async (inputs) => {
+    execute: async (inputs, ctx) => {
         const valueStr = inputs.value === undefined || inputs.value === null
             ? ''
             : String(inputs.value).trim();
@@ -1024,11 +1024,31 @@ const switchNode: NodeDefinition = {
         for (const [matchValue, portName] of Object.entries(cases)) {
             if (matchValue.trim() !== valueStr) continue;
             if (typeof portName !== 'string' || !portName) continue;
+            // Reserved port names collide with the static outputs. Returning
+            // `{ matched: <value>, matched: portName }` would silently
+            // discard the value (JS duplicate-key rule: last wins), and
+            // returning `{ default: <value>, matched: 'default' }` is
+            // indistinguishable from the no-match fallback. Log a warning
+            // and treat the case as if it didn't exist — the user will see
+            // the value flow to `default` instead, which surfaces the
+            // misconfiguration in their workflow inspector.
+            if (SWITCH_RESERVED_PORTS.has(portName)) {
+                ctx.logger.warn(
+                    { matchValue, portName },
+                    `flow.switch: case port name "${portName}" collides with a reserved static output; skipping. Rename the case to use a different port name.`,
+                );
+                continue;
+            }
             return { [portName]: inputs.value ?? true, matched: portName };
         }
         return { default: inputs.value ?? true, matched: 'default' };
     },
 };
+
+/** Static output port names that case configs must not clobber. Kept as a
+ *  module-level constant so the resolver in types.ts could share it if we
+ *  ever want editor-side validation. */
+const SWITCH_RESERVED_PORTS = new Set(['default', 'matched']);
 
 // ─── flow.delay — pause N seconds ───────────────────────────────────────────
 //
@@ -1048,7 +1068,12 @@ const delayNode: NodeDefinition = {
     ports: [
         { name: 'seconds', label: 'Seconds', role: 'input', wire: true, config: true, control: 'number', type: 'number', required: true,
           helpText: 'How long to wait before forwarding `value`. Zero or negative skips the wait.' },
-        { name: 'value', label: 'Pass-through Value', role: 'input', wire: true, config: true, control: 'textarea', type: 'any',
+        // Input named `input` to avoid colliding with the output port
+        // `value`. Matches the convention used by `flow.set` (input port
+        // `input`, output port `value`); without distinct names, tooling
+        // that looks up ports by name alone — without the role filter —
+        // can't reliably tell them apart.
+        { name: 'input', label: 'Pass-through Value', role: 'input', wire: true, config: true, control: 'textarea', type: 'any',
           helpText: 'Optional. Forwarded as-is on `value` after the delay.' },
         { name: 'value', label: 'Value (after delay)', role: 'output', wire: true, type: 'any' },
         { name: 'delayed', label: 'Delayed?', role: 'output', wire: true, type: 'boolean',
@@ -1060,7 +1085,7 @@ const delayNode: NodeDefinition = {
             ? rawSeconds
             : Number(rawSeconds);
         if (!Number.isFinite(seconds) || seconds <= 0) {
-            return { value: inputs.value, delayed: false };
+            return { value: inputs.input, delayed: false };
         }
         const signal = ctx.signal;
         if (signal?.aborted) {
@@ -1077,7 +1102,7 @@ const delayNode: NodeDefinition = {
             };
             if (signal) signal.addEventListener('abort', onAbort, { once: true });
         });
-        return { value: inputs.value, delayed: true };
+        return { value: inputs.input, delayed: true };
     },
 };
 

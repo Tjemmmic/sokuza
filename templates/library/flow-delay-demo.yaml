@@ -41,7 +41,7 @@ graph:
           👋 Thanks for the PR! A reviewer will take a look shortly.
   edges:
     - from: { node: trigger, port: event }
-      to: { node: wait, port: value }
+      to: { node: wait, port: input }
     - from: { node: trigger, port: prNumber }
       to: { node: greet, port: pr_number }
     - from: { node: trigger, port: repo }

@@ -169,6 +169,33 @@ describe('flow.switch — N-way branch', () => {
         expect(got.defaultVal).toBe('OPEN');
         expect(got.matched).toBe('default');
     });
+
+    // Regression: returning `{ matched: <value>, matched: portName }` is
+    // a JS duplicate-key spec violation — the actual value is silently
+    // discarded. Similarly `default` aliases the no-match fallback,
+    // making routing indistinguishable. The runtime now refuses to honor
+    // either; the value falls through to default so the misconfiguration
+    // is at least visible to the user (and a warning is logged).
+
+    it('skips a case whose port name collides with the reserved "matched" output', async () => {
+        const got = await runSwitch({
+            value: 'X',
+            cases: { X: 'matched' },
+            capturePorts: [],
+        });
+        expect(got.defaultVal).toBe('X');
+        expect(got.matched).toBe('default');
+    });
+
+    it('skips a case whose port name collides with the reserved "default" output', async () => {
+        const got = await runSwitch({
+            value: 'Y',
+            cases: { Y: 'default' },
+            capturePorts: [],
+        });
+        expect(got.defaultVal).toBe('Y');
+        expect(got.matched).toBe('default');
+    });
 });
 
 // ─── flow.switch dynamic ports ─────────────────────────────────────────────
@@ -228,7 +255,7 @@ describe('flow.delay', () => {
         const { captured, actions, registry } = captureNode(['outValue', 'delayed']);
         const graph: NodeGraph = {
             nodes: [
-                { id: 'd', type: 'flow.delay', config: { seconds, value } },
+                { id: 'd', type: 'flow.delay', config: { seconds, input: value } },
                 { id: 'cap', type: 'test.capture', config: {} },
             ],
             edges: [
