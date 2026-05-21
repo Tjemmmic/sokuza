@@ -126,17 +126,25 @@ export type NodeExecutor = (
 /**
  * Declarative recipe for adding extra output ports based on node config.
  * Lives in the serialized definition so the dashboard can render the
- * right ports without re-implementing trigger-specific logic. Two kinds:
+ * right ports without re-implementing trigger-specific logic. Three kinds:
  *
  *   - 'per-input': for the manual trigger. Reads `node.config.inputs` (a
  *     list of {name,label,type}) and adds one output port per entry.
  *
  *   - 'event-conditional': for source triggers. Adds the listed ports
  *     when *any* event in `node.config.events` matches one of `whenEvents`.
+ *
+ *   - 'per-config-value': for switch-style nodes. Reads
+ *     `node.config[configKey]` (a Record<string,string> kv map) and adds
+ *     one output port per unique VALUE. Used by `flow.switch` where the
+ *     user authors `cases: { APPROVE: approved, CHANGES_REQUESTED: blocked }`
+ *     and gets two output ports named `approved` and `blocked`. Duplicates
+ *     are deduplicated so multiple match values can fire the same port.
  */
 export type DynamicOutputSpec =
     | { kind: 'per-input'; inputsConfigKey: string }
-    | { kind: 'event-conditional'; eventsConfigKey: string; rules: Array<{ whenEvents: string[]; ports: NodePort[] }> };
+    | { kind: 'event-conditional'; eventsConfigKey: string; rules: Array<{ whenEvents: string[]; ports: NodePort[] }> }
+    | { kind: 'per-config-value'; configKey: string; portType?: NodePort['type']; helpTextPrefix?: string };
 
 export interface NodeDefinition {
     /** Unique node type, e.g. "github.fetch-diff" or "ai.review". */
@@ -243,6 +251,26 @@ export function resolveOutputPorts(def: NodeDefinition, nodeConfig: Record<strin
                     if (ports.some((existing) => existing.name === p.name)) continue;
                     ports.push(p);
                 }
+            }
+        } else if (spec.kind === 'per-config-value') {
+            const map = nodeConfig[spec.configKey];
+            if (!map || typeof map !== 'object' || Array.isArray(map)) continue;
+            // Iterate the kv map and create one output port per UNIQUE
+            // VALUE. Empty values are skipped (kv editor lets the user
+            // add unfinished rows). Duplicate values share a single port
+            // — that's the point: multiple match-values can route to the
+            // same downstream branch.
+            for (const value of Object.values(map as Record<string, unknown>)) {
+                if (typeof value !== 'string' || !value) continue;
+                if (ports.some((p) => p.name === value)) continue;
+                ports.push({
+                    name: value,
+                    label: value,
+                    role: 'output',
+                    wire: true,
+                    type: spec.portType ?? 'any',
+                    helpText: `${spec.helpTextPrefix ?? 'Case branch'}: ${value}`,
+                });
             }
         }
     }
