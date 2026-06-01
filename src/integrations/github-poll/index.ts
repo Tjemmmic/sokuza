@@ -333,7 +333,17 @@ export class GitHubPollIntegration implements Integration {
     /** Drop every per-repo entry from the poll state. Called for repos
      *  that just fell out of the watch-set union (org removed them, or
      *  the user re-configured). Long-lived processes with org churn
-     *  would otherwise accumulate map entries without bound. */
+     *  would otherwise accumulate map entries without bound.
+     *
+     *  Also removes the repo from `seededRepos` so that if it later
+     *  re-enters the watch set (a "briefly private, then public again"
+     *  churn path that org enumeration specifically enables), its first
+     *  re-poll is treated as a seed — populates the lastXxxIds snapshots
+     *  silently — rather than flooding `pull_request.opened` /
+     *  `issues.opened` / `push` / `issue_comment.created` for every
+     *  existing item it sees on the re-introduced repo. Forgetting this
+     *  delete defeats the entire per-repo seeding invariant on the
+     *  re-join case. */
     private pruneState(repoFull: string): void {
         this.state.lastPrIds.delete(repoFull);
         this.state.lastPrHeadShas.delete(repoFull);
@@ -343,6 +353,7 @@ export class GitHubPollIntegration implements Integration {
         this.state.lastBranchShas.delete(repoFull);
         this.state.lastCommentIds.delete(repoFull);
         this.state.lastReviewIds.delete(repoFull);
+        this.state.seededRepos.delete(repoFull);
     }
 
     private async enumerateOrgRepos(org: string): Promise<string[]> {

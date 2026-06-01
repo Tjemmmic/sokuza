@@ -1216,6 +1216,72 @@ describe('GitHubPollIntegration', () => {
                 globalThis.fetch = originalFetch;
             }
         });
+
+        it('treats a repo that left and re-entered the watch set as first-sight again', async () => {
+            // Sister to the basic per-repo seeding test. The org-refresh
+            // path can REMOVE a repo from the watch set (private flip /
+            // deleted / transferred out), then later RE-ADD it. The
+            // seededRepos set must be cleared by pruneState; otherwise
+            // the re-introduced repo's first poll runs with
+            // firstSight=false against empty lastXxxIds maps and floods
+            // pull_request.opened / issues.opened / push events for every
+            // existing item — the precise flood the per-repo seeding
+            // refactor exists to prevent.
+            const emitted: EventPayload[] = [];
+            const integration = new GitHubPollIntegration();
+            await integration.initialize({
+                token: 'tok',
+                orgs: ['my-org'],
+                events: ['pull_request.opened', 'issues.opened', 'push'],
+            }, TEST_LOGGER);
+            (integration as unknown as { onEvent: (e: EventPayload) => Promise<void> })
+                .onEvent = async (e) => { emitted.push(e); };
+
+            let orgCycle = 0;
+            const fetchMock = vi.fn(async (url: string | URL | Request) => {
+                const s = String(url);
+                if (s.includes('/orgs/my-org/repos')) {
+                    orgCycle++;
+                    if (orgCycle === 1) return jsonOk([{ full_name: 'my-org/beta' }]);
+                    if (orgCycle === 2) return jsonOk([]); // beta drops out
+                    return jsonOk([{ full_name: 'my-org/beta' }]); // beta returns
+                }
+                if (s.includes('/repos/my-org/beta/pulls')) {
+                    return jsonOk(Array.from({ length: 50 }, (_, i) => makePr({ number: i + 1 })));
+                }
+                if (s.includes('/repos/my-org/beta/issues')) {
+                    return jsonOk([makeIssue({ number: 500 }), makeIssue({ number: 501 })]);
+                }
+                if (s.includes('/repos/my-org/beta/branches')) {
+                    return jsonOk([makeBranch('main', 'sha-main')]);
+                }
+                return jsonOk([]);
+            }) as unknown as typeof globalThis.fetch;
+            const originalFetch = globalThis.fetch;
+            globalThis.fetch = fetchMock;
+
+            try {
+                // Cycle 1: beta enters, seeds silently.
+                await (integration as any).refreshOrgRepos();
+                await (integration as any).poll();
+                expect(emitted).toHaveLength(0);
+                expect((integration as any).state.seededRepos.has('my-org/beta')).toBe(true);
+
+                // Cycle 2: beta drops out. pruneState fires for it,
+                // which must also drop it from seededRepos.
+                await (integration as any).refreshOrgRepos();
+                expect((integration as any).state.seededRepos.has('my-org/beta')).toBe(false);
+                expect((integration as any).state.lastPrIds.has('my-org/beta')).toBe(false);
+
+                // Cycle 3: beta returns. Its first re-poll must SEED
+                // again — not flood 50 PR + 2 issue + 1 push emissions.
+                await (integration as any).refreshOrgRepos();
+                await (integration as any).poll();
+                expect(emitted).toHaveLength(0);
+            } finally {
+                globalThis.fetch = originalFetch;
+            }
+        });
     });
 });
 
