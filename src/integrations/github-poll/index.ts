@@ -118,11 +118,22 @@ export class GitHubPollIntegration implements Integration {
      *  was already in flight when stop was called bails out instead of
      *  arming a fresh interval on a stopped integration. */
     private stopped = false;
+    /** Re-entrance guard for `refreshOrgRepos`. Without this, a slow
+     *  enumeration cycle (large org, retries) running longer than
+     *  `org_refresh` would race a second concurrent refresh — both writing
+     *  to `this.orgRepos` for the same key with last-writer-wins ordering
+     *  that isn't tied to data freshness. */
+    private refreshing = false;
     private onEvent: EventHandler | null = null;
     private enabledEvents: Set<string> = new Set();
     /** Repos supplied verbatim in `config.repos`. Never mutated after init —
      *  these are always watched regardless of org-refresh outcomes. */
     private explicitRepos = new Set<string>();
+    /** Cleaned org list (trimmed, non-empty, deduped) derived from
+     *  `config.orgs` at init time. Empty/whitespace entries would otherwise
+     *  hit `/orgs//repos` (404), and duplicate entries would burn API quota
+     *  re-enumerating the same org on every refresh. */
+    private orgs: string[] = [];
     /** Per-org enumerated repo sets, keyed by org name. Each entry is
      *  REPLACED on every refresh so repos that were removed or made
      *  private silently drop out of the watch set instead of accumulating. */
@@ -133,9 +144,19 @@ export class GitHubPollIntegration implements Integration {
         if (!this.config.token) {
             throw new Error('github-poll: token is required');
         }
-        if (!this.config.repos?.length && !this.config.orgs?.length) {
+        // Trim+filter+dedupe org names before validation. An empty or
+        // whitespace-only entry passes the raw `orgs?.length > 0` check
+        // (length is 1) but hits `/orgs//repos` at request time, which
+        // 404s — caught by the per-org try/catch but noise the user
+        // didn't intend. Duplicates would waste API quota re-enumerating
+        // the same org on every refresh.
+        const orgs = Array.from(new Set(
+            (this.config.orgs ?? []).map((s) => s.trim()).filter((s) => s.length > 0),
+        ));
+        if (!this.config.repos?.length && orgs.length === 0) {
             throw new Error('github-poll: at least one of `repos` or `orgs` is required');
         }
+        this.orgs = orgs;
         this.enabledEvents = new Set(this.config.events ?? SUPPORTED_EVENTS);
 
         // Seed explicit repos immediately. Org enumeration is async and
@@ -166,7 +187,7 @@ export class GitHubPollIntegration implements Integration {
                 if (this.stopped) return;
                 void this.poll();
                 this.timer = setInterval(() => this.poll(), interval);
-                if ((this.config.orgs?.length ?? 0) > 0) {
+                if (this.orgs.length > 0) {
                     this.orgRefreshTimer = setInterval(
                         () => this.refreshOrgRepos(),
                         orgRefreshMs,
@@ -216,19 +237,64 @@ export class GitHubPollIntegration implements Integration {
     /** Re-enumerate every configured org and REPLACE its slot in
      *  `this.orgRepos`. A network failure for one org logs and keeps
      *  that org's previous set in place — beats blanking the watch
-     *  list because of a transient API hiccup. */
+     *  list because of a transient API hiccup.
+     *
+     *  Re-entrance guard (`this.refreshing`): if a previous refresh is
+     *  still in flight when the interval timer fires (slow API, large
+     *  org, retries inside `apiGetAllPages`), the second invocation
+     *  exits immediately rather than racing the first. Without this,
+     *  both runs would write to `this.orgRepos.set(org, ...)` for the
+     *  same key with last-writer-wins ordering that isn't tied to data
+     *  freshness — the late writer might be stale.
+     *
+     *  State pruning: any repo that dropped out of the watch-set union
+     *  between the pre- and post-refresh snapshots has its per-repo
+     *  entries deleted from `this.state`. Diffing the *union* (not just
+     *  one org's set) is what makes this safe — a repo that's also in
+     *  the explicit list, or that's still enumerated by another org,
+     *  stays in the union and isn't pruned. Without that nuance, a
+     *  cross-org or explicit-list overlap would lose its state and
+     *  reseed on the next poll (re-emitting every PR as "new"). */
     private async refreshOrgRepos(): Promise<void> {
-        for (const org of this.config.orgs ?? []) {
-            try {
-                const repos = await this.enumerateOrgRepos(org);
-                this.orgRepos.set(org, new Set(repos));
-            } catch (err) {
-                console.error(
-                    `github-poll: failed to refresh repos for org "${org}":`,
-                    (err as Error).message,
-                );
+        if (this.refreshing) return;
+        this.refreshing = true;
+        try {
+            const previousUnion = this.allRepos();
+            for (const org of this.orgs) {
+                try {
+                    const repos = await this.enumerateOrgRepos(org);
+                    this.orgRepos.set(org, new Set(repos));
+                } catch (err) {
+                    console.error(
+                        `github-poll: failed to refresh repos for org "${org}":`,
+                        (err as Error).message,
+                    );
+                }
             }
+            const currentUnion = this.allRepos();
+            for (const repoFull of previousUnion) {
+                if (!currentUnion.has(repoFull)) {
+                    this.pruneState(repoFull);
+                }
+            }
+        } finally {
+            this.refreshing = false;
         }
+    }
+
+    /** Drop every per-repo entry from the poll state. Called for repos
+     *  that just fell out of the watch-set union (org removed them, or
+     *  the user re-configured). Long-lived processes with org churn
+     *  would otherwise accumulate map entries without bound. */
+    private pruneState(repoFull: string): void {
+        this.state.lastPrIds.delete(repoFull);
+        this.state.lastPrHeadShas.delete(repoFull);
+        this.state.lastPrStates.delete(repoFull);
+        this.state.lastIssueIds.delete(repoFull);
+        this.state.lastIssueStates.delete(repoFull);
+        this.state.lastBranchShas.delete(repoFull);
+        this.state.lastCommentIds.delete(repoFull);
+        this.state.lastReviewIds.delete(repoFull);
     }
 
     private async enumerateOrgRepos(org: string): Promise<string[]> {

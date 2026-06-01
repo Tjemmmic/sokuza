@@ -121,6 +121,35 @@ describe('GitHubPollIntegration', () => {
                 integration.initialize({ token: 'tok', orgs: ['my-org'] }),
             ).resolves.toBeUndefined();
         });
+
+        it('rejects an orgs-only config whose entries are all empty / whitespace', async () => {
+            // Without cleaning, `orgs: ['']` slips past `orgs?.length > 0`
+            // (length is 1) and surfaces at request time as `/orgs//repos`
+            // which 404s — noise the user didn't intend. Validation must
+            // run against the cleaned list so this rejects with the same
+            // "at least one of repos or orgs" message as `orgs: []`.
+            const integration = new GitHubPollIntegration();
+            await expect(
+                integration.initialize({ token: 'tok', orgs: ['', '  '] }),
+            ).rejects.toThrow('at least one of `repos` or `orgs`');
+        });
+
+        it('trims and dedupes org names so refresh hits each org exactly once', async () => {
+            // Duplicate `orgs: ['my-org', 'my-org']` or padded
+            // `orgs: [' my-org ', 'my-org']` would burn API quota
+            // re-enumerating the same org on every refresh. Pin that the
+            // cleaned list collapses to one entry.
+            const integration = new GitHubPollIntegration();
+            await integration.initialize({
+                token: 'tok',
+                orgs: [' my-org ', 'my-org', '', 'other-org'],
+            });
+            // No public accessor — read the private field via bracket
+            // notation. The cleaned list is what `refreshOrgRepos` iterates,
+            // so this is the user-visible behavior even if it goes through
+            // a private field.
+            expect((integration as any).orgs).toEqual(['my-org', 'other-org']);
+        });
     });
 
     describe('seed run', () => {
@@ -790,6 +819,122 @@ describe('GitHubPollIntegration', () => {
             integration.registerRoutes({} as any, async () => { /* noop */ });
             integration.stop();
             expect(() => integration.stop()).not.toThrow();
+        });
+    });
+
+    // ─── State pruning on org-set churn ─────────────────────────────────────
+    //
+    // The per-repo state maps (lastPrIds, lastBranchShas, etc.) accumulate
+    // keys as new repos enter the watch set. When a repo drops out of an
+    // org's enumeration, its keys must be deleted so a long-running process
+    // doesn't grow them without bound. Pin two important nuances:
+    //
+    //   1. State is pruned for repos that fell out of the *union* — i.e.
+    //      no other source (explicit list or another org) still watches
+    //      them. Pruning per-org would lose state for cross-listed repos.
+    //
+    //   2. Explicit-list repos are never pruned by org refresh, even if
+    //      they happen to overlap with a dropped org repo.
+
+    describe('state pruning on org refresh', () => {
+        async function makeIntegration(opts: {
+            repos?: string[];
+            orgs?: string[];
+            apiResponses: (url: string) => unknown;
+        }): Promise<GitHubPollIntegration> {
+            const integration = new GitHubPollIntegration();
+            await integration.initialize({
+                token: 'tok',
+                repos: opts.repos,
+                orgs: opts.orgs,
+            });
+            integration.registerRoutes({} as any, async () => { /* noop */ });
+            integration.stop();
+            const fetchMock = vi.fn(async (url: string | URL | Request) => ({
+                ok: true,
+                status: 200,
+                statusText: 'OK',
+                headers: { get: () => null },
+                json: async () => opts.apiResponses(String(url)),
+            })) as unknown as typeof globalThis.fetch;
+            globalThis.fetch = fetchMock;
+            return integration;
+        }
+
+        it('frees per-repo state when a repo drops out of an org refresh', async () => {
+            let call = 0;
+            const integration = await makeIntegration({
+                orgs: ['my-org'],
+                apiResponses: (url) => {
+                    if (!url.includes('/orgs/my-org/repos')) return [];
+                    call++;
+                    if (call === 1) {
+                        return [
+                            { full_name: 'my-org/alpha' },
+                            { full_name: 'my-org/beta' },
+                        ];
+                    }
+                    // Second refresh: beta has been removed / made private.
+                    return [{ full_name: 'my-org/alpha' }];
+                },
+            });
+
+            // Initial enumeration populates the watch set.
+            await (integration as any).refreshOrgRepos();
+            // Simulate that the poll loop has already learned state for
+            // both repos. Without this, the test is vacuous — `delete` on
+            // a key that never existed is a no-op.
+            const state = (integration as any).state;
+            state.lastPrIds.set('my-org/alpha', new Set([1]));
+            state.lastPrIds.set('my-org/beta', new Set([99]));
+            state.lastBranchShas.set('my-org/beta', new Map([['main', 'sha-b']]));
+            state.lastIssueIds.set('my-org/beta', new Set([7]));
+
+            // Second refresh drops `beta`. State for `beta` (which is no
+            // longer in any source) must be cleared. State for `alpha`
+            // (still enumerated) must be preserved.
+            await (integration as any).refreshOrgRepos();
+
+            expect(state.lastPrIds.has('my-org/alpha')).toBe(true);
+            expect(state.lastPrIds.has('my-org/beta')).toBe(false);
+            expect(state.lastBranchShas.has('my-org/beta')).toBe(false);
+            expect(state.lastIssueIds.has('my-org/beta')).toBe(false);
+        });
+
+        it('does NOT prune state for a repo that is still in the explicit list', async () => {
+            // Subtle correctness: if the user has BOTH `repos: ['my-org/alpha']`
+            // and `orgs: ['my-org']`, then an org refresh that no longer
+            // returns alpha must NOT drop alpha's state — alpha is still
+            // being polled via the explicit list. A naïve per-org diff
+            // would prune it and the next poll would re-emit every PR as
+            // "new" since the seeded check would see an empty oldIds.
+            let call = 0;
+            const integration = await makeIntegration({
+                repos: ['my-org/alpha'],
+                orgs: ['my-org'],
+                apiResponses: (url) => {
+                    if (!url.includes('/orgs/my-org/repos')) return [];
+                    call++;
+                    if (call === 1) {
+                        return [{ full_name: 'my-org/alpha' }];
+                    }
+                    // Second refresh: alpha is private now, but the
+                    // explicit `repos` list still watches it.
+                    return [];
+                },
+            });
+
+            await (integration as any).refreshOrgRepos();
+            const state = (integration as any).state;
+            state.lastPrIds.set('my-org/alpha', new Set([42]));
+
+            await (integration as any).refreshOrgRepos();
+
+            // alpha left the org's set but is still in explicitRepos, so
+            // it remains in the union and its state survives.
+            expect(state.lastPrIds.has('my-org/alpha')).toBe(true);
+            expect(state.lastPrIds.get('my-org/alpha').has(42)).toBe(true);
+            expect(((integration as any).allRepos() as Set<string>).has('my-org/alpha')).toBe(true);
         });
     });
 });
