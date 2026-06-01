@@ -109,6 +109,15 @@ export class GitHubPollIntegration implements Integration {
     };
     private timer: ReturnType<typeof setInterval> | null = null;
     private orgRefreshTimer: ReturnType<typeof setInterval> | null = null;
+    /** Startup-delay timer scheduled in registerRoutes. Stored so `stop()`
+     *  can cancel it during the first 2s of an integration's life — without
+     *  this handle a fast graceful shutdown leaks the deferred poll/refresh
+     *  intervals it would otherwise arm on a supposedly-stopped instance. */
+    private startupTimer: ReturnType<typeof setTimeout> | null = null;
+    /** Sticky shutdown flag. Set in `stop()` so any deferred callback that
+     *  was already in flight when stop was called bails out instead of
+     *  arming a fresh interval on a stopped integration. */
+    private stopped = false;
     private onEvent: EventHandler | null = null;
     private enabledEvents: Set<string> = new Set();
     /** Repos supplied verbatim in `config.repos`. Never mutated after init —
@@ -141,11 +150,20 @@ export class GitHubPollIntegration implements Integration {
         // Start polling after a short delay to let the server finish booting.
         const interval = (this.config.interval ?? DEFAULT_INTERVAL) * 1000;
         const orgRefreshMs = (this.config.org_refresh ?? DEFAULT_ORG_REFRESH) * 1000;
-        setTimeout(() => {
+        // Store the startup-delay handle and re-check `stopped` at every
+        // async boundary. Without these guards, `stop()` called during the
+        // first 2s (common in tests and fast graceful shutdowns) would
+        // race: the setTimeout still fires, refreshOrgRepos issues a
+        // network call, and then `setInterval` arms two timers that the
+        // already-returned stop() can never clear.
+        this.startupTimer = setTimeout(() => {
+            this.startupTimer = null;
+            if (this.stopped) return;
             // Block the first poll on the initial org enumeration so the
             // seed run sees the full repo set. Subsequent refreshes
             // happen on a separate timer in the background.
             void this.refreshOrgRepos().then(() => {
+                if (this.stopped) return;
                 void this.poll();
                 this.timer = setInterval(() => this.poll(), interval);
                 if ((this.config.orgs?.length ?? 0) > 0) {
@@ -163,8 +181,18 @@ export class GitHubPollIntegration implements Integration {
         throw new Error('github-poll does not use parseEvent');
     }
 
-    /** Stop the poll timer (for clean shutdown) */
+    /** Stop the poll timer (for clean shutdown).
+     *
+     *  Idempotent: clears the startup setTimeout, the poll setInterval, the
+     *  org-refresh setInterval, and flips `stopped` so any deferred
+     *  callback that was already scheduled bails out before re-arming
+     *  intervals on an already-stopped integration. */
     stop(): void {
+        this.stopped = true;
+        if (this.startupTimer) {
+            clearTimeout(this.startupTimer);
+            this.startupTimer = null;
+        }
         if (this.timer) {
             clearInterval(this.timer);
             this.timer = null;

@@ -722,4 +722,74 @@ describe('GitHubPollIntegration', () => {
             expect(fetchMock).toHaveBeenCalledTimes(3);
         });
     });
+
+    // ─── Shutdown lifecycle ─────────────────────────────────────────────────
+    //
+    // registerRoutes defers its first refresh+poll by 2s via setTimeout so the
+    // server has time to finish booting. The handle was previously discarded,
+    // so a synchronous `stop()` within the 2s window — which is exactly what
+    // setupAndPoll, makeIntegrationWithOrgs, and any fast graceful shutdown
+    // do — would NOT cancel the callback. It would fire at +2s on a stopped
+    // instance, issue a network call, and re-arm both intervals that stop()
+    // had no way to clear. Pin the fix so a future refactor can't reintroduce
+    // the race.
+
+    describe('shutdown', () => {
+        it('stop() during the 2s startup window halts the deferred refresh + intervals', async () => {
+            vi.useFakeTimers();
+            try {
+                const integration = new GitHubPollIntegration();
+                await integration.initialize({
+                    token: 'tok',
+                    orgs: ['my-org'],
+                    org_refresh: 10,
+                    interval: 5,
+                });
+                integration.registerRoutes({} as any, async () => { /* noop */ });
+                integration.stop();
+
+                // Install the fetch spy AFTER stop() so we observe only
+                // requests that were issued *after* the stop. If the
+                // deferred callback weren't guarded, the 2s timer would
+                // call refreshOrgRepos() → fetch, and the subsequent
+                // intervals would issue further polls.
+                const fetchMock = vi.fn(async () => ({
+                    ok: true,
+                    status: 200,
+                    statusText: 'OK',
+                    headers: { get: () => null },
+                    json: async () => [],
+                })) as unknown as typeof globalThis.fetch;
+                const originalFetch = globalThis.fetch;
+                globalThis.fetch = fetchMock;
+
+                try {
+                    // Advance well past the 2s startup timer AND the 5s
+                    // poll interval AND the 10s org-refresh interval.
+                    await vi.advanceTimersByTimeAsync(20_000);
+
+                    expect(fetchMock).not.toHaveBeenCalled();
+                    expect((integration as any).timer).toBeNull();
+                    expect((integration as any).orgRefreshTimer).toBeNull();
+                    expect((integration as any).startupTimer).toBeNull();
+                    expect((integration as any).stopped).toBe(true);
+                } finally {
+                    globalThis.fetch = originalFetch;
+                }
+            } finally {
+                vi.useRealTimers();
+            }
+        });
+
+        it('stop() is idempotent and safe to call twice', async () => {
+            // Defensive: graceful shutdown might call stop() multiple times
+            // through different cleanup paths. Make sure the second call
+            // doesn't throw on already-cleared handles.
+            const integration = new GitHubPollIntegration();
+            await integration.initialize({ token: 'tok', orgs: ['my-org'] });
+            integration.registerRoutes({} as any, async () => { /* noop */ });
+            integration.stop();
+            expect(() => integration.stop()).not.toThrow();
+        });
+    });
 });
