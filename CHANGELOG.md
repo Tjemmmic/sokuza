@@ -85,6 +85,12 @@ publishes automatically.
 - **Node presets — installable AI configurations from library templates.** New per-user store at `~/.sokuza/node-presets.json` exposes a "Presets" group in the editor's palette. Library install hook walks the template's graph, captures every non-empty `ai.*` node config, and saves it as a preset tagged `library:<id>` — so installing `security-audit` silently surfaces a pre-prompted `ai.agent` you can drag onto the canvas. New endpoints: `GET/POST /api/node-presets`, `DELETE /api/node-presets/:id`. Manually-created presets are tagged `user` and survive library churn.
 - **Workflow delete cascades to deck + library-extracted presets.** Manually deleting a workflow from the workflows page used to leave the library card stuck on "Installed" with no workflow behind it — the only recovery was uninstall-then-reinstall. The library card's "Installed" state now derives from actual workflow existence (via `getInstalledWorkflowName`), and `DELETE /api/workflows/:name` cascades: drops the deck entry and any presets that originated from the same `_libraryItem`, so the next render correctly shows "Install" again.
 
+## [0.1.6] - 2026-06-01
+
+### Fixed
+
+- **YAML `trigger.event` override on graph-form templates now wins over the graph's trigger node** (sister fix to 0.1.5). A workflow built from `template: ai-pr-review` with `trigger.event: [pull_request.opened, pull_request.synchronize]` used to silently drop synchronize events: the merge in `normalizeGraphWorkflow` picked the graph node's narrower `events: [pull_request.opened]` over the YAML list, so `pull_request.synchronize` events never reached `matchesTrigger`'s event check. Event now follows the same YAML-wins-when-present semantics as source — explicit YAML overrides win, the graph node's events are the fallback. `event: ''` continues to defer to the graph (deliberate "no event filter" usage in tests). Unblocks auto-PR-review on every synchronize push, not just the initial open.
+
 ## [0.1.5] - 2026-06-01
 
 ### Fixed

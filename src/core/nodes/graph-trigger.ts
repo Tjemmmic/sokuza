@@ -1,4 +1,5 @@
 import type { TriggerDefinition, WorkflowDefinition } from '../types.js';
+import { toArray } from '../types.js';
 import type { GraphNode, NodeGraph } from './types.js';
 
 // ─── Graph-form trigger extraction ──────────────────────────────────────────
@@ -104,13 +105,23 @@ export function normalizeGraphWorkflow(wf: WorkflowDefinition): WorkflowDefiniti
     const derived = extractTriggerFromGraph(wf.graph!);
     if (!derived) return wf;
     // Preserve any explicit trigger fields the user set in YAML.
+    //
+    // Source AND event are both YAML-wins-when-present: the user's outer
+    // `trigger:` block is the authoritative override and the graph node's
+    // values are defaults to fall back on. A YAML `event: [opened,
+    // synchronize]` against a graph node declaring `events: [opened]`
+    // used to silently drop synchronize because the graph won the merge
+    // — exactly the asymmetry that broke auto-PR-review on synchronize
+    // events. Same shape for source.
+    // Empty strings filter out: an `event: ''` YAML field is a deliberate
+    // "no event filter" (existing tests use it to defer to the graph),
+    // not a YAML-wins override. Same conceptually as `event:` being absent.
+    const yamlEventList = toArray(wf.trigger?.event).filter((e) => e.length > 0);
     const merged: TriggerDefinition = {
         ...derived,
         ...wf.trigger,
-        // Source + event from the trigger node always win — they're the
-        // primary input to event matching and the YAML form is a fallback.
         source: wf.trigger?.source ?? derived.source,
-        event: derived.event && derived.event.length > 0 ? derived.event : (wf.trigger?.event ?? []),
+        event: yamlEventList.length > 0 ? yamlEventList : derived.event,
     };
     return { ...wf, trigger: merged, steps: wf.steps ?? [] };
 }
