@@ -745,6 +745,72 @@ describe('matchesTrigger', () => {
             expect(matchesTrigger(wf, makeEvent({ source: 'github-poll', event: 'pull_request.opened' }))).toBe(false);
             expect(matchesTrigger(wf, makeEvent({ source: 'gh-cli', event: 'pull_request.opened' }))).toBe(false);
         });
+
+        it('matches pull_request.synchronize when YAML event list widens the graph node', () => {
+            // Sister regression to the source-merge fix: the user's
+            // auto-pr-review workflow declares
+            //   event: [pull_request.opened, pull_request.synchronize]
+            // in YAML, but the ai-pr-review template's `trigger.github`
+            // node only declares `events: [pull_request.opened]`. Before
+            // this fix, the graph-derived event list won the merge and
+            // synchronize events were silently dropped — so the auto
+            // re-review on every new commit never fired. YAML now wins
+            // for event the same way it wins for source.
+            const wf: WorkflowDefinition = {
+                name: 'auto-pr-review',
+                trigger: {
+                    source: 'gh-cli',
+                    event: ['pull_request.opened', 'pull_request.synchronize'],
+                    author: 'Tjemmmic',
+                },
+                graph: {
+                    nodes: [{
+                        id: 'trigger',
+                        type: 'trigger.github',
+                        config: { events: ['pull_request.opened'] },
+                    }],
+                    edges: [],
+                },
+            };
+
+            const syncEvent = makeEvent({
+                source: 'gh-cli',
+                event: 'pull_request.synchronize',
+                payload: { pull_request: { user: { login: 'Tjemmmic' } } },
+            });
+            expect(matchesTrigger(wf, syncEvent)).toBe(true);
+
+            const openedEvent = makeEvent({
+                source: 'gh-cli',
+                event: 'pull_request.opened',
+                payload: { pull_request: { user: { login: 'Tjemmmic' } } },
+            });
+            expect(matchesTrigger(wf, openedEvent)).toBe(true);
+        });
+
+        it('falls back to the graph trigger node event list when YAML has no event field', () => {
+            // Symmetric negative: without an explicit YAML event list, the
+            // graph node's events drive matching. A YAML-silent workflow
+            // must not silently match every event under the sun.
+            const wf: WorkflowDefinition = {
+                name: 'graph-event-only',
+                trigger: {
+                    source: 'github',
+                    // No `event:` field — should fall back to graph.
+                } as WorkflowDefinition['trigger'],
+                graph: {
+                    nodes: [{
+                        id: 'trigger',
+                        type: 'trigger.github',
+                        config: { events: ['pull_request.opened'] },
+                    }],
+                    edges: [],
+                },
+            };
+
+            expect(matchesTrigger(wf, makeEvent({ source: 'github', event: 'pull_request.opened' }))).toBe(true);
+            expect(matchesTrigger(wf, makeEvent({ source: 'github', event: 'pull_request.synchronize' }))).toBe(false);
+        });
     });
 });
 
