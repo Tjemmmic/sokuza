@@ -879,17 +879,25 @@ function buildOpencodeArgs(input: CliArgsInput): string[] {
  *
  * - Claude Code's `--output-format text` already gives us the answer
  *   verbatim — we just trim it.
- * - Opencode emits JSONL events: `step_start`, `text`, `tool_use`,
- *   `step_finish`, etc. The model's reply is the concatenation of all
- *   `{type: "text"}` event parts. Non-JSON lines are ignored so any
- *   stray log lines don't poison the output.
+ * - Opencode emits JSONL events: `step_start`, `text`, `reasoning`,
+ *   `tool_use`, `step_finish`, `error`. The model's reply is the
+ *   concatenation of all `{type: "text"}` event parts. Non-JSON lines
+ *   are ignored so any stray log lines don't poison the output.
+ *
+ * Fallback for the "no text events" case: opencode can exit 0 but emit
+ * only `error` events (provider hiccup mid-stream, model gave up before
+ * producing text). Without surfacing those, the caller sees `""` and
+ * the workflow silently posts an empty review comment. When no `text`
+ * events exist but `error` events do, return their messages prefixed
+ * so the user sees what actually went wrong.
  */
 export function extractCliText(style: ArgsStyle, raw: string): string {
     if (style === 'claude-code') {
         return raw.trim();
     }
     // opencode
-    const parts: string[] = [];
+    const textParts: string[] = [];
+    const errorMessages: string[] = [];
     for (const line of raw.split('\n')) {
         const trimmed = line.trim();
         if (!trimmed.startsWith('{')) continue;
@@ -898,14 +906,31 @@ export function extractCliText(style: ArgsStyle, raw: string): string {
             if (evt.type === 'text') {
                 const part = evt.part as { text?: unknown } | undefined;
                 if (part && typeof part.text === 'string') {
-                    parts.push(part.text);
+                    textParts.push(part.text);
                 }
+            } else if (evt.type === 'error') {
+                // Shape: { type: "error", error: { name, data: { message } } }
+                const err = evt.error as { name?: unknown; data?: { message?: unknown } } | undefined;
+                const msg = err?.data && typeof err.data.message === 'string'
+                    ? err.data.message
+                    : typeof err?.name === 'string' ? err.name
+                    : 'unknown error';
+                errorMessages.push(msg);
             }
         } catch {
             // Not JSON — ignore (could be a prelude log line).
         }
     }
-    return parts.join('').trim();
+    if (textParts.length > 0) {
+        return textParts.join('').trim();
+    }
+    if (errorMessages.length > 0) {
+        // Sentinel-tagged so downstream parsers (ai-review's structured-
+        // review parser, the empty-output guard) can recognise this as
+        // a CLI-surfaced error rather than free-form model text.
+        return `[opencode-error] ${errorMessages.join('; ')}`;
+    }
+    return '';
 }
 
 // ─── Subprocess helper ──────────────────────────────────────────────────────
