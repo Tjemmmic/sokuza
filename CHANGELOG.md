@@ -84,6 +84,12 @@ publishes automatically.
 - **Node presets — installable AI configurations from library templates.** New per-user store at `~/.sokuza/node-presets.json` exposes a "Presets" group in the editor's palette. Library install hook walks the template's graph, captures every non-empty `ai.*` node config, and saves it as a preset tagged `library:<id>` — so installing `security-audit` silently surfaces a pre-prompted `ai.agent` you can drag onto the canvas. New endpoints: `GET/POST /api/node-presets`, `DELETE /api/node-presets/:id`. Manually-created presets are tagged `user` and survive library churn.
 - **Workflow delete cascades to deck + library-extracted presets.** Manually deleting a workflow from the workflows page used to leave the library card stuck on "Installed" with no workflow behind it — the only recovery was uninstall-then-reinstall. The library card's "Installed" state now derives from actual workflow existence (via `getInstalledWorkflowName`), and `DELETE /api/workflows/:name` cascades: drops the deck entry and any presets that originated from the same `_libraryItem`, so the next render correctly shows "Install" again.
 
+## [0.1.5] - 2026-06-01
+
+### Fixed
+
+- **YAML `trigger.source` override on graph-form templates now wins over the graph's trigger node.** A workflow built from `template: ai-pr-review` (graph form) with `trigger.source: [github, github-poll, gh-cli]` used to silently match only `github` events: the graph's `trigger.github` node short-circuited `matchesTrigger`, discarding the YAML source override (and any filters/labels/exclude on the YAML trigger block) before matching ran. `normalizeWorkflow` now merges the graph-derived trigger with the YAML trigger via `normalizeGraphWorkflow` at load time, so YAML source/event/filters survive into `engine.config.workflows`; `matchesTrigger` calls the same helper defensively for callers that bypass the load pipeline. Also unblocks `respond-to-reviews`, whose top-level `source: [github, github-poll, gh-cli]` was authored correctly but was being ignored for the same reason.
+
 ## [0.1.4] - 2026-06-01
 
 ### Added

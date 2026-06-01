@@ -666,6 +666,86 @@ describe('matchesTrigger', () => {
             }))).toBe(true);
         });
     });
+
+    // ─── Graph trigger + YAML override merge ────────────────────────────
+    // Regression for the auto-PR-review trigger bug: a graph workflow that
+    // hard-codes `trigger.github` in its first node used to silently
+    // overwrite the YAML-level trigger block, so a user running
+    // `template: ai-pr-review` with `trigger.source: [github, github-poll,
+    // gh-cli]` would never match github-poll/gh-cli events. The fix wires
+    // `normalizeGraphWorkflow` into matchesTrigger (and the load pipeline
+    // via `normalizeWorkflow`), merging YAML source/event over the graph
+    // defaults instead of replacing them.
+    describe('graph workflow + YAML trigger override', () => {
+        it('matches a github-poll event when YAML widens source beyond the graph node', () => {
+            // Shape mirrors `templates/ai-pr-review.yaml`: the graph hard-
+            // codes `trigger.github`, but the user's workflow widens both
+            // source and event in the outer YAML trigger block.
+            const wf: WorkflowDefinition = {
+                name: 'auto-pr-review',
+                trigger: {
+                    source: ['github', 'github-poll', 'gh-cli'],
+                    event: ['pull_request.opened', 'pull_request.synchronize'],
+                },
+                graph: {
+                    nodes: [{
+                        id: 'trigger',
+                        type: 'trigger.github',
+                        config: { events: ['pull_request.opened'] },
+                    }],
+                    edges: [],
+                },
+            };
+
+            const event = makeEvent({ source: 'github-poll', event: 'pull_request.opened' });
+            expect(matchesTrigger(wf, event)).toBe(true);
+        });
+
+        it('matches all three sources declared in the YAML override', () => {
+            const wf: WorkflowDefinition = {
+                name: 'auto-pr-review',
+                trigger: {
+                    source: ['github', 'github-poll', 'gh-cli'],
+                    event: ['pull_request.opened', 'pull_request.synchronize'],
+                },
+                graph: {
+                    nodes: [{
+                        id: 'trigger',
+                        type: 'trigger.github',
+                        config: { events: ['pull_request.opened'] },
+                    }],
+                    edges: [],
+                },
+            };
+
+            expect(matchesTrigger(wf, makeEvent({ source: 'github', event: 'pull_request.opened' }))).toBe(true);
+            expect(matchesTrigger(wf, makeEvent({ source: 'github-poll', event: 'pull_request.opened' }))).toBe(true);
+            expect(matchesTrigger(wf, makeEvent({ source: 'gh-cli', event: 'pull_request.opened' }))).toBe(true);
+        });
+
+        it('falls back to the graph trigger node source when YAML has no trigger block', () => {
+            // Negative case: without a YAML override, the graph's
+            // `trigger.github` node is the only source-of-truth. A
+            // github-poll event must NOT match — proving the merge
+            // semantics are intentional, not just "always match".
+            const wf: WorkflowDefinition = {
+                name: 'graph-only',
+                trigger: undefined as unknown as WorkflowDefinition['trigger'],
+                graph: {
+                    nodes: [{
+                        id: 'trigger',
+                        type: 'trigger.github',
+                        config: { events: ['pull_request.opened'] },
+                    }],
+                    edges: [],
+                },
+            };
+
+            expect(matchesTrigger(wf, makeEvent({ source: 'github', event: 'pull_request.opened' }))).toBe(true);
+            expect(matchesTrigger(wf, makeEvent({ source: 'github-poll', event: 'pull_request.opened' }))).toBe(false);
+            expect(matchesTrigger(wf, makeEvent({ source: 'gh-cli', event: 'pull_request.opened' }))).toBe(false);
+        });
+    });
 });
 
 // ─── interpolateParams ──────────────────────────────────────────────────────

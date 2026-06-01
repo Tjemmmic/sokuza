@@ -1,6 +1,8 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { normalizeWorkflow, loadTemplates, resetTemplateCache } from './templates.js';
+import { matchesTrigger } from './workflow.js';
 import { join } from 'node:path';
+import type { EventPayload } from './types.js';
 
 const TEMPLATES_DIR = join(import.meta.dirname, '..', '..', 'templates');
 
@@ -340,5 +342,74 @@ describe('normalizeWorkflow — template expansion', () => {
         });
 
         expect(wf.graph?.nodes).toEqual(customGraph.nodes);
+    });
+});
+
+// ─── normalizeWorkflow → matchesTrigger pipeline ──────────────────────────────
+// Regression: the user-reported `auto-pr-review` workflow had
+// `template: ai-pr-review` (graph form) and a YAML override
+// `trigger.source: [github, github-poll, gh-cli]`. The graph's
+// `trigger.github` node used to overwrite that source, so the workflow
+// silently stopped matching github-poll events. These tests pin the
+// full load → match pipeline so the regression can't reappear at the
+// integration boundary.
+
+function makeEvent(overrides: Partial<EventPayload> = {}): EventPayload {
+    return {
+        source: 'github',
+        event: 'pull_request.opened',
+        timestamp: new Date().toISOString(),
+        payload: {},
+        metadata: {},
+        ...overrides,
+    };
+}
+
+describe('normalizeWorkflow → matchesTrigger (graph + YAML source override)', () => {
+    it('YAML source override on the ai-pr-review template matches all listed sources', async () => {
+        const wf = await normalizeWorkflow({
+            name: 'auto-pr-review',
+            template: 'ai-pr-review',
+            trigger: {
+                source: ['github', 'github-poll', 'gh-cli'],
+                event: ['pull_request.opened', 'pull_request.synchronize'],
+            },
+        });
+
+        // Source override survives the merge with the template's graph
+        // trigger node (which alone would force source back to 'github').
+        expect(wf.trigger.source).toEqual(['github', 'github-poll', 'gh-cli']);
+
+        expect(matchesTrigger(wf, makeEvent({ source: 'github', event: 'pull_request.opened' }))).toBe(true);
+        expect(matchesTrigger(wf, makeEvent({ source: 'github-poll', event: 'pull_request.opened' }))).toBe(true);
+        expect(matchesTrigger(wf, makeEvent({ source: 'gh-cli', event: 'pull_request.opened' }))).toBe(true);
+    });
+
+    it('preserves YAML filters/labels through the graph merge', async () => {
+        const wf = await normalizeWorkflow({
+            name: 'filtered-review',
+            template: 'ai-pr-review',
+            trigger: {
+                source: 'gh-cli',
+                event: 'pull_request.opened',
+                repo: 'my-org/my-repo',
+            },
+        });
+
+        // Single-value repo shorthand is resolved to a filter by
+        // resolveShorthands; that filter must survive the graph merge.
+        expect(wf.trigger.filters?.['metadata.repo']).toBe('my-org/my-repo');
+
+        expect(matchesTrigger(wf, makeEvent({
+            source: 'gh-cli',
+            event: 'pull_request.opened',
+            metadata: { repo: 'my-org/my-repo' },
+        }))).toBe(true);
+
+        expect(matchesTrigger(wf, makeEvent({
+            source: 'gh-cli',
+            event: 'pull_request.opened',
+            metadata: { repo: 'other/repo' },
+        }))).toBe(false);
     });
 });
