@@ -8,7 +8,7 @@ import type { WorkflowQueue } from '../core/queue.js';
 import type { ConfigStore } from '../core/config-store.js';
 import type { LogStore } from '../core/log-store.js';
 import { VERSION } from '../version.js';
-import { serviceStatus, installService, uninstallService, restartService } from '../cli/service.js';
+import { serviceStatus, installService, uninstallService, restartService, isServiceInstalled } from '../cli/service.js';
 import { runUpdateCommand, resolveEntryPath } from '../cli/update.js';
 import { readUpdateCache, refreshUpdateCache, isNewer } from '../cli/update-check.js';
 
@@ -938,9 +938,11 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
 
     server.post('/api/system/service/restart', async (_request, reply) => {
         // Pre-check synchronously so an uninstalled service yields a clear
-        // 400 instead of a dishonest "restart scheduled" ACK.
-        const status = await serviceStatus();
-        if (!status.installed) {
+        // 400 instead of a dishonest "restart scheduled" ACK. `isServiceInstalled`
+        // is a pure fs lookup — no subprocess spawns — which keeps this hot
+        // path cheap and avoids the ~200ms `systemctl is-enabled` + `is-active`
+        // round-trip that a full `serviceStatus()` would do.
+        if (!isServiceInstalled()) {
             return reply.status(400).send({
                 error:
                     `Service is not installed — run \`sokuza service enable\` first ` +
@@ -965,7 +967,7 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
                 ));
         });
 
-        return reply.status(202).send({ scheduled: true, platform: status.platform });
+        return reply.status(202).send({ scheduled: true, platform: process.platform });
     });
 
     /** Shape both `/update` GETs return so the UI can render one code path. */

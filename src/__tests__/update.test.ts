@@ -5,7 +5,7 @@ import { join } from 'node:path';
 
 import { detectInstaller, resolveEntryPath } from '../cli/update.js';
 import { compareSemver, isNewer } from '../cli/update-check.js';
-import { extractField } from '../cli/service.js';
+import { extractField, renderWindowsTaskXml, type InstallCtx } from '../cli/service.js';
 
 describe('detectInstaller', () => {
     it('recognises a Homebrew Cellar install', () => {
@@ -201,5 +201,28 @@ Scheduled Task State:                 Enabled
 
     it('is case-insensitive on the field name', () => {
         expect(extractField(sample, 'status')).toBe('Running');
+    });
+});
+
+// `sokuza service restart` on Windows used to race against `schtasks /End`'s
+// async stop: with MultipleInstancesPolicy=IgnoreNew baked into the install
+// XML, a follow-up `/Run` could be silently dropped while the prior instance
+// was still winding down, leaving us to report a phantom "Restarted." The
+// task XML now uses StopExisting so `/Run` alone has true restart semantics,
+// closing the race for any future install. Pin that policy choice in the
+// XML so a casual edit can't reintroduce the bug.
+describe('renderWindowsTaskXml', () => {
+    const ctx: InstallCtx = {
+        configPath: 'C:\\Users\\alice\\sokuza.config.yaml',
+        nodeBin: 'C:\\Program Files\\nodejs\\node.exe',
+        entry: 'C:\\Users\\alice\\AppData\\Roaming\\npm\\node_modules\\sokuza\\dist\\index.js',
+        workdir: 'C:\\Users\\alice',
+        servicePath: 'C:\\Windows\\System32;C:\\Program Files\\nodejs',
+    };
+
+    it('uses MultipleInstancesPolicy=StopExisting so /Run alone restarts cleanly', () => {
+        const xml = renderWindowsTaskXml(ctx, 'MYPC\\alice');
+        expect(xml).toContain('<MultipleInstancesPolicy>StopExisting</MultipleInstancesPolicy>');
+        expect(xml).not.toContain('<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>');
     });
 });
