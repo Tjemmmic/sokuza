@@ -137,11 +137,18 @@ queue:
 
 workflows:
   # Simple AI PR review using a template
+  #
+  # The template's graph trigger node defaults to `source: github`
+  # (webhooks). The YAML trigger fields below override the template's
+  # defaults — set `source: gh-cli` for `gh-cli`-only setups, or
+  # `source: [github, github-poll, gh-cli]` to match any inbound source.
   - name: review-prs
     template: ai-pr-review
     trigger:
       event: pull_request.opened
       repo: "my-org/my-repo"
+      # source: gh-cli                          # override the template's default github source
+      # source: [github, github-poll, gh-cli]   # OR match any inbound source
 
   # Workflow with inline AI config and queue settings
   # - name: premium-review
