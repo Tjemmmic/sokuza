@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import type { Logger } from 'pino';
 import { readFile, writeFile, readdir } from 'node:fs/promises';
-import { join, basename, extname, resolve } from 'node:path';
+import { join, basename, extname } from 'node:path';
 import yaml from 'js-yaml';
 import type { SokuzaConfig, EventPayload, WebhookDelivery, WorkflowRunRecord } from '../core/types.js';
 import type { WorkflowQueue } from '../core/queue.js';
@@ -9,7 +9,7 @@ import type { ConfigStore } from '../core/config-store.js';
 import type { LogStore } from '../core/log-store.js';
 import { VERSION } from '../version.js';
 import { serviceStatus, installService, uninstallService } from '../cli/service.js';
-import { runUpdateCommand } from '../cli/update.js';
+import { runUpdateCommand, resolveEntryPath } from '../cli/update.js';
 import { readUpdateCache, refreshUpdateCache, isNewer } from '../cli/update-check.js';
 
 interface ApiDeps {
@@ -959,7 +959,7 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
     server.post('/api/system/update', async (_request, reply) => {
         try {
             const result = await runUpdateCommand({
-                entryPath: resolve(process.argv[1]),
+                entryPath: resolveEntryPath(process.argv[1]),
                 captureOutput: true,
             });
             logger.info(
