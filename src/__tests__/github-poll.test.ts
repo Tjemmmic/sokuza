@@ -656,5 +656,70 @@ describe('GitHubPollIntegration', () => {
             expect(watched.has('good-org/healthy')).toBe(true);
             expect(watched.size).toBe(1);
         });
+
+        // Regression guard: enumerateOrgRepos delegates pagination to the
+        // shared `apiGetAllPages` helper, which walks `Link: rel="next"`.
+        // The other org tests use a no-Link mock so they never exercise
+        // the multi-page path — if a refactor ever single-pages the
+        // helper (or the caller bypasses it), every test above would
+        // still pass while orgs with >100 repos silently lose the tail.
+        // This test wires fetch with a chained Link header to prove the
+        // walk happens end-to-end.
+        it('follows GitHub Link headers to accumulate org repos across pages', async () => {
+            const integration = new GitHubPollIntegration();
+            await integration.initialize({ token: 'tok', orgs: ['huge-org'] });
+            const fakeServer = {} as any;
+            integration.registerRoutes(fakeServer, async () => { /* noop */ });
+            integration.stop();
+
+            const PAGE_1_URL = 'https://api.github.com/orgs/huge-org/repos?per_page=100&type=all&sort=updated';
+            const PAGE_2_URL = 'https://api.github.com/orgs/huge-org/repos?per_page=100&page=2';
+            const PAGE_3_URL = 'https://api.github.com/orgs/huge-org/repos?per_page=100&page=3';
+
+            const fetchMock = vi.fn(async (url: string | URL | Request) => {
+                const s = String(url);
+                // Each page returns 2 stub repos + a Link header pointing
+                // at the next page until the third (terminal) page.
+                if (s === PAGE_1_URL) {
+                    return {
+                        ok: true, status: 200, statusText: 'OK',
+                        headers: { get: (h: string) => h.toLowerCase() === 'link' ? `<${PAGE_2_URL}>; rel="next"` : null },
+                        json: async () => ([{ full_name: 'huge-org/p1a' }, { full_name: 'huge-org/p1b' }]),
+                    };
+                }
+                if (s === PAGE_2_URL) {
+                    return {
+                        ok: true, status: 200, statusText: 'OK',
+                        headers: { get: (h: string) => h.toLowerCase() === 'link' ? `<${PAGE_3_URL}>; rel="next"` : null },
+                        json: async () => ([{ full_name: 'huge-org/p2a' }, { full_name: 'huge-org/p2b' }]),
+                    };
+                }
+                if (s === PAGE_3_URL) {
+                    return {
+                        ok: true, status: 200, statusText: 'OK',
+                        headers: { get: () => null }, // terminal page — no next
+                        json: async () => ([{ full_name: 'huge-org/p3a' }]),
+                    };
+                }
+                throw new Error(`unexpected url in pagination test: ${s}`);
+            }) as unknown as typeof globalThis.fetch;
+            globalThis.fetch = fetchMock;
+
+            await (integration as any).refreshOrgRepos();
+            const watched = (integration as any).allRepos() as Set<string>;
+
+            // All five repos from the three pages must end up in the
+            // watch set. If pagination is broken, only p1a + p1b appear
+            // and this test fails loudly.
+            expect(watched.has('huge-org/p1a')).toBe(true);
+            expect(watched.has('huge-org/p1b')).toBe(true);
+            expect(watched.has('huge-org/p2a')).toBe(true);
+            expect(watched.has('huge-org/p2b')).toBe(true);
+            expect(watched.has('huge-org/p3a')).toBe(true);
+            expect(watched.size).toBe(5);
+
+            // …and we made exactly three fetch calls — one per page.
+            expect(fetchMock).toHaveBeenCalledTimes(3);
+        });
     });
 });
