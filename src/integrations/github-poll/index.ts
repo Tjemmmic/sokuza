@@ -68,8 +68,18 @@ interface PollState {
     lastCommentIds: Map<string, Set<number>>;
     /** Last-seen PR review IDs per repo */
     lastReviewIds: Map<string, Set<number>>;
-    /** Whether initial seed has completed (skip first batch) */
-    seeded: boolean;
+    /** Per-repo seed flag. A repo enters this set after its first
+     *  `pollRepo()` completes, marking that we've recorded its current
+     *  PR/issue/branch/comment/review snapshot. Subsequent polls only
+     *  emit events for changes against that snapshot.
+     *
+     *  Per-repo (not global) because dynamic org enumeration can add
+     *  repos to the watch set AFTER the first poll cycle has flipped a
+     *  global flag. A global flag would let the freshly-discovered
+     *  repo's first poll fire `pull_request.opened` / `issues.opened` /
+     *  `push` events for every existing PR/issue/branch on it — exactly
+     *  the flood the seed-run guard exists to prevent. */
+    seededRepos: Set<string>;
 }
 
 const GITHUB_API = 'https://api.github.com';
@@ -79,6 +89,14 @@ const DEFAULT_INTERVAL = 60;
  *  any realistic number of orgs, and is short enough that newly-created
  *  org repos start being watched within an hour without a restart. */
 const DEFAULT_ORG_REFRESH = 3600;
+
+/** Trim whitespace, drop empty entries, dedupe. Shared by `repos` and
+ *  `orgs` so the two config inputs go through the same cleaning. */
+function clean(xs: string[] | undefined): string[] {
+    return Array.from(new Set(
+        (xs ?? []).map((s) => s.trim()).filter((s) => s.length > 0),
+    ));
+}
 
 const SUPPORTED_EVENTS = [
     'pull_request.opened',
@@ -96,6 +114,7 @@ export class GitHubPollIntegration implements Integration {
     readonly supportedEvents = SUPPORTED_EVENTS;
 
     private config!: PollConfig;
+    private logger!: Logger;
     private state: PollState = {
         lastPrIds: new Map(),
         lastPrHeadShas: new Map(),
@@ -105,7 +124,7 @@ export class GitHubPollIntegration implements Integration {
         lastBranchShas: new Map(),
         lastCommentIds: new Map(),
         lastReviewIds: new Map(),
-        seeded: false,
+        seededRepos: new Set(),
     };
     private timer: ReturnType<typeof setInterval> | null = null;
     private orgRefreshTimer: ReturnType<typeof setInterval> | null = null;
@@ -139,21 +158,22 @@ export class GitHubPollIntegration implements Integration {
      *  private silently drop out of the watch set instead of accumulating. */
     private orgRepos = new Map<string, Set<string>>();
 
-    async initialize(config: IntegrationConfig, _logger: Logger): Promise<void> {
+    async initialize(config: IntegrationConfig, logger: Logger): Promise<void> {
         this.config = config as unknown as PollConfig;
+        this.logger = logger;
         if (!this.config.token) {
             throw new Error('github-poll: token is required');
         }
-        // Trim+filter+dedupe org names before validation. An empty or
-        // whitespace-only entry passes the raw `orgs?.length > 0` check
-        // (length is 1) but hits `/orgs//repos` at request time, which
-        // 404s — caught by the per-org try/catch but noise the user
-        // didn't intend. Duplicates would waste API quota re-enumerating
-        // the same org on every refresh.
-        const orgs = Array.from(new Set(
-            (this.config.orgs ?? []).map((s) => s.trim()).filter((s) => s.length > 0),
-        ));
-        if (!this.config.repos?.length && orgs.length === 0) {
+        // Trim+filter+dedupe both inputs before validation. An empty or
+        // whitespace-only entry passes the raw `xs?.length > 0` check
+        // (length is 1) but is meaningless: empty orgs hit `/orgs//repos`
+        // and 404, empty repos are dropped at poll time by the owner/repo
+        // split guard. Duplicates waste API quota. Cleaning both inputs
+        // through the same pipeline keeps explicit-repos and orgs
+        // symmetric — there's no reason orgs would be stricter.
+        const repos = clean(this.config.repos);
+        const orgs = clean(this.config.orgs);
+        if (repos.length === 0 && orgs.length === 0) {
             throw new Error('github-poll: at least one of `repos` or `orgs` is required');
         }
         this.orgs = orgs;
@@ -162,7 +182,7 @@ export class GitHubPollIntegration implements Integration {
         // Seed explicit repos immediately. Org enumeration is async and
         // happens in registerRoutes (we don't want initialize to block on
         // network during engine startup).
-        this.explicitRepos = new Set(this.config.repos ?? []);
+        this.explicitRepos = new Set(repos);
     }
 
     registerRoutes(server: FastifyInstance, onEvent: EventHandler): void {
@@ -171,6 +191,25 @@ export class GitHubPollIntegration implements Integration {
         // Start polling after a short delay to let the server finish booting.
         const interval = (this.config.interval ?? DEFAULT_INTERVAL) * 1000;
         const orgRefreshMs = (this.config.org_refresh ?? DEFAULT_ORG_REFRESH) * 1000;
+
+        // Wrapped invocation of refreshOrgRepos with a terminal `.catch`.
+        // refreshOrgRepos doesn't reject today — per-org failures are
+        // already caught inside — but the org-refresh setInterval below
+        // and the startup chain don't await the promise. A future
+        // refactor that lets a top-level synchronous throw escape (e.g.
+        // adding a metrics call, a snapshot helper, or a config
+        // re-validation) would otherwise produce an unhandledRejection
+        // and crash the process under Node's default behaviour. Cheap
+        // hardening while the surface is small.
+        const safeRefresh = (): Promise<void> => {
+            return this.refreshOrgRepos().catch((err: unknown) => {
+                this.logger.error(
+                    { err: (err as Error).message },
+                    'github-poll: refreshOrgRepos failed',
+                );
+            });
+        };
+
         // Store the startup-delay handle and re-check `stopped` at every
         // async boundary. Without these guards, `stop()` called during the
         // first 2s (common in tests and fast graceful shutdowns) would
@@ -183,15 +222,12 @@ export class GitHubPollIntegration implements Integration {
             // Block the first poll on the initial org enumeration so the
             // seed run sees the full repo set. Subsequent refreshes
             // happen on a separate timer in the background.
-            void this.refreshOrgRepos().then(() => {
+            void safeRefresh().then(() => {
                 if (this.stopped) return;
                 void this.poll();
                 this.timer = setInterval(() => this.poll(), interval);
                 if (this.orgs.length > 0) {
-                    this.orgRefreshTimer = setInterval(
-                        () => this.refreshOrgRepos(),
-                        orgRefreshMs,
-                    );
+                    this.orgRefreshTimer = setInterval(safeRefresh, orgRefreshMs);
                 }
             });
         }, 2000);
@@ -261,16 +297,28 @@ export class GitHubPollIntegration implements Integration {
         try {
             const previousUnion = this.allRepos();
             for (const org of this.orgs) {
+                // Cooperative cancellation point: stop() may have been
+                // called while we were awaiting the previous org's
+                // enumeration. The startup-tick guard alone doesn't help
+                // mid-refresh — bail before issuing the next fetch so
+                // we don't burn API quota on a stopped integration.
+                if (this.stopped) return;
                 try {
                     const repos = await this.enumerateOrgRepos(org);
+                    // Re-check after the await: stop() could have fired
+                    // while the fetch was in flight. We DO want to
+                    // discard the response rather than mutate
+                    // `this.orgRepos` post-stop.
+                    if (this.stopped) return;
                     this.orgRepos.set(org, new Set(repos));
                 } catch (err) {
-                    console.error(
-                        `github-poll: failed to refresh repos for org "${org}":`,
-                        (err as Error).message,
+                    this.logger.error(
+                        { org, err: (err as Error).message },
+                        'github-poll: failed to refresh repos for org',
                     );
                 }
             }
+            if (this.stopped) return;
             const currentUnion = this.allRepos();
             for (const repoFull of previousUnion) {
                 if (!currentUnion.has(repoFull)) {
@@ -321,12 +369,11 @@ export class GitHubPollIntegration implements Integration {
                 await this.pollRepo(repoFull);
             } catch (err) {
                 // Don't crash on individual repo errors
-                console.error(`github-poll: error polling ${repoFull}:`, (err as Error).message);
+                this.logger.error(
+                    { repo: repoFull, err: (err as Error).message },
+                    'github-poll: error polling repo',
+                );
             }
-        }
-        // After first run, mark as seeded so subsequent runs emit events
-        if (!this.state.seeded) {
-            this.state.seeded = true;
         }
     }
 
@@ -334,30 +381,35 @@ export class GitHubPollIntegration implements Integration {
         const [owner, repo] = repoFull.split('/');
         if (!owner || !repo) return;
 
-        // Poll PRs
+        // Per-repo first-sight flag. A repo that joins the watch set via
+        // a post-startup org refresh has empty per-repo state maps; the
+        // first cycle must populate them silently rather than firing
+        // pull_request.opened / issues.opened / push events for every
+        // existing item on that repo. Sub-pollers gate their emit logic
+        // on this flag and we commit it to `seededRepos` only after the
+        // full repo's poll completes successfully — a partial-failure
+        // cycle (one sub-poller throws) replays as another first-sight
+        // next time instead of leaving a half-seeded repo that would
+        // emit events for the un-snapshotted sub-categories.
+        const firstSight = !this.state.seededRepos.has(repoFull);
+
         if (this.wantsEvent('pull_request')) {
-            await this.pollPullRequests(owner, repo);
+            await this.pollPullRequests(owner, repo, firstSight);
         }
-
-        // Poll issues
         if (this.wantsEvent('issues')) {
-            await this.pollIssues(owner, repo);
+            await this.pollIssues(owner, repo, firstSight);
         }
-
-        // Poll pushes (via branch SHAs)
         if (this.enabledEvents.has('push')) {
-            await this.pollPushes(owner, repo);
+            await this.pollPushes(owner, repo, firstSight);
         }
-
-        // Poll comments
         if (this.enabledEvents.has('issue_comment.created')) {
-            await this.pollComments(owner, repo);
+            await this.pollComments(owner, repo, firstSight);
+        }
+        if (this.enabledEvents.has('pull_request_review.submitted')) {
+            await this.pollPullRequestReviews(owner, repo, firstSight);
         }
 
-        // Poll PR reviews
-        if (this.enabledEvents.has('pull_request_review.submitted')) {
-            await this.pollPullRequestReviews(owner, repo);
-        }
+        if (firstSight) this.state.seededRepos.add(repoFull);
     }
 
     private wantsEvent(prefix: string): boolean {
@@ -369,7 +421,7 @@ export class GitHubPollIntegration implements Integration {
 
     // ─── PR Polling ─────────────────────────────────────────────────────
 
-    private async pollPullRequests(owner: string, repo: string): Promise<void> {
+    private async pollPullRequests(owner: string, repo: string, firstSight: boolean): Promise<void> {
         const key = `${owner}/${repo}`;
         const url = `${GITHUB_API}/repos/${owner}/${repo}/pulls?state=all&sort=updated&direction=desc&per_page=20`;
         const prs = await this.apiGet(url) as Array<Record<string, unknown>>;
@@ -393,7 +445,7 @@ export class GitHubPollIntegration implements Integration {
             newHeadShas.set(num, headSha);
             newStates.set(num, merged ? 'merged' : state);
 
-            if (!this.state.seeded) continue; // Seed run — just collect state
+            if (firstSight) continue; // Seed run — just collect state
 
             if (!oldIds.has(num)) {
                 // ── New PR ───────────────────────────────────────────────
@@ -444,7 +496,7 @@ export class GitHubPollIntegration implements Integration {
 
     // ─── Issue Polling ──────────────────────────────────────────────────
 
-    private async pollIssues(owner: string, repo: string): Promise<void> {
+    private async pollIssues(owner: string, repo: string, firstSight: boolean): Promise<void> {
         const key = `${owner}/${repo}`;
         const url = `${GITHUB_API}/repos/${owner}/${repo}/issues?state=all&sort=updated&direction=desc&per_page=20&filter=all`;
         const issues = await this.apiGet(url) as Array<Record<string, unknown>>;
@@ -465,7 +517,7 @@ export class GitHubPollIntegration implements Integration {
             newIds.add(num);
             newStates.set(num, state);
 
-            if (!this.state.seeded) continue;
+            if (firstSight) continue;
 
             if (!oldIds.has(num)) {
                 // ── New issue ────────────────────────────────────────────
@@ -497,7 +549,7 @@ export class GitHubPollIntegration implements Integration {
 
     // ─── Push Polling (via branches) ────────────────────────────────────
 
-    private async pollPushes(owner: string, repo: string): Promise<void> {
+    private async pollPushes(owner: string, repo: string, firstSight: boolean): Promise<void> {
         const key = `${owner}/${repo}`;
         const url = `${GITHUB_API}/repos/${owner}/${repo}/branches?per_page=50`;
         const branches = await this.apiGet(url) as Array<Record<string, unknown>>;
@@ -512,7 +564,7 @@ export class GitHubPollIntegration implements Integration {
 
             newShas.set(name, sha);
 
-            if (!this.state.seeded) continue;
+            if (firstSight) continue;
 
             const oldSha = oldShas.get(name);
             if (oldSha && sha !== oldSha) {
@@ -530,7 +582,7 @@ export class GitHubPollIntegration implements Integration {
 
     // ─── Comment Polling ────────────────────────────────────────────────
 
-    private async pollComments(owner: string, repo: string): Promise<void> {
+    private async pollComments(owner: string, repo: string, firstSight: boolean): Promise<void> {
         const key = `${owner}/${repo}`;
         const url = `${GITHUB_API}/repos/${owner}/${repo}/issues/comments?sort=updated&direction=desc&per_page=20`;
         const comments = await this.apiGet(url) as Array<Record<string, unknown>>;
@@ -542,7 +594,7 @@ export class GitHubPollIntegration implements Integration {
             const id = comment.id as number;
             newIds.add(id);
 
-            if (!this.state.seeded) continue;
+            if (firstSight) continue;
 
             if (!oldIds.has(id)) {
                 // Extract the issue number from the issue_url
@@ -565,7 +617,7 @@ export class GitHubPollIntegration implements Integration {
 
     // ─── PR Review Polling ──────────────────────────────────────────────
 
-    private async pollPullRequestReviews(owner: string, repo: string): Promise<void> {
+    private async pollPullRequestReviews(owner: string, repo: string, firstSight: boolean): Promise<void> {
         const key = `${owner}/${repo}`;
 
         // Get open PRs to check reviews on
@@ -590,7 +642,7 @@ export class GitHubPollIntegration implements Integration {
                 const id = review.id as number;
                 newIds.add(id);
 
-                if (!this.state.seeded) continue;
+                if (firstSight) continue;
                 if (oldIds.has(id)) continue;
 
                 // Emit event for new reviews

@@ -1,8 +1,14 @@
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
+import pino from 'pino';
 import { GitHubPollIntegration } from '../integrations/github-poll/index.js';
 import type { EventPayload } from '../core/types.js';
 
 // ─── Test helpers ───────────────────────────────────────────────────────────
+
+/** Pino logger set to `silent` — same interface the engine passes in
+ *  production, just with no output. Lets the integration call
+ *  `this.logger.error(...)` without crashing on `undefined.error`. */
+const TEST_LOGGER = pino({ level: 'silent' });
 
 function makePr(overrides: Record<string, unknown> = {}) {
     return {
@@ -57,7 +63,7 @@ async function setupAndPoll(opts: {
         token: 'test-token',
         repos: opts.repos ?? ['org/repo'],
         events: opts.events,
-    });
+    }, TEST_LOGGER);
 
     // Capture the onEvent handler by calling registerRoutes with a fake server
     const fakeServer = {} as any;
@@ -98,7 +104,7 @@ describe('GitHubPollIntegration', () => {
         it('should throw if token is missing', async () => {
             const integration = new GitHubPollIntegration();
             await expect(
-                integration.initialize({ repos: ['org/repo'] }),
+                integration.initialize({ repos: ['org/repo'] }, TEST_LOGGER),
             ).rejects.toThrow('token is required');
         });
 
@@ -108,7 +114,7 @@ describe('GitHubPollIntegration', () => {
             // for the poll loop to iterate over.
             const integration = new GitHubPollIntegration();
             await expect(
-                integration.initialize({ token: 'tok', repos: [] }),
+                integration.initialize({ token: 'tok', repos: [] }, TEST_LOGGER),
             ).rejects.toThrow('at least one of `repos` or `orgs`');
         });
 
@@ -118,7 +124,7 @@ describe('GitHubPollIntegration', () => {
             // though `repos` is empty / unset.
             const integration = new GitHubPollIntegration();
             await expect(
-                integration.initialize({ token: 'tok', orgs: ['my-org'] }),
+                integration.initialize({ token: 'tok', orgs: ['my-org'] }, TEST_LOGGER),
             ).resolves.toBeUndefined();
         });
 
@@ -130,7 +136,7 @@ describe('GitHubPollIntegration', () => {
             // "at least one of repos or orgs" message as `orgs: []`.
             const integration = new GitHubPollIntegration();
             await expect(
-                integration.initialize({ token: 'tok', orgs: ['', '  '] }),
+                integration.initialize({ token: 'tok', orgs: ['', '  '] }, TEST_LOGGER),
             ).rejects.toThrow('at least one of `repos` or `orgs`');
         });
 
@@ -143,12 +149,41 @@ describe('GitHubPollIntegration', () => {
             await integration.initialize({
                 token: 'tok',
                 orgs: [' my-org ', 'my-org', '', 'other-org'],
-            });
+            }, TEST_LOGGER);
             // No public accessor — read the private field via bracket
             // notation. The cleaned list is what `refreshOrgRepos` iterates,
             // so this is the user-visible behavior even if it goes through
             // a private field.
             expect((integration as any).orgs).toEqual(['my-org', 'other-org']);
+        });
+
+        it('trims and dedupes repos the same way orgs are cleaned', async () => {
+            // The orgs path goes through trim+filter+dedupe; repos should
+            // get the same treatment for consistency. Empty/whitespace
+            // entries are no-op'd at poll time by the owner/repo split
+            // guard but appear in `allRepos()` output and any log statement
+            // that includes the repo key — the inconsistency is surprising.
+            const integration = new GitHubPollIntegration();
+            await integration.initialize({
+                token: 'tok',
+                repos: [' owner/alpha ', 'owner/alpha', '', 'owner/beta'],
+            }, TEST_LOGGER);
+            // explicitRepos is the cleaned set; the union returned by
+            // allRepos() is what poll() iterates.
+            const explicit = (integration as any).explicitRepos as Set<string>;
+            expect(explicit.size).toBe(2);
+            expect(explicit.has('owner/alpha')).toBe(true);
+            expect(explicit.has('owner/beta')).toBe(true);
+        });
+
+        it('rejects a repos-only config whose entries are all empty / whitespace', async () => {
+            // Symmetric with the orgs-empty rejection: after cleaning, if
+            // both cleaned lists are empty there is nothing to watch and
+            // validation must fail.
+            const integration = new GitHubPollIntegration();
+            await expect(
+                integration.initialize({ token: 'tok', repos: ['', '   '] }, TEST_LOGGER),
+            ).rejects.toThrow('at least one of `repos` or `orgs`');
         });
     });
 
@@ -536,10 +571,16 @@ describe('GitHubPollIntegration', () => {
                 token: 'tok',
                 repos: opts.repos,
                 orgs: opts.orgs,
-            });
-            const fakeServer = {} as any;
-            integration.registerRoutes(fakeServer, async (e) => { emitted.push(e); });
-            integration.stop(); // We'll drive poll() + refreshOrgRepos() by hand.
+            }, TEST_LOGGER);
+            // Skip registerRoutes — its 2s startup setTimeout would either
+            // need clearing via stop() (which now sets the `stopped` flag
+            // that the new cooperative-cancellation path in
+            // refreshOrgRepos respects, blocking the manual drive
+            // below) or fake timers. Directly wiring onEvent matches the
+            // production observable behaviour (event emission) without
+            // touching the timer lifecycle the tests aren't here to exercise.
+            (integration as unknown as { onEvent: (e: EventPayload) => Promise<void> })
+                .onEvent = async (e) => { emitted.push(e); };
 
             const fetchMock = vi.fn(async (url: string | URL | Request) => ({
                 ok: true,
@@ -696,10 +737,9 @@ describe('GitHubPollIntegration', () => {
         // walk happens end-to-end.
         it('follows GitHub Link headers to accumulate org repos across pages', async () => {
             const integration = new GitHubPollIntegration();
-            await integration.initialize({ token: 'tok', orgs: ['huge-org'] });
-            const fakeServer = {} as any;
-            integration.registerRoutes(fakeServer, async () => { /* noop */ });
-            integration.stop();
+            await integration.initialize({ token: 'tok', orgs: ['huge-org'] }, TEST_LOGGER);
+            // Skip registerRoutes/stop — driving refreshOrgRepos
+            // directly. See note in makeIntegrationWithOrgs.
 
             const PAGE_1_URL = 'https://api.github.com/orgs/huge-org/repos?per_page=100&type=all&sort=updated';
             const PAGE_2_URL = 'https://api.github.com/orgs/huge-org/repos?per_page=100&page=2';
@@ -773,7 +813,7 @@ describe('GitHubPollIntegration', () => {
                     orgs: ['my-org'],
                     org_refresh: 10,
                     interval: 5,
-                });
+                }, TEST_LOGGER);
                 integration.registerRoutes({} as any, async () => { /* noop */ });
                 integration.stop();
 
@@ -815,10 +855,73 @@ describe('GitHubPollIntegration', () => {
             // through different cleanup paths. Make sure the second call
             // doesn't throw on already-cleared handles.
             const integration = new GitHubPollIntegration();
-            await integration.initialize({ token: 'tok', orgs: ['my-org'] });
+            await integration.initialize({ token: 'tok', orgs: ['my-org'] }, TEST_LOGGER);
             integration.registerRoutes({} as any, async () => { /* noop */ });
             integration.stop();
             expect(() => integration.stop()).not.toThrow();
+        });
+
+        it('stop() called mid-refresh halts further org enumeration', async () => {
+            // The shutdown test above proves stop() before the 2s
+            // startup timer halts everything. This test proves stop()
+            // DURING a refresh — after one org's fetch resolved but
+            // before the next has been issued — also bails. Without
+            // this cooperative-cancellation point, a stop() during a
+            // multi-org enumeration would keep burning API quota and
+            // mutating state on a stopped integration.
+            const integration = new GitHubPollIntegration();
+            await integration.initialize({
+                token: 'tok',
+                orgs: ['org-a', 'org-b', 'org-c'],
+            }, TEST_LOGGER);
+
+            let aResolved: (() => void) | null = null;
+            const aPromise = new Promise<void>((r) => { aResolved = r; });
+
+            // org-a's fetch suspends until we manually resolve it. That
+            // gives us a deterministic window to call stop() while
+            // refreshOrgRepos is mid-loop. org-b/org-c should NEVER be
+            // fetched after the stop.
+            let fetchedOrgs: string[] = [];
+            const fetchMock = vi.fn(async (url: string | URL | Request) => {
+                const s = String(url);
+                const orgMatch = s.match(/\/orgs\/([^/]+)\/repos/);
+                if (orgMatch) {
+                    const org = orgMatch[1];
+                    fetchedOrgs.push(org);
+                    if (org === 'org-a') {
+                        await aPromise;
+                        return jsonOk([{ full_name: 'org-a/repo' }]);
+                    }
+                    return jsonOk([{ full_name: `${org}/repo` }]);
+                }
+                return jsonOk([]);
+            }) as unknown as typeof globalThis.fetch;
+            const originalFetch = globalThis.fetch;
+            globalThis.fetch = fetchMock;
+
+            try {
+                // Start the refresh; it hangs on org-a's fetch.
+                const refreshPromise = (integration as any).refreshOrgRepos();
+                // Let microtasks drain so the first fetch is issued.
+                await new Promise((r) => setImmediate(r));
+                expect(fetchedOrgs).toEqual(['org-a']);
+
+                // Stop mid-flight. The post-await stopped check will
+                // discard the response, and the loop top will skip
+                // org-b and org-c.
+                integration.stop();
+                aResolved!();
+                await refreshPromise;
+
+                expect(fetchedOrgs).toEqual(['org-a']);
+                // org-a's fetched repos were NOT applied because we
+                // stopped between the await resolving and the
+                // `orgRepos.set` mutation.
+                expect((integration as any).orgRepos.size).toBe(0);
+            } finally {
+                globalThis.fetch = originalFetch;
+            }
         });
     });
 
@@ -847,9 +950,10 @@ describe('GitHubPollIntegration', () => {
                 token: 'tok',
                 repos: opts.repos,
                 orgs: opts.orgs,
-            });
-            integration.registerRoutes({} as any, async () => { /* noop */ });
-            integration.stop();
+            }, TEST_LOGGER);
+            // Skip registerRoutes — see note in makeIntegrationWithOrgs.
+            // These tests drive refreshOrgRepos directly; we don't need
+            // the 2s startup timer or a wired onEvent.
             const fetchMock = vi.fn(async (url: string | URL | Request) => ({
                 ok: true,
                 status: 200,
@@ -937,4 +1041,192 @@ describe('GitHubPollIntegration', () => {
             expect(((integration as any).allRepos() as Set<string>).has('my-org/alpha')).toBe(true);
         });
     });
+
+    // ─── Per-repo seeding ───────────────────────────────────────────────────
+    //
+    // Before the per-repo seeding fix, a single global `state.seeded` flag
+    // was flipped after the first `poll()` cycle. With the static watch
+    // sets the integration used to have, that was correct — every repo
+    // was seen on the first cycle. With dynamic org enumeration, a repo
+    // that joins the watch set on a *later* refresh would arrive with
+    // empty per-repo state but `seeded === true`, and the next poll's
+    // "is this PR new?" check would fire `pull_request.opened` for every
+    // existing PR on it (same flood for issues/comments/branches).
+    // Triggering scenarios: org repo created from template, repo
+    // transferred in, private repo flipped public, user adds an org to
+    // `config.orgs` mid-run.
+    //
+    // The fix replaces `state.seeded` with `state.seededRepos: Set<string>`
+    // and threads a `firstSight` boolean through every sub-poller. Pin
+    // the behaviour end-to-end so a future refactor can't quietly slip
+    // back to a global flag.
+
+    describe('per-repo seeding on dynamic watch set', () => {
+        it('does NOT emit historical events when a new repo joins the watch set post-startup', async () => {
+            // Two refresh cycles: first sees only `my-org/alpha`, second
+            // discovers `my-org/beta`. Drive a poll after each. beta's
+            // pre-existing PRs/issues/comments must NOT emit on its
+            // first poll — that's the whole point of seeding.
+            const emitted: EventPayload[] = [];
+            const integration = new GitHubPollIntegration();
+            await integration.initialize({
+                token: 'tok',
+                orgs: ['my-org'],
+                events: [
+                    'pull_request.opened',
+                    'issues.opened',
+                    'issue_comment.created',
+                    'push',
+                ],
+            }, TEST_LOGGER);
+            (integration as unknown as { onEvent: (e: EventPayload) => Promise<void> })
+                .onEvent = async (e) => { emitted.push(e); };
+
+            let orgCycle = 0;
+            const fetchMock = vi.fn(async (url: string | URL | Request) => {
+                const s = String(url);
+                if (s.includes('/orgs/my-org/repos')) {
+                    orgCycle++;
+                    if (orgCycle === 1) return jsonOk([{ full_name: 'my-org/alpha' }]);
+                    return jsonOk([
+                        { full_name: 'my-org/alpha' },
+                        { full_name: 'my-org/beta' },
+                    ]);
+                }
+                if (s.includes('/repos/my-org/alpha/pulls')) {
+                    return jsonOk([makePr({ number: 1 })]);
+                }
+                if (s.includes('/repos/my-org/alpha/issues')) {
+                    return jsonOk([makeIssue({ number: 10 })]);
+                }
+                if (s.includes('/repos/my-org/alpha/branches')) {
+                    return jsonOk([makeBranch('main', 'sha-a')]);
+                }
+                if (s.includes('/repos/my-org/alpha/issues/comments')) {
+                    return jsonOk([makeComment(100, 10)]);
+                }
+                // `beta` has 50 existing PRs and several issues/branches
+                // already at the moment it joins the watch set. NONE of
+                // these should emit on its first poll.
+                if (s.includes('/repos/my-org/beta/pulls')) {
+                    return jsonOk(Array.from({ length: 50 }, (_, i) => makePr({ number: i + 1 })));
+                }
+                if (s.includes('/repos/my-org/beta/issues')) {
+                    return jsonOk([makeIssue({ number: 500 }), makeIssue({ number: 501 })]);
+                }
+                if (s.includes('/repos/my-org/beta/branches')) {
+                    return jsonOk([
+                        makeBranch('main', 'sha-main'),
+                        makeBranch('dev', 'sha-dev'),
+                    ]);
+                }
+                if (s.includes('/repos/my-org/beta/issues/comments')) {
+                    return jsonOk([makeComment(9000, 500), makeComment(9001, 501)]);
+                }
+                return jsonOk([]);
+            }) as unknown as typeof globalThis.fetch;
+            const originalFetch = globalThis.fetch;
+            globalThis.fetch = fetchMock;
+
+            try {
+                // Cycle 1: seed alpha. seededRepos becomes {my-org/alpha}.
+                await (integration as any).refreshOrgRepos();
+                await (integration as any).poll();
+                expect(emitted).toHaveLength(0);
+
+                // Cycle 2: beta enters the watch set. Its first poll
+                // must SEED (no emissions), not fire pull_request.opened
+                // × 50, issues.opened × 2, push × 2, issue_comment ×2.
+                await (integration as any).refreshOrgRepos();
+                await (integration as any).poll();
+                expect(emitted).toHaveLength(0);
+
+                // Sanity check: seededRepos now contains both repos so
+                // the NEXT cycle would emit real diffs (this test
+                // doesn't drive cycle 3, but the fix's invariant is that
+                // both repos are seeded once each).
+                const seeded = (integration as any).state.seededRepos as Set<string>;
+                expect(seeded.has('my-org/alpha')).toBe(true);
+                expect(seeded.has('my-org/beta')).toBe(true);
+            } finally {
+                globalThis.fetch = originalFetch;
+            }
+        });
+
+        it('emits real events for a known repo on the same cycle that adds a new repo', async () => {
+            // Sister case: when a freshly-enumerated repo seeds, the
+            // ALREADY-seeded repo on the same poll cycle must continue
+            // to emit normally. The fix must not blanket-suppress the
+            // whole cycle's emissions.
+            const emitted: EventPayload[] = [];
+            const integration = new GitHubPollIntegration();
+            await integration.initialize({
+                token: 'tok',
+                orgs: ['my-org'],
+                events: ['pull_request.opened'],
+            }, TEST_LOGGER);
+            (integration as unknown as { onEvent: (e: EventPayload) => Promise<void> })
+                .onEvent = async (e) => { emitted.push(e); };
+
+            let orgCycle = 0;
+            let alphaPrsSeenInCycle2 = false;
+            const fetchMock = vi.fn(async (url: string | URL | Request) => {
+                const s = String(url);
+                if (s.includes('/orgs/my-org/repos')) {
+                    orgCycle++;
+                    if (orgCycle === 1) return jsonOk([{ full_name: 'my-org/alpha' }]);
+                    return jsonOk([
+                        { full_name: 'my-org/alpha' },
+                        { full_name: 'my-org/beta' },
+                    ]);
+                }
+                if (s.includes('/repos/my-org/alpha/pulls')) {
+                    // Cycle 1: alpha has [1]. Cycle 2: alpha gains PR #2.
+                    // PR #2 is genuinely new and must emit.
+                    if (!alphaPrsSeenInCycle2) {
+                        alphaPrsSeenInCycle2 = true;
+                        return jsonOk([makePr({ number: 1 })]);
+                    }
+                    return jsonOk([makePr({ number: 2 }), makePr({ number: 1 })]);
+                }
+                if (s.includes('/repos/my-org/beta/pulls')) {
+                    // beta has pre-existing PRs — must seed, not flood.
+                    return jsonOk([makePr({ number: 99 }), makePr({ number: 100 })]);
+                }
+                return jsonOk([]);
+            }) as unknown as typeof globalThis.fetch;
+            const originalFetch = globalThis.fetch;
+            globalThis.fetch = fetchMock;
+
+            try {
+                await (integration as any).refreshOrgRepos();
+                await (integration as any).poll(); // seeds alpha
+                expect(emitted).toHaveLength(0);
+
+                await (integration as any).refreshOrgRepos();
+                await (integration as any).poll();
+
+                // alpha emits pull_request.opened for PR #2.
+                // beta emits nothing — it's seeding.
+                expect(emitted).toHaveLength(1);
+                expect(emitted[0].event).toBe('pull_request.opened');
+                expect(emitted[0].payload.number).toBe(2);
+                expect(emitted[0].metadata.repo).toBe('my-org/alpha');
+            } finally {
+                globalThis.fetch = originalFetch;
+            }
+        });
+    });
 });
+
+function jsonOk(payload: unknown): {
+    ok: true; status: 200; statusText: 'OK';
+    headers: { get: () => null };
+    json: () => Promise<unknown>;
+} {
+    return {
+        ok: true, status: 200, statusText: 'OK',
+        headers: { get: () => null },
+        json: async () => payload,
+    };
+}
