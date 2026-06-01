@@ -14,7 +14,7 @@ import { loadAIProviders } from './ai-providers.js';
 import { toArray } from './types.js';
 import { executeGraph } from './nodes/runtime.js';
 import { getNodeRegistry } from './nodes/registry.js';
-import { extractTriggerFromGraph, isGraphWorkflow } from './nodes/graph-trigger.js';
+import { isGraphWorkflow, normalizeGraphWorkflow } from './nodes/graph-trigger.js';
 import { abortErrorFromSignal } from './abort-error.js';
 import { isStringTruthy } from './nodes/truthy.js';
 import { isWorkflowTempPath } from './temp-paths.js';
@@ -40,12 +40,21 @@ export function matchesTrigger(
     // Disabled workflows never match
     if (workflow.enabled === false) return false;
 
-    // Graph workflows store trigger config inside a trigger.<source> node;
-    // bridge that to the legacy TriggerDefinition shape so the matching
-    // logic below stays unchanged.
-    const trigger = isGraphWorkflow(workflow) && workflow.graph
-        ? (extractTriggerFromGraph(workflow.graph) ?? workflow.trigger)
-        : workflow.trigger;
+    // Graph workflows store trigger config inside a trigger.<source>
+    // node. `normalizeWorkflow` already merges that with any YAML-level
+    // `trigger:` block at load time via `normalizeGraphWorkflow`, so
+    // engine-loaded workflows arrive here pre-merged. We still call it
+    // defensively here because matchesTrigger is also reachable from
+    // tests and ad-hoc callers that build a WorkflowDefinition directly
+    // without going through the load pipeline — and the helper is a
+    // no-op for legacy steps-only workflows and idempotent for already-
+    // merged ones. Without this, a graph workflow's trigger.<source>
+    // node used to silently discard YAML-authored source overrides
+    // (e.g. `template: ai-pr-review` with `source: gh-cli` never
+    // matched gh-cli events because the graph's trigger.github node
+    // forced source back to 'github').
+    const normalized = isGraphWorkflow(workflow) ? normalizeGraphWorkflow(workflow) : workflow;
+    const trigger = normalized.trigger;
     if (!trigger) return false;
 
     // ─── Source matching (any of the trigger sources) ────────────────────

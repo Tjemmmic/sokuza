@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import yaml from 'js-yaml';
 import type { WorkflowDefinition, TriggerDefinition, WorkflowStepDefinition, OneOrMany } from './types.js';
 import { toArray } from './types.js';
+import { normalizeGraphWorkflow } from './nodes/graph-trigger.js';
 
 // ─── Template Loading ───────────────────────────────────────────────────────
 
@@ -158,24 +159,36 @@ export async function normalizeWorkflow(
 
     // ─── Shorthand resolution ────────────────────────────────────────────
     // Graph workflows can omit a top-level trigger — the runtime derives
-    // matching info from the graph's trigger node. Provide a placeholder
-    // here so downstream code that accesses `wf.trigger` doesn't blow up.
+    // matching info from the graph's trigger node. For graph-only
+    // workflows we leave `trigger` undefined here so the merge below
+    // (`normalizeGraphWorkflow`) can pull `source` straight from the
+    // graph's trigger node. Synthesizing a `{source:'manual'}` placeholder
+    // would shadow the real graph-derived source, hiding e.g. `github`
+    // triggers behind a fake `manual` source.
+    // Legacy steps-only workflows still get the `manual` placeholder when
+    // no YAML trigger is set so downstream code that accesses
+    // `wf.trigger` keeps a defined value to read.
     const resolvedTrigger = trigger
         ? resolveShorthands(trigger)
-        : { source: 'manual', event: [] };
+        : (hasGraph ? undefined : { source: 'manual', event: [] });
 
-    return {
+    const wf: WorkflowDefinition = {
         name: raw.name as string,
         description: raw.description as string | undefined,
         enabled: raw.enabled !== undefined ? raw.enabled as boolean : undefined,
         template: templateName,
-        trigger: resolvedTrigger,
+        trigger: resolvedTrigger as TriggerDefinition,
         steps,
         graph,
         inputs: raw.inputs as WorkflowDefinition['inputs'],
         queue: raw.queue as WorkflowDefinition['queue'],
         ai: raw.ai as WorkflowDefinition['ai'],
     };
+    // For graph workflows, merge the graph-derived trigger with any YAML
+    // trigger fields so user-authored `trigger.source` / `trigger.event` /
+    // `trigger.filters` overrides actually surface to matchesTrigger. The
+    // helper is a no-op for legacy steps-only workflows.
+    return normalizeGraphWorkflow(wf);
 }
 
 function resolveShorthands(
