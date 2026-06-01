@@ -271,7 +271,44 @@ describe('extractCliText', () => {
         expect(extractCliText('opencode', raw)).toBe('PONG');
     });
 
-    it('opencode: empty result when stream has no text events', () => {
+    it('opencode: empty result when stream has no text or error events', () => {
+        // No text + no error → empty (caller treats as silent failure
+        // via the ai-review empty-output guard).
         expect(extractCliText('opencode', '{"type":"step_start","part":{}}')).toBe('');
+    });
+
+    it('opencode: surfaces error event messages when no text events were emitted', () => {
+        // Previously a real failure mode: opencode exits 0 but the
+        // stream contains only `error` events (provider hiccup,
+        // model rejected). Without this, the parser returns `""` and
+        // the workflow posts an empty review comment.
+        const jsonl = [
+            '{"type":"step_start","part":{}}',
+            '{"type":"error","error":{"name":"ProviderError","data":{"message":"upstream API 503"}}}',
+            '{"type":"step_finish","part":{}}',
+        ].join('\n');
+        const got = extractCliText('opencode', jsonl);
+        expect(got).toMatch(/^\[opencode-error\]/);
+        expect(got).toContain('upstream API 503');
+    });
+
+    it('opencode: text events win over coincident error events', () => {
+        // When the model produced SOMETHING usable, surface that
+        // instead of the error tail. The error events are still in the
+        // record stream for debugging, but the user-visible output is
+        // the model's actual text.
+        const jsonl = [
+            '{"type":"text","part":{"text":"partial answer"}}',
+            '{"type":"error","error":{"data":{"message":"some upstream warning"}}}',
+        ].join('\n');
+        expect(extractCliText('opencode', jsonl)).toBe('partial answer');
+    });
+
+    it('opencode: error event with no data.message falls back to error.name', () => {
+        // Newer opencode error shapes vary; tolerate both `data.message`
+        // and `name` so a future schema bump doesn't silently swallow
+        // the diagnostic.
+        const jsonl = '{"type":"error","error":{"name":"UnknownError"}}';
+        expect(extractCliText('opencode', jsonl)).toBe('[opencode-error] UnknownError');
     });
 });

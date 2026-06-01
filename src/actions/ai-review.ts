@@ -307,6 +307,44 @@ export const aiReviewAction: ActionHandler = async (params, context) => {
         );
     }
 
+    // ─── Empty-output guard ─────────────────────────────────────────────
+    // Real failure mode previously observed with opencode + glm-5.1: the
+    // CLI exits 0 but emits a JSONL stream with no `text` events (model
+    // gave up before producing text, provider mid-stream hiccup, schema
+    // drift). `completion.text` is `""`, the parser finds no JSON, the
+    // fallback above sets `review = ""` — and the workflow happily
+    // posts an empty review comment with just the template's header
+    // and footer. Throwing here surfaces the failure in the dashboard
+    // run viewer instead of silently advertising "the AI reviewed your
+    // PR" with no content. extractCliText already surfaces opencode
+    // `error` events as `[opencode-error] ...` text, so the throw also
+    // captures that diagnostic when the model output was an error.
+    if (!review.trim()) {
+        await recordAiReviewRun(
+            {
+                ...recordStub,
+                durationMs: Date.now() - startedAt,
+                provider: completion.provider,
+                model: completion.model,
+                usage: completion.usage,
+                output: {
+                    parseSucceeded: false,
+                    reviewChars: 0,
+                    rawSample: attemptText.slice(0, 5000),
+                    parseFailureKind: parseResult.failureKind,
+                    ...(repairAttempts.length > 0 ? { repairAttempts } : {}),
+                },
+            },
+            context.logger,
+        );
+        throw new Error(
+            `ai-review: ${completion.provider} (${completion.model}) returned no usable content. ` +
+            `The CLI exited cleanly but produced no model text. Common causes: model ` +
+            `emitted only reasoning, provider mid-stream error, or upstream CLI schema ` +
+            `drift. Run record: ${runId}.`,
+        );
+    }
+
     await recordAiReviewRun(
         {
             ...recordStub,

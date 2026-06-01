@@ -1,8 +1,11 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { mkdtemp, mkdir, writeFile, symlink, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
-import { detectInstaller } from '../cli/update.js';
+import { detectInstaller, resolveEntryPath } from '../cli/update.js';
 import { compareSemver, isNewer } from '../cli/update-check.js';
-import { extractField } from '../cli/service.js';
+import { extractField, renderWindowsTaskXml, type InstallCtx } from '../cli/service.js';
 
 describe('detectInstaller', () => {
     it('recognises a Homebrew Cellar install', () => {
@@ -73,6 +76,66 @@ describe('detectInstaller', () => {
     });
 });
 
+// `runUpdate` calls `resolveEntryPath(process.argv[1])`. On a real
+// npm-global install, argv[1] is `~/.npm-global/bin/sokuza` — a symlink
+// pointing at `~/.npm-global/lib/node_modules/sokuza/dist/index.js`.
+// Before realpath-ing the symlink, detectInstaller saw the bin path
+// (no `/node_modules/sokuza/`), misclassified as 'source', and refused
+// to upgrade. This was the actual user-visible bug.
+
+describe('resolveEntryPath', () => {
+    let tmp = '';
+
+    beforeEach(async () => {
+        tmp = await mkdtemp(join(tmpdir(), 'sokuza-resolve-entry-'));
+    });
+
+    afterEach(async () => {
+        if (tmp) await rm(tmp, { recursive: true, force: true });
+    });
+
+    it('returns the resolved path unchanged for a regular file', async () => {
+        const real = join(tmp, 'plain.js');
+        await writeFile(real, '');
+        expect(resolveEntryPath(real)).toBe(real);
+    });
+
+    it('follows a symlink to the underlying install path', async () => {
+        // Reproduce the npm-global layout exactly: `bin/sokuza` symlink
+        // → `lib/node_modules/sokuza/dist/index.js`. The symlink path
+        // doesn't contain `/node_modules/sokuza/`, the target does.
+        const lib = join(tmp, 'lib', 'node_modules', 'sokuza', 'dist');
+        await mkdir(lib, { recursive: true });
+        const target = join(lib, 'index.js');
+        await writeFile(target, '');
+
+        const binDir = join(tmp, 'bin');
+        await mkdir(binDir, { recursive: true });
+        const link = join(binDir, 'sokuza');
+        await symlink(target, link);
+
+        // Resolving the symlink path must return the target, NOT the
+        // symlink — otherwise detectInstaller still won't see
+        // `/node_modules/sokuza/` and falls back to 'source'.
+        const resolved = resolveEntryPath(link);
+        expect(resolved).toBe(target);
+        expect(resolved).toContain('/node_modules/sokuza/');
+
+        // And the downstream classifier now correctly identifies npm.
+        expect(detectInstaller(resolved).name).toBe('npm');
+    });
+
+    it('falls back to the resolved-but-unfollowed path on realpath failure', async () => {
+        // Defensive: if argv[1] points at something that doesn't exist
+        // (deleted binary, broken symlink, ENOENT), don't throw — let
+        // detectInstaller deal with it. Mis-classifying as 'source' is
+        // a clearer user message than an unhandled realpath exception
+        // crashing `sokuza update`.
+        const missing = join(tmp, 'does-not-exist');
+        expect(resolveEntryPath(missing)).toBe(missing);
+    });
+});
+
 describe('compareSemver', () => {
     it('returns 0 for identical versions', () => {
         expect(compareSemver('1.2.3', '1.2.3')).toBe(0);
@@ -138,5 +201,28 @@ Scheduled Task State:                 Enabled
 
     it('is case-insensitive on the field name', () => {
         expect(extractField(sample, 'status')).toBe('Running');
+    });
+});
+
+// `sokuza service restart` on Windows used to race against `schtasks /End`'s
+// async stop: with MultipleInstancesPolicy=IgnoreNew baked into the install
+// XML, a follow-up `/Run` could be silently dropped while the prior instance
+// was still winding down, leaving us to report a phantom "Restarted." The
+// task XML now uses StopExisting so `/Run` alone has true restart semantics,
+// closing the race for any future install. Pin that policy choice in the
+// XML so a casual edit can't reintroduce the bug.
+describe('renderWindowsTaskXml', () => {
+    const ctx: InstallCtx = {
+        configPath: 'C:\\Users\\alice\\sokuza.config.yaml',
+        nodeBin: 'C:\\Program Files\\nodejs\\node.exe',
+        entry: 'C:\\Users\\alice\\AppData\\Roaming\\npm\\node_modules\\sokuza\\dist\\index.js',
+        workdir: 'C:\\Users\\alice',
+        servicePath: 'C:\\Windows\\System32;C:\\Program Files\\nodejs',
+    };
+
+    it('uses MultipleInstancesPolicy=StopExisting so /Run alone restarts cleanly', () => {
+        const xml = renderWindowsTaskXml(ctx, 'MYPC\\alice');
+        expect(xml).toContain('<MultipleInstancesPolicy>StopExisting</MultipleInstancesPolicy>');
+        expect(xml).not.toContain('<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>');
     });
 });

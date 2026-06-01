@@ -5897,7 +5897,8 @@ async function renderSystem(el) {
             ${(svcStatus?.notes ?? []).map((n) => `<p style="color:var(--text-muted);font-size:12px">• ${esc(n)}</p>`).join('')}
             <div class="btn-group" style="margin-top:12px">
                 ${svcStatus?.installed
-                    ? `<button class="btn btn-danger-outline" onclick="systemServiceDisable()">Disable autostart</button>`
+                    ? `<button class="btn btn-ghost" onclick="systemServiceRestart(this)">Restart service</button>
+                       <button class="btn btn-danger-outline" onclick="systemServiceDisable()">Disable autostart</button>`
                     : `<button class="btn btn-primary" onclick="systemServiceEnable()">Enable autostart</button>`
                 }
             </div>
@@ -5977,6 +5978,57 @@ window.systemServiceDisable = async function () {
     } catch (err) {
         toast(`Disable failed: ${err.message}`, 'error');
     }
+    renderPage();
+};
+
+window.systemServiceRestart = async function (btn) {
+    if (!await confirm('Restart the autostart service? The dashboard may briefly disconnect while it bounces.')) return;
+    if (btn) { btn.disabled = true; }
+    toast('Restarting service…');
+    let backendError = null;
+    try {
+        await api.post('/api/system/service/restart', {});
+    } catch (err) {
+        // The platform service manager kills *this* process (the server we
+        // just spoke to) as part of the restart, so the connection can be
+        // severed before the 202 reaches us. Browser fetch surfaces that as
+        // one of a small set of well-known error strings — match those
+        // exactly so a real backend error whose message happens to contain
+        // the word "network" doesn't get silently swallowed.
+        const networkOnly = /^(TypeError: )?(Failed to fetch|NetworkError when attempting to fetch resource|fetch failed|Load failed)\.?$/i.test(err.message ?? '');
+        if (!networkOnly) backendError = err.message;
+    }
+    if (backendError) {
+        toast(`Restart failed: ${backendError}`, 'error');
+        if (btn) { btn.disabled = false; }
+        renderPage();
+        return;
+    }
+    // Poll until the new instance is back active, with a deadline. The
+    // first 1–2 polls typically fail with a fetch error because the
+    // platform service manager is mid-kill — treat those as "still
+    // restarting", not failure. We rely on /api/system/service reporting
+    // `active=true` to confirm the new process is up and bound to its
+    // port, rather than assuming it after a fixed delay.
+    const deadlineMs = 15000;
+    const intervalMs = 1000;
+    const deadline = Date.now() + deadlineMs;
+    let active = false;
+    while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, intervalMs));
+        try {
+            const svc = await api.get('/api/system/service');
+            if (svc?.status?.active) { active = true; break; }
+        } catch {
+            // Server still coming back — keep polling.
+        }
+    }
+    if (active) {
+        toast('Service restarted');
+    } else {
+        toast(`Restart issued, but service has not come back active within ${deadlineMs / 1000}s — check sokuza logs`, 'error');
+    }
+    if (btn) { btn.disabled = false; }
     renderPage();
 };
 
