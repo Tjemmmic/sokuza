@@ -8,7 +8,7 @@ import type { WorkflowQueue } from '../core/queue.js';
 import type { ConfigStore } from '../core/config-store.js';
 import type { LogStore } from '../core/log-store.js';
 import { VERSION } from '../version.js';
-import { serviceStatus, installService, uninstallService } from '../cli/service.js';
+import { serviceStatus, installService, uninstallService, restartService } from '../cli/service.js';
 import { runUpdateCommand, resolveEntryPath } from '../cli/update.js';
 import { readUpdateCache, refreshUpdateCache, isNewer } from '../cli/update-check.js';
 
@@ -934,6 +934,38 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
             logger.error({ err }, 'Autostart disable via dashboard failed');
             return reply.status(500).send({ error: err.message ?? 'Failed to disable autostart' });
         }
+    });
+
+    server.post('/api/system/service/restart', async (_request, reply) => {
+        // Pre-check synchronously so an uninstalled service yields a clear
+        // 400 instead of a dishonest "restart scheduled" ACK.
+        const status = await serviceStatus();
+        if (!status.installed) {
+            return reply.status(400).send({
+                error:
+                    `Service is not installed — run \`sokuza service enable\` first ` +
+                    `before restarting.`,
+            });
+        }
+
+        // Issue the actual restart on a later tick. systemd / launchd / Task
+        // Scheduler will deliver SIGTERM to *this* process the moment the
+        // restart fires; deferring lets Fastify finish writing this 202 and
+        // flush the socket so the dashboard can distinguish "restart
+        // accepted" from "server crashed mid-request" and start its poll
+        // loop for the new instance.
+        setImmediate(() => {
+            restartService()
+                .then((r) => logger.info(
+                    { platform: r.platform, unitPath: r.unitPath },
+                    'Service restart issued via dashboard',
+                ))
+                .catch((err: any) => logger.error(
+                    { err }, 'Service restart via dashboard failed',
+                ));
+        });
+
+        return reply.status(202).send({ scheduled: true, platform: status.platform });
     });
 
     /** Shape both `/update` GETs return so the UI can render one code path. */

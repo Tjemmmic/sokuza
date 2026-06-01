@@ -16,7 +16,7 @@ import { runLogs } from './cli/logs.js';
 import { runToken } from './cli/token.js';
 import { runUpdate } from './cli/update.js';
 import { maybeNotifyUpdate, refreshUpdateCache } from './cli/update-check.js';
-import { installService, uninstallService, serviceStatus, type ServiceStatus } from './cli/service.js';
+import { installService, uninstallService, restartService, serviceStatus, type ServiceStatus } from './cli/service.js';
 
 interface ParsedArgs {
     command: string;
@@ -41,6 +41,7 @@ interface ParsedArgs {
  *   sokuza logs [-f] [-n N]           → show platform-appropriate logs
  *   sokuza service enable [--config PATH]
  *   sokuza service disable
+ *   sokuza service restart
  *   sokuza service status
  *   sokuza update                     → upgrade via detected package manager
  *   sokuza version | --version | -v
@@ -140,6 +141,7 @@ Usage:
   sokuza service enable [--config PATH]
                                    Install + start the autostart service
   sokuza service disable           Stop + remove the autostart service
+  sokuza service restart           Bounce the autostart service (kicks a stuck instance)
   sokuza service status            Report autostart installation and state
   sokuza update                    Upgrade sokuza via its installer (npm, brew, …)
   sokuza version                   Print version and exit
@@ -195,6 +197,11 @@ async function runServiceCommand(args: ParsedArgs): Promise<void> {
             printServiceResult('Uninstalled', result);
             return;
         }
+        case 'restart': {
+            const result = await restartService();
+            printServiceResult('Restarted', result);
+            return;
+        }
         case 'status': {
             const s = await serviceStatus();
             printServiceStatus(s);
@@ -202,7 +209,7 @@ async function runServiceCommand(args: ParsedArgs): Promise<void> {
         }
         case undefined:
             process.stderr.write(
-                `sokuza service: missing subcommand. Expected one of: enable, disable, status.\n\n`,
+                `sokuza service: missing subcommand. Expected one of: enable, disable, restart, status.\n\n`,
             );
             printHelp();
             process.exit(2);
@@ -210,7 +217,7 @@ async function runServiceCommand(args: ParsedArgs): Promise<void> {
         default:
             process.stderr.write(
                 `sokuza service: unknown subcommand "${args.subcommand}". ` +
-                `Expected one of: enable, disable, status.\n\n`,
+                `Expected one of: enable, disable, restart, status.\n\n`,
             );
             printHelp();
             process.exit(2);

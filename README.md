@@ -121,7 +121,7 @@ The dashboard is at `http://localhost:24847/` (open via the one-time link `sokuz
 | `sokuza status` | Report locally-running instances |
 | `sokuza logs [-f] [-n N]` | Tail the application log |
 | `sokuza token [--rotate] [--json]` | Print the dashboard bearer token |
-| `sokuza service enable` / `disable` / `status` | Install/manage the autostart service (launchd on macOS, systemd on Linux) |
+| `sokuza service enable` / `disable` / `restart` / `status` | Install/manage the autostart service (launchd on macOS, systemd on Linux) |
 | `sokuza update` | Upgrade via the installer (npm, brew) |
 | `sokuza version` | Print version |
 

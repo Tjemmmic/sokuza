@@ -5897,7 +5897,8 @@ async function renderSystem(el) {
             ${(svcStatus?.notes ?? []).map((n) => `<p style="color:var(--text-muted);font-size:12px">• ${esc(n)}</p>`).join('')}
             <div class="btn-group" style="margin-top:12px">
                 ${svcStatus?.installed
-                    ? `<button class="btn btn-danger-outline" onclick="systemServiceDisable()">Disable autostart</button>`
+                    ? `<button class="btn btn-ghost" onclick="systemServiceRestart()">Restart service</button>
+                       <button class="btn btn-danger-outline" onclick="systemServiceDisable()">Disable autostart</button>`
                     : `<button class="btn btn-primary" onclick="systemServiceEnable()">Enable autostart</button>`
                 }
             </div>
@@ -5978,6 +5979,33 @@ window.systemServiceDisable = async function () {
         toast(`Disable failed: ${err.message}`, 'error');
     }
     renderPage();
+};
+
+window.systemServiceRestart = async function () {
+    if (!await confirm('Restart the autostart service? The dashboard will briefly disconnect while it bounces.')) return;
+    toast('Restarting service…');
+    try {
+        await api.post('/api/system/service/restart', {});
+    } catch (err) {
+        // The platform service manager kills *this* process (the server we
+        // just spoke to) as part of the restart, so the connection can be
+        // severed before the 202 reaches us. That race surfaces as a
+        // fetch/network error and should be treated as "restart accepted,
+        // server is on its way down." A real validation failure (e.g.
+        // 400 "service not installed") carries a backend message instead.
+        const benign = /(Failed to fetch|NetworkError|fetch failed|Load failed|network)/i.test(err.message ?? '');
+        if (!benign) {
+            toast(`Restart failed: ${err.message}`, 'error');
+            renderPage();
+            return;
+        }
+    }
+    // Give the new service instance a few seconds to bind its socket before
+    // we re-render the System page (which probes /api/system/service).
+    setTimeout(() => {
+        toast('Service restart complete');
+        renderPage();
+    }, 6000);
 };
 
 window.systemCheckUpdate = async function () {

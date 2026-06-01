@@ -245,8 +245,6 @@ export async function runUpdate(): Promise<void> {
 
     process.stdout.write(
         `\nUpdate complete. If sokuza is running as a service, restart it so the ` +
-        `new version takes effect — on Linux: \`systemctl --user restart sokuza.service\`, ` +
-        `on macOS: \`launchctl kickstart -k gui/$(id -u)/ai.sokuza\`, ` +
-        `on Windows: re-run \`schtasks /End /TN Sokuza\` then \`schtasks /Run /TN Sokuza\`.\n`,
+        `new version takes effect: \`sokuza service restart\`.\n`,
     );
 }

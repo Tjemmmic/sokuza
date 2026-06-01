@@ -133,6 +133,126 @@ export async function uninstallService(): Promise<ServiceResult> {
     throw new Error(`Unsupported platform for service uninstall: ${plat}`);
 }
 
+/**
+ * Bounce the autostart service so it picks up new code, a refreshed
+ * environment, or recovers from a stuck state — without forcing the user
+ * to know which init system they're on.
+ *
+ * Each platform branch refuses to act if the unit isn't installed: a
+ * silent no-op there would be worse than a clear error, because users
+ * reach for this when they think the service is misbehaving and need
+ * fast feedback. When the unit IS installed, the platform tools all
+ * handle the "not currently running" case gracefully — restart just
+ * means "start" if it wasn't already up.
+ */
+export async function restartService(): Promise<ServiceResult> {
+    const plat = platform();
+    if (plat === 'linux') return restartLinux();
+    if (plat === 'darwin') return restartMacOS();
+    if (plat === 'win32') return restartWindows();
+    throw new Error(`Unsupported platform for service restart: ${plat}`);
+}
+
+function restartLinux(): ServiceResult {
+    const unitPath = join(homedir(), '.config', 'systemd', 'user', LINUX_UNIT_NAME);
+    if (!existsSync(unitPath)) {
+        throw new Error(
+            `No systemd user unit at ${unitPath}. ` +
+            `Run \`sokuza service enable\` first to install autostart.`,
+        );
+    }
+    if (!commandExists('systemctl')) {
+        throw new Error(`systemctl not found on PATH — cannot restart the service.`);
+    }
+
+    const r = run('systemctl', ['--user', 'restart', LINUX_UNIT_NAME]);
+    if (r.status !== 0) {
+        throw new Error(
+            `\`systemctl --user restart ${LINUX_UNIT_NAME}\` failed: ` +
+            `${r.stderr.trim() || r.stdout.trim() || `exit ${r.status}`}`,
+        );
+    }
+
+    return {
+        platform: 'linux',
+        unitPath,
+        followUp: [`Issued \`systemctl --user restart ${LINUX_UNIT_NAME}\`.`],
+    };
+}
+
+function restartMacOS(): ServiceResult {
+    const plistPath = join(homedir(), 'Library', 'LaunchAgents', `${SERVICE_LABEL}.plist`);
+    if (!existsSync(plistPath)) {
+        throw new Error(
+            `No launchd plist at ${plistPath}. ` +
+            `Run \`sokuza service enable\` first to install autostart.`,
+        );
+    }
+
+    // `launchctl kickstart -k <domain>/<label>` kills then restarts a managed
+    // job. Try gui first then user — matches the domain order installMacOS
+    // uses when bootstrapping, so we hit whichever one the install actually
+    // landed in.
+    const uid = userInfo().uid;
+    const gui = run('launchctl', ['kickstart', '-k', `gui/${uid}/${SERVICE_LABEL}`]);
+    if (gui.status === 0) {
+        return {
+            platform: 'darwin',
+            unitPath: plistPath,
+            followUp: [`Restarted via \`launchctl kickstart -k gui/${uid}/${SERVICE_LABEL}\`.`],
+        };
+    }
+
+    const usr = run('launchctl', ['kickstart', '-k', `user/${uid}/${SERVICE_LABEL}`]);
+    if (usr.status === 0) {
+        return {
+            platform: 'darwin',
+            unitPath: plistPath,
+            followUp: [`Restarted via \`launchctl kickstart -k user/${uid}/${SERVICE_LABEL}\` (headless domain).`],
+        };
+    }
+
+    const detail = (gui.stderr || usr.stderr || gui.stdout || usr.stdout).trim();
+    throw new Error(
+        `launchctl kickstart failed in both gui/${uid} and user/${uid} domains` +
+        `${detail ? `: ${detail}` : ''}. ` +
+        `Try \`sokuza service disable\` followed by \`sokuza service enable\` to re-bootstrap.`,
+    );
+}
+
+function restartWindows(): ServiceResult {
+    const localAppData = process.env.LOCALAPPDATA ?? join(homedir(), 'AppData', 'Local');
+    const taskXmlPath = join(localAppData, 'Sokuza', 'task.xml');
+
+    // `/Query` exits 0 only when the task is registered. Check up front so
+    // we return a clear "not installed" error instead of an opaque
+    // `/Run` failure with a SCHED_E_TASK_NOT_FOUND from schtasks.
+    const q = run('schtasks', ['/Query', '/TN', WINDOWS_TASK_NAME]);
+    if (q.status !== 0) {
+        throw new Error(
+            `Scheduled task "${WINDOWS_TASK_NAME}" is not registered. ` +
+            `Run \`sokuza service enable\` first to install autostart.`,
+        );
+    }
+
+    // `/End` returns non-zero if the task isn't currently running — benign.
+    // `/Run` is the one whose status actually matters.
+    run('schtasks', ['/End', '/TN', WINDOWS_TASK_NAME]);
+    const start = run('schtasks', ['/Run', '/TN', WINDOWS_TASK_NAME]);
+    if (start.status !== 0) {
+        throw new Error(
+            `\`schtasks /Run /TN ${WINDOWS_TASK_NAME}\` failed: ` +
+            `${start.stderr.trim() || start.stdout.trim() || `exit ${start.status}`}`,
+        );
+    }
+
+    return {
+        platform: 'win32',
+        unitPath: taskXmlPath,
+        followUp: [`Stopped and re-started scheduled task "${WINDOWS_TASK_NAME}".`],
+    };
+}
+
 export interface ServiceStatus {
     platform: NodeJS.Platform;
     /** Label for the underlying mechanism: "systemd --user", "launchd", "Task Scheduler". */
