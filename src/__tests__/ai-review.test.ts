@@ -151,6 +151,32 @@ describe('aiReviewAction', () => {
         expect(result.structured).toMatchObject({ decision: 'APPROVE' });
     });
 
+    // Real failure mode previously observed with opencode + glm-5.1:
+    // the CLI exits 0 but the JSONL stream contains no `text` events,
+    // so extractCliText returns `""`. The fallback at the end of the
+    // action would then propagate empty review markdown into the
+    // workflow, which posted a comment with just the template's
+    // header and footer ("## 🤖 AI Code Review … _Reviewed by Sokuza
+    // AI_"). The empty-output guard throws instead so the failure
+    // shows up in the dashboard run viewer.
+    it('throws when the model returns no usable content (silent empty case)', async () => {
+        process.env.ANTHROPIC_API_KEY = 'test-key';
+        // Completion returns empty text — analogous to opencode emitting
+        // a JSONL stream with no `text` events.
+        mockCreate.mockResolvedValue({
+            content: [{ type: 'text', text: '' }],
+            model: 'claude-sonnet-4-6',
+            usage: { input_tokens: 10, output_tokens: 0 },
+        });
+        const context = makeContext({
+            ai: loadAIProviders(undefined),
+            steps: { fetch_diff: { diff: '+a' } },
+        });
+        await expect(
+            aiReviewAction({ parse_repair_retries: 0 }, context),
+        ).rejects.toThrow(/returned no usable content/);
+    });
+
     it('returns markdown + undefined structured ports when the response is unparseable', async () => {
         process.env.ANTHROPIC_API_KEY = 'test-key';
         // Unparseable response — repair loop will exhaust and the action

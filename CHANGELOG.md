@@ -84,6 +84,12 @@ publishes automatically.
 - **Node presets — installable AI configurations from library templates.** New per-user store at `~/.sokuza/node-presets.json` exposes a "Presets" group in the editor's palette. Library install hook walks the template's graph, captures every non-empty `ai.*` node config, and saves it as a preset tagged `library:<id>` — so installing `security-audit` silently surfaces a pre-prompted `ai.agent` you can drag onto the canvas. New endpoints: `GET/POST /api/node-presets`, `DELETE /api/node-presets/:id`. Manually-created presets are tagged `user` and survive library churn.
 - **Workflow delete cascades to deck + library-extracted presets.** Manually deleting a workflow from the workflows page used to leave the library card stuck on "Installed" with no workflow behind it — the only recovery was uninstall-then-reinstall. The library card's "Installed" state now derives from actual workflow existence (via `getInstalledWorkflowName`), and `DELETE /api/workflows/:name` cascades: drops the deck entry and any presets that originated from the same `_libraryItem`, so the next render correctly shows "Install" again.
 
+## [0.1.3] - 2026-06-01
+
+### Fixed
+
+- **`ai-review` no longer posts blank PR comments when the CLI produces no usable model output.** Real failure mode observed with `opencode 1.15.13` + `zai-coding-plan/glm-5.1`: the CLI exits 0 but emits a JSONL stream containing only `error` events (or nothing at all). Two layers of fix: (1) `extractCliText` now also collects `{type: "error"}` events and, when no `text` events were emitted, returns `[opencode-error] <messages>` so the user sees what actually went wrong; tolerates both `error.data.message` and `error.name` for schema-drift safety. (2) `ai-review` now throws a clear error (with provider/model/runId) when the final review markdown is empty after all parse/repair fallbacks — instead of letting the workflow post a comment with just the template's header and footer. The failed run is still recorded under `~/.sokuza/runs/ai-review/` before the throw so the runId is recoverable for debugging.
+
 ## [0.1.2] - 2026-04-27
 
 ### Fixed
