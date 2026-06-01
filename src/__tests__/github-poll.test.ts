@@ -1374,6 +1374,90 @@ describe('GitHubPollIntegration', () => {
                 globalThis.fetch = originalFetch;
             }
         });
+
+        it('does NOT double-emit when setInterval fires a second poll while the first is mid-flight', async () => {
+            // setInterval(() => poll(), N) does not await the previous
+            // poll. With dynamic org watch sets this PR introduces, a
+            // single cycle (N repos × 5 sub-pollers × per-fetch latency)
+            // can routinely outlast `interval`. Without a re-entrance
+            // guard, both polls would observe oldIds=[1] for the same
+            // repo, both classify PR #2 as new, and both
+            // `emit('pull_request.opened', #2)`. The `polling` flag
+            // skips the second cycle so each PR transition produces
+            // exactly one event.
+            //
+            // Drive deterministically by suspending the first poll's PR
+            // fetch on a held promise, kicking off a second concurrent
+            // poll(), then resolving — exactly one emission must result.
+            const emitted: EventPayload[] = [];
+            const integration = new GitHubPollIntegration();
+            await integration.initialize({
+                token: 'tok',
+                repos: ['org/alpha'],
+                events: ['pull_request.opened'],
+            }, TEST_LOGGER);
+            (integration as unknown as { onEvent: (e: EventPayload) => Promise<void> })
+                .onEvent = async (e) => { emitted.push(e); };
+
+            let pullCycle = 0;
+            let firstPollResolver: ((value: unknown) => void) | null = null;
+            const firstPollPromise = new Promise((r) => { firstPollResolver = r; });
+            const fetchMock = vi.fn(async (url: string | URL | Request) => {
+                const s = String(url);
+                if (s.includes('/repos/org/alpha/pulls')) {
+                    pullCycle++;
+                    if (pullCycle === 1) {
+                        // Seed: alpha has PR #1.
+                        return jsonOk([makePr({ number: 1 })]);
+                    }
+                    if (pullCycle === 2) {
+                        // Cycle 2 starts; suspend before responding.
+                        await firstPollPromise;
+                        return jsonOk([makePr({ number: 2 }), makePr({ number: 1 })]);
+                    }
+                    // Cycle 3 (would-be overlap): should never run if
+                    // the polling guard works. If the guard is broken,
+                    // both polls reach here and the test catches it.
+                    return jsonOk([makePr({ number: 2 }), makePr({ number: 1 })]);
+                }
+                return jsonOk([]);
+            }) as unknown as typeof globalThis.fetch;
+            const originalFetch = globalThis.fetch;
+            globalThis.fetch = fetchMock;
+
+            try {
+                // Cycle 1: seed alpha. seededRepos becomes {org/alpha}.
+                await (integration as any).poll();
+                expect(emitted).toHaveLength(0);
+
+                // Cycle 2: starts, hangs on PR fetch (held promise).
+                const firstPoll = (integration as any).poll();
+                // Let the event loop drain so cycle 2's await is parked.
+                await new Promise((r) => setImmediate(r));
+                expect((integration as any).polling).toBe(true);
+
+                // Cycle 3 (simulated overlap): setInterval fires while
+                // cycle 2 is still suspended. With the guard, this is a
+                // no-op. Without it, it would have its own snapshot
+                // path and double-emit PR #2.
+                const secondPoll = (integration as any).poll();
+                await secondPoll;
+                // Second poll returned WITHOUT doing any work because
+                // polling was already true. Pull cycle counter still 2.
+                expect(pullCycle).toBe(2);
+                expect(emitted).toHaveLength(0);
+
+                // Release cycle 2; it completes normally and emits #2 once.
+                firstPollResolver!(undefined);
+                await firstPoll;
+                expect(emitted).toHaveLength(1);
+                expect(emitted[0].event).toBe('pull_request.opened');
+                expect(emitted[0].payload.number).toBe(2);
+                expect((integration as any).polling).toBe(false);
+            } finally {
+                globalThis.fetch = originalFetch;
+            }
+        });
     });
 });
 

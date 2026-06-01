@@ -160,6 +160,17 @@ export class GitHubPollIntegration implements Integration {
      *  to `this.orgRepos` for the same key with last-writer-wins ordering
      *  that isn't tied to data freshness. */
     private refreshing = false;
+    /** Re-entrance guard for `poll()`. setInterval fires every `interval`
+     *  seconds and does not await the previous poll's completion. With
+     *  static `config.repos` the cycle was bounded, but org-enumerated
+     *  watch sets (N repos × 5 sub-pollers × per-fetch latency) can
+     *  routinely exceed `interval`. Two overlapping polls would both
+     *  read `oldIds=[1,2,3]` for repo X, see PR #4 as new in their
+     *  independent snapshots, and both `emit('pull_request.opened', #4)`
+     *  — duplicate event for the user. Same shape for synchronize/closed
+     *  transitions on shared PR state. Skip the cycle if a prior poll is
+     *  still draining; the next tick picks up. */
+    private polling = false;
     private onEvent: EventHandler | null = null;
     private enabledEvents: Set<string> = new Set();
     /** Repos supplied verbatim in `config.repos`. Never mutated after init —
@@ -226,6 +237,20 @@ export class GitHubPollIntegration implements Integration {
                 );
             });
         };
+        // Same defensive shape for `poll()`. Per-repo errors are caught
+        // inside the loop, but a synchronous throw outside the inner
+        // try (allRepos failing, logger.error throwing under a misconfig)
+        // would surface as an unhandledRejection at the `setInterval`
+        // call site. Symmetric with safeRefresh so a future maintainer
+        // sees one wrap-style for both periodic operations.
+        const safePoll = (): Promise<void> => {
+            return this.poll().catch((err: unknown) => {
+                this.logger.error(
+                    { err: errMessage(err) },
+                    'github-poll: poll failed',
+                );
+            });
+        };
 
         // Store the startup-delay handle and re-check `stopped` at every
         // async boundary. Without these guards, `stop()` called during the
@@ -241,8 +266,8 @@ export class GitHubPollIntegration implements Integration {
             // happen on a separate timer in the background.
             void safeRefresh().then(() => {
                 if (this.stopped) return;
-                void this.poll();
-                this.timer = setInterval(() => this.poll(), interval);
+                void safePoll();
+                this.timer = setInterval(safePoll, interval);
                 if (this.orgs.length > 0) {
                     this.orgRefreshTimer = setInterval(safeRefresh, orgRefreshMs);
                 }
@@ -389,19 +414,26 @@ export class GitHubPollIntegration implements Integration {
     // ─── Polling Logic ──────────────────────────────────────────────────
 
     private async poll(): Promise<void> {
-        // Iterate the union of explicit + org-enumerated repos. Computed
-        // fresh each poll so a background org refresh that landed
-        // between cycles is picked up immediately.
-        for (const repoFull of this.allRepos()) {
-            try {
-                await this.pollRepo(repoFull);
-            } catch (err) {
-                // Don't crash on individual repo errors
-                this.logger.error(
-                    { repo: repoFull, err: errMessage(err) },
-                    'github-poll: error polling repo',
-                );
+        // Re-entrance guard. See `polling` field comment for rationale.
+        if (this.polling) return;
+        this.polling = true;
+        try {
+            // Iterate the union of explicit + org-enumerated repos.
+            // Computed fresh each poll so a background org refresh that
+            // landed between cycles is picked up immediately.
+            for (const repoFull of this.allRepos()) {
+                try {
+                    await this.pollRepo(repoFull);
+                } catch (err) {
+                    // Don't crash on individual repo errors
+                    this.logger.error(
+                        { repo: repoFull, err: errMessage(err) },
+                        'github-poll: error polling repo',
+                    );
+                }
             }
+        } finally {
+            this.polling = false;
         }
     }
 
