@@ -1,4 +1,5 @@
 import { spawnSync, type SpawnSyncOptions } from 'node:child_process';
+import { realpathSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 /**
@@ -79,6 +80,32 @@ export function detectInstaller(entryPath: string): InstallerInfo {
         args: ['install', '-g', 'sokuza@latest'],
         label: 'npm (global)',
     };
+}
+
+/**
+ * Resolve the CLI entry path for installer detection.
+ *
+ * `process.argv[1]` from a globally-installed sokuza is a symlink in the
+ * package manager's `bin/` directory (e.g. `~/.npm-global/bin/sokuza`)
+ * pointing at the actual install
+ * (`~/.npm-global/lib/node_modules/sokuza/dist/index.js`). `resolve()`
+ * alone doesn't follow symlinks, so the installer-detection regex —
+ * which keys off `/node_modules/sokuza/` — never matches the bin entry
+ * and we misclassify as 'source'. Follow the symlink so we classify the
+ * actual install location, not the wrapper.
+ *
+ * Defensive: if `realpath` throws (deleted binary, broken symlink,
+ * permission), fall back to the resolved-but-unfollowed path. We'd
+ * rather mis-classify as 'source' than have `sokuza update` throw on
+ * an exotic install layout.
+ */
+export function resolveEntryPath(rawPath: string): string {
+    const resolved = resolve(rawPath);
+    try {
+        return realpathSync(resolved);
+    } catch {
+        return resolved;
+    }
 }
 
 /** Why an update attempt didn't produce a successful exit. `null` = success. */
@@ -171,7 +198,7 @@ export async function runUpdateCommand(opts: RunUpdateOptions): Promise<UpdateRe
  * codes.
  */
 export async function runUpdate(): Promise<void> {
-    const entry = resolve(process.argv[1]);
+    const entry = resolveEntryPath(process.argv[1]);
 
     const result = await runUpdateCommand({
         entryPath: entry,
@@ -218,8 +245,6 @@ export async function runUpdate(): Promise<void> {
 
     process.stdout.write(
         `\nUpdate complete. If sokuza is running as a service, restart it so the ` +
-        `new version takes effect — on Linux: \`systemctl --user restart sokuza.service\`, ` +
-        `on macOS: \`launchctl kickstart -k gui/$(id -u)/ai.sokuza\`, ` +
-        `on Windows: re-run \`schtasks /End /TN Sokuza\` then \`schtasks /Run /TN Sokuza\`.\n`,
+        `new version takes effect: \`sokuza service restart\`.\n`,
     );
 }

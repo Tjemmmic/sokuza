@@ -133,6 +133,189 @@ export async function uninstallService(): Promise<ServiceResult> {
     throw new Error(`Unsupported platform for service uninstall: ${plat}`);
 }
 
+/**
+ * Bounce the autostart service so it picks up new code, a refreshed
+ * environment, or recovers from a stuck state — without forcing the user
+ * to know which init system they're on.
+ *
+ * Each platform branch refuses to act if the unit isn't installed: a
+ * silent no-op there would be worse than a clear error, because users
+ * reach for this when they think the service is misbehaving and need
+ * fast feedback. When the unit IS installed, the platform tools all
+ * handle the "not currently running" case gracefully — restart just
+ * means "start" if it wasn't already up.
+ */
+export async function restartService(): Promise<ServiceResult> {
+    const plat = platform();
+    if (plat === 'linux') return restartLinux();
+    if (plat === 'darwin') return restartMacOS();
+    if (plat === 'win32') return await restartWindows();
+    throw new Error(`Unsupported platform for service restart: ${plat}`);
+}
+
+/**
+ * Cheap "is the autostart service installed?" check. Pure filesystem
+ * lookup — no subprocess spawns — so it's safe to call from a hot path
+ * like the dashboard's pre-restart validation. The full `serviceStatus`
+ * shells out to systemctl/launchctl/schtasks; this answers the same
+ * single question without those round-trips.
+ */
+export function isServiceInstalled(): boolean {
+    const plat = platform();
+    if (plat === 'linux') {
+        return existsSync(join(homedir(), '.config', 'systemd', 'user', LINUX_UNIT_NAME));
+    }
+    if (plat === 'darwin') {
+        return existsSync(join(homedir(), 'Library', 'LaunchAgents', `${SERVICE_LABEL}.plist`));
+    }
+    if (plat === 'win32') {
+        const localAppData = process.env.LOCALAPPDATA ?? join(homedir(), 'AppData', 'Local');
+        return existsSync(join(localAppData, 'Sokuza', 'task.xml'));
+    }
+    return false;
+}
+
+function restartLinux(): ServiceResult {
+    const unitPath = join(homedir(), '.config', 'systemd', 'user', LINUX_UNIT_NAME);
+    if (!existsSync(unitPath)) {
+        throw new Error(
+            `No systemd user unit at ${unitPath}. ` +
+            `Run \`sokuza service enable\` first to install autostart.`,
+        );
+    }
+    if (!commandExists('systemctl')) {
+        throw new Error(`systemctl not found on PATH — cannot restart the service.`);
+    }
+
+    const r = run('systemctl', ['--user', 'restart', LINUX_UNIT_NAME]);
+    if (r.status !== 0) {
+        throw new Error(
+            `\`systemctl --user restart ${LINUX_UNIT_NAME}\` failed: ` +
+            `${r.stderr.trim() || r.stdout.trim() || `exit ${r.status}`}`,
+        );
+    }
+
+    return {
+        platform: 'linux',
+        unitPath,
+        followUp: [`Issued \`systemctl --user restart ${LINUX_UNIT_NAME}\`.`],
+    };
+}
+
+function restartMacOS(): ServiceResult {
+    const plistPath = join(homedir(), 'Library', 'LaunchAgents', `${SERVICE_LABEL}.plist`);
+    if (!existsSync(plistPath)) {
+        throw new Error(
+            `No launchd plist at ${plistPath}. ` +
+            `Run \`sokuza service enable\` first to install autostart.`,
+        );
+    }
+
+    // `launchctl kickstart -k <domain>/<label>` kills then restarts a managed
+    // job. Try gui first then user — matches the domain order installMacOS
+    // uses when bootstrapping, so we hit whichever one the install actually
+    // landed in.
+    const uid = userInfo().uid;
+    const gui = run('launchctl', ['kickstart', '-k', `gui/${uid}/${SERVICE_LABEL}`]);
+    if (gui.status === 0) {
+        return {
+            platform: 'darwin',
+            unitPath: plistPath,
+            followUp: [`Restarted via \`launchctl kickstart -k gui/${uid}/${SERVICE_LABEL}\`.`],
+        };
+    }
+
+    const usr = run('launchctl', ['kickstart', '-k', `user/${uid}/${SERVICE_LABEL}`]);
+    if (usr.status === 0) {
+        return {
+            platform: 'darwin',
+            unitPath: plistPath,
+            followUp: [`Restarted via \`launchctl kickstart -k user/${uid}/${SERVICE_LABEL}\` (headless domain).`],
+        };
+    }
+
+    const detail = (gui.stderr || usr.stderr || gui.stdout || usr.stdout).trim();
+    throw new Error(
+        `launchctl kickstart failed in both gui/${uid} and user/${uid} domains` +
+        `${detail ? `: ${detail}` : ''}. ` +
+        `Try \`sokuza service disable\` followed by \`sokuza service enable\` to re-bootstrap.`,
+    );
+}
+
+async function restartWindows(): Promise<ServiceResult> {
+    const localAppData = process.env.LOCALAPPDATA ?? join(homedir(), 'AppData', 'Local');
+    const taskXmlPath = join(localAppData, 'Sokuza', 'task.xml');
+
+    // `/Query` exits 0 only when the task is registered. Check up front so
+    // we return a clear "not installed" error instead of an opaque
+    // `/Run` failure with a SCHED_E_TASK_NOT_FOUND from schtasks.
+    const q = run('schtasks', ['/Query', '/TN', WINDOWS_TASK_NAME]);
+    if (q.status !== 0) {
+        throw new Error(
+            `Scheduled task "${WINDOWS_TASK_NAME}" is not registered. ` +
+            `Run \`sokuza service enable\` first to install autostart.`,
+        );
+    }
+
+    // `/End` is asynchronous — schtasks returns once the stop signal has
+    // been delivered, not once the task has actually exited. Following it
+    // with an immediate `/Run` races against the still-shutting-down
+    // instance: with the legacy MultipleInstancesPolicy=IgnoreNew that
+    // older sokuza installs baked in, `/Run` is silently dropped while a
+    // stale instance is winding down and we report a phantom "Restarted".
+    // Wait for Status to leave "Running" before kicking the new instance.
+    // Benign exit code on /End — it returns non-zero if the task wasn't
+    // running, which is the state we want anyway.
+    run('schtasks', ['/End', '/TN', WINDOWS_TASK_NAME]);
+    const stopped = await waitForWindowsTaskNotRunning(5000);
+    if (!stopped) {
+        throw new Error(
+            `Scheduled task "${WINDOWS_TASK_NAME}" did not stop within 5s after ` +
+            `\`schtasks /End\`. Refusing to kick a new instance because the run ` +
+            `request could be ignored by MultipleInstancesPolicy. Try ` +
+            `\`sokuza service disable\` followed by \`sokuza service enable\` to ` +
+            `re-register the task with cleaner restart semantics.`,
+        );
+    }
+
+    const start = run('schtasks', ['/Run', '/TN', WINDOWS_TASK_NAME]);
+    if (start.status !== 0) {
+        throw new Error(
+            `\`schtasks /Run /TN ${WINDOWS_TASK_NAME}\` failed: ` +
+            `${start.stderr.trim() || start.stdout.trim() || `exit ${start.status}`}`,
+        );
+    }
+
+    return {
+        platform: 'win32',
+        unitPath: taskXmlPath,
+        followUp: [`Stopped and re-started scheduled task "${WINDOWS_TASK_NAME}".`],
+    };
+}
+
+/**
+ * Poll `schtasks /Query` until the task's Status field is anything but
+ * "Running" (typically "Ready"), or the deadline elapses. Used between
+ * `schtasks /End` and `schtasks /Run` to eliminate the race the policy
+ * change above also closes for fresh installs.
+ *
+ * Returns `true` once the task is no longer running, `false` on timeout.
+ * A query that fails (task gone, schtasks missing) also returns `true` —
+ * we're out of recovery options at that point and the caller's `/Run`
+ * will surface the real error.
+ */
+async function waitForWindowsTaskNotRunning(timeoutMs: number): Promise<boolean> {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+        const q = run('schtasks', ['/Query', '/TN', WINDOWS_TASK_NAME, '/FO', 'LIST', '/V']);
+        if (q.status !== 0) return true;
+        const status = extractField(q.stdout, 'Status').toLowerCase();
+        if (status !== 'running') return true;
+        await new Promise<void>((resolve) => setTimeout(resolve, 250));
+    }
+    return false;
+}
+
 export interface ServiceStatus {
     platform: NodeJS.Platform;
     /** Label for the underlying mechanism: "systemd --user", "launchd", "Task Scheduler". */
@@ -515,6 +698,11 @@ const WINDOWS_TASK_NAME = 'Sokuza';
  *
  * Settings worth noting:
  *   - `LogonTrigger`  fires on user login.
+ *   - `MultipleInstancesPolicy=StopExisting` makes `schtasks /Run` have true
+ *     restart semantics: any running instance is killed before the new one
+ *     starts. The previous `IgnoreNew` policy silently dropped /Run while a
+ *     stale instance was shutting down, making `sokuza service restart`
+ *     unreliable.
  *   - `RestartOnFailure` + `Count=9999` matches the Linux/macOS "restart on
  *     crash" contract. Without this, a crashed sokuza stays down until reboot.
  *   - `ExecutionTimeLimit=PT0S` disables the default 72h timeout.
@@ -545,7 +733,7 @@ export function renderWindowsTaskXml(ctx: InstallCtx, userId: string): string {
     </Principal>
   </Principals>
   <Settings>
-    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <MultipleInstancesPolicy>StopExisting</MultipleInstancesPolicy>
     <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
     <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
     <AllowHardTerminate>true</AllowHardTerminate>

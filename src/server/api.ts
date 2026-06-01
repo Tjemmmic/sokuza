@@ -1,15 +1,15 @@
 import type { FastifyInstance } from 'fastify';
 import type { Logger } from 'pino';
 import { readFile, writeFile, readdir } from 'node:fs/promises';
-import { join, basename, extname, resolve } from 'node:path';
+import { join, basename, extname } from 'node:path';
 import yaml from 'js-yaml';
 import type { SokuzaConfig, EventPayload, WebhookDelivery, WorkflowRunRecord } from '../core/types.js';
 import type { WorkflowQueue } from '../core/queue.js';
 import type { ConfigStore } from '../core/config-store.js';
 import type { LogStore } from '../core/log-store.js';
 import { VERSION } from '../version.js';
-import { serviceStatus, installService, uninstallService } from '../cli/service.js';
-import { runUpdateCommand } from '../cli/update.js';
+import { serviceStatus, installService, uninstallService, restartService, isServiceInstalled } from '../cli/service.js';
+import { runUpdateCommand, resolveEntryPath } from '../cli/update.js';
 import { readUpdateCache, refreshUpdateCache, isNewer } from '../cli/update-check.js';
 
 interface ApiDeps {
@@ -936,6 +936,40 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
         }
     });
 
+    server.post('/api/system/service/restart', async (_request, reply) => {
+        // Pre-check synchronously so an uninstalled service yields a clear
+        // 400 instead of a dishonest "restart scheduled" ACK. `isServiceInstalled`
+        // is a pure fs lookup — no subprocess spawns — which keeps this hot
+        // path cheap and avoids the ~200ms `systemctl is-enabled` + `is-active`
+        // round-trip that a full `serviceStatus()` would do.
+        if (!isServiceInstalled()) {
+            return reply.status(400).send({
+                error:
+                    `Service is not installed — run \`sokuza service enable\` first ` +
+                    `before restarting.`,
+            });
+        }
+
+        // Issue the actual restart on a later tick. systemd / launchd / Task
+        // Scheduler will deliver SIGTERM to *this* process the moment the
+        // restart fires; deferring lets Fastify finish writing this 202 and
+        // flush the socket so the dashboard can distinguish "restart
+        // accepted" from "server crashed mid-request" and start its poll
+        // loop for the new instance.
+        setImmediate(() => {
+            restartService()
+                .then((r) => logger.info(
+                    { platform: r.platform, unitPath: r.unitPath },
+                    'Service restart issued via dashboard',
+                ))
+                .catch((err: any) => logger.error(
+                    { err }, 'Service restart via dashboard failed',
+                ));
+        });
+
+        return reply.status(202).send({ scheduled: true, platform: process.platform });
+    });
+
     /** Shape both `/update` GETs return so the UI can render one code path. */
     function buildUpdateSnapshot(cache: { checkedAt: number; latest: string } | null) {
         const latest = cache?.latest ?? null;
@@ -959,7 +993,7 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
     server.post('/api/system/update', async (_request, reply) => {
         try {
             const result = await runUpdateCommand({
-                entryPath: resolve(process.argv[1]),
+                entryPath: resolveEntryPath(process.argv[1]),
                 captureOutput: true,
             });
             logger.info(
