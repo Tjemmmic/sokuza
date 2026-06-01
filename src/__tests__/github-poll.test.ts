@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, type Mock } from 'vitest';
 import pino from 'pino';
 import { GitHubPollIntegration } from '../integrations/github-poll/index.js';
 import type { EventPayload } from '../core/types.js';
@@ -100,6 +100,16 @@ async function setupAndPoll(opts: {
 // ─── Tests ──────────────────────────────────────────────────────────────────
 
 describe('GitHubPollIntegration', () => {
+    // Restore globalThis.fetch after every test. The `makeIntegrationWithOrgs`
+    // and state-pruning `makeIntegration` helpers below install a mock
+    // without an explicit cleanup of their own (the per-test try/finally
+    // pattern only covers tests that drive their own fetch directly).
+    // Without this guard, a leftover mock from one test could silently be
+    // inherited by another if test ordering changed or a new test added
+    // upstream forgot to install its own.
+    const _origFetch = globalThis.fetch;
+    afterEach(() => { globalThis.fetch = _origFetch; });
+
     describe('initialization', () => {
         it('should throw if token is missing', async () => {
             const integration = new GitHubPollIntegration();
@@ -1278,6 +1288,88 @@ describe('GitHubPollIntegration', () => {
                 await (integration as any).refreshOrgRepos();
                 await (integration as any).poll();
                 expect(emitted).toHaveLength(0);
+            } finally {
+                globalThis.fetch = originalFetch;
+            }
+        });
+
+        it('does NOT resurrect pruned state when refresh runs mid-pollRepo', async () => {
+            // Concurrency regression: poll() and refreshOrgRepos() share
+            // no mutual-exclusion lock. A pollRepo(X) that's suspended
+            // mid-await when a refresh drops X from the watch set used
+            // to write the captured snapshot AFTER pruneState(X) had
+            // cleared it. State was resurrected and X re-entered
+            // `seededRepos`, defeating the per-repo seeding invariant on
+            // the next re-entry. Each final state write and the
+            // seededRepos.add now re-check `allRepos().has(key)` to
+            // detect this and abandon the write.
+            //
+            // Reproduce: cycle 1 seeds my-org/beta. Cycle 2 starts a
+            // poll whose PR-fetch for beta is suspended on a held
+            // promise. While suspended, we drive a manual refresh that
+            // drops beta and prunes its state. Then resolve the held
+            // promise — pollPullRequests for beta finishes and tries to
+            // write the snapshot. The guard must block the write.
+            const integration = new GitHubPollIntegration();
+            await integration.initialize({
+                token: 'tok',
+                orgs: ['my-org'],
+                events: ['pull_request.opened'],
+            }, TEST_LOGGER);
+            (integration as unknown as { onEvent: (e: EventPayload) => Promise<void> })
+                .onEvent = async () => { /* discard */ };
+
+            let orgCycle = 0;
+            let betaPullCycle = 0;
+            let betaPullResolver: ((value: unknown) => void) | null = null;
+            const betaPullPromise = new Promise((r) => { betaPullResolver = r; });
+
+            const fetchMock = vi.fn(async (url: string | URL | Request) => {
+                const s = String(url);
+                if (s.includes('/orgs/my-org/repos')) {
+                    orgCycle++;
+                    if (orgCycle === 1) return jsonOk([{ full_name: 'my-org/beta' }]);
+                    return jsonOk([]); // beta drops
+                }
+                if (s.includes('/repos/my-org/beta/pulls')) {
+                    betaPullCycle++;
+                    if (betaPullCycle === 1) {
+                        // Cycle 1: seed normally.
+                        return jsonOk([makePr({ number: 1 })]);
+                    }
+                    // Cycle 2: suspend so the test can drive a refresh
+                    // that prunes beta out from under this in-flight poll.
+                    await betaPullPromise;
+                    return jsonOk([makePr({ number: 1 }), makePr({ number: 2 })]);
+                }
+                return jsonOk([]);
+            }) as unknown as typeof globalThis.fetch;
+            const originalFetch = globalThis.fetch;
+            globalThis.fetch = fetchMock;
+
+            try {
+                // Cycle 1: seed beta normally.
+                await (integration as any).refreshOrgRepos();
+                await (integration as any).poll();
+                expect((integration as any).state.seededRepos.has('my-org/beta')).toBe(true);
+
+                // Start cycle 2's poll — it hangs on beta's PR fetch.
+                const pollPromise = (integration as any).poll();
+                await new Promise((r) => setImmediate(r));
+                // Drive a refresh that drops beta. Pruning fires and
+                // clears beta's state + seededRepos.
+                await (integration as any).refreshOrgRepos();
+                expect((integration as any).state.seededRepos.has('my-org/beta')).toBe(false);
+                expect((integration as any).state.lastPrIds.has('my-org/beta')).toBe(false);
+
+                // Release pollPullRequests for beta. Its terminal
+                // `lastPrIds.set` and pollRepo's `seededRepos.add` both
+                // run AFTER the prune. The guards must abandon both.
+                betaPullResolver!(undefined);
+                await pollPromise;
+
+                expect((integration as any).state.seededRepos.has('my-org/beta')).toBe(false);
+                expect((integration as any).state.lastPrIds.has('my-org/beta')).toBe(false);
             } finally {
                 globalThis.fetch = originalFetch;
             }

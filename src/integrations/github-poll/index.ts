@@ -98,6 +98,23 @@ function clean(xs: string[] | undefined): string[] {
     ));
 }
 
+/** Best-effort string representation of an unknown thrown value. `(err as
+ *  Error).message` would coerce non-Error throws (strings, plain objects,
+ *  `null`) to `undefined` and pino would then log `{ err: undefined }`,
+ *  losing the actual cause. We expect the only thing we ever throw to be
+ *  an Error, but the type system can't enforce that across third-party
+ *  code we call, and the per-org "isolation" guarantee leans on the log
+ *  being legible. */
+function errMessage(err: unknown): string {
+    if (err instanceof Error) return err.message;
+    if (typeof err === 'string') return err;
+    try {
+        return JSON.stringify(err);
+    } catch {
+        return String(err);
+    }
+}
+
 const SUPPORTED_EVENTS = [
     'pull_request.opened',
     'pull_request.closed',
@@ -204,7 +221,7 @@ export class GitHubPollIntegration implements Integration {
         const safeRefresh = (): Promise<void> => {
             return this.refreshOrgRepos().catch((err: unknown) => {
                 this.logger.error(
-                    { err: (err as Error).message },
+                    { err: errMessage(err) },
                     'github-poll: refreshOrgRepos failed',
                 );
             });
@@ -313,7 +330,7 @@ export class GitHubPollIntegration implements Integration {
                     this.orgRepos.set(org, new Set(repos));
                 } catch (err) {
                     this.logger.error(
-                        { org, err: (err as Error).message },
+                        { org, err: errMessage(err) },
                         'github-poll: failed to refresh repos for org',
                     );
                 }
@@ -381,7 +398,7 @@ export class GitHubPollIntegration implements Integration {
             } catch (err) {
                 // Don't crash on individual repo errors
                 this.logger.error(
-                    { repo: repoFull, err: (err as Error).message },
+                    { repo: repoFull, err: errMessage(err) },
                     'github-poll: error polling repo',
                 );
             }
@@ -420,7 +437,17 @@ export class GitHubPollIntegration implements Integration {
             await this.pollPullRequestReviews(owner, repo, firstSight);
         }
 
-        if (firstSight) this.state.seededRepos.add(repoFull);
+        // Mid-poll guard: an org-refresh that landed between our awaits
+        // may have pruneState()'d this repo (dropped from the watch-set
+        // union). Re-adding it to seededRepos here would mean a later
+        // re-entry finds firstSight=false against empty lastXxxIds and
+        // floods every existing PR/issue/comment/branch as a "new"
+        // event — exactly the failure mode the per-repo seeding refactor
+        // exists to prevent. Skip the seed bookkeeping for a repo we no
+        // longer watch.
+        if (firstSight && this.allRepos().has(repoFull)) {
+            this.state.seededRepos.add(repoFull);
+        }
     }
 
     private wantsEvent(prefix: string): boolean {
@@ -500,9 +527,15 @@ export class GitHubPollIntegration implements Integration {
             }
         }
 
-        this.state.lastPrIds.set(key, newIds);
-        this.state.lastPrHeadShas.set(key, newHeadShas);
-        this.state.lastPrStates.set(key, newStates);
+        // Mid-poll guard: see comment in pollRepo. If a refresh has
+        // pruneState()'d this repo while our awaits were in flight,
+        // restoring the snapshot would resurrect state that the prune
+        // intentionally cleared.
+        if (this.allRepos().has(key)) {
+            this.state.lastPrIds.set(key, newIds);
+            this.state.lastPrHeadShas.set(key, newHeadShas);
+            this.state.lastPrStates.set(key, newStates);
+        }
     }
 
     // ─── Issue Polling ──────────────────────────────────────────────────
@@ -554,8 +587,10 @@ export class GitHubPollIntegration implements Integration {
             }
         }
 
-        this.state.lastIssueIds.set(key, newIds);
-        this.state.lastIssueStates.set(key, newStates);
+        if (this.allRepos().has(key)) {
+            this.state.lastIssueIds.set(key, newIds);
+            this.state.lastIssueStates.set(key, newStates);
+        }
     }
 
     // ─── Push Polling (via branches) ────────────────────────────────────
@@ -588,7 +623,9 @@ export class GitHubPollIntegration implements Integration {
             }
         }
 
-        this.state.lastBranchShas.set(key, newShas);
+        if (this.allRepos().has(key)) {
+            this.state.lastBranchShas.set(key, newShas);
+        }
     }
 
     // ─── Comment Polling ────────────────────────────────────────────────
@@ -623,7 +660,9 @@ export class GitHubPollIntegration implements Integration {
             }
         }
 
-        this.state.lastCommentIds.set(key, newIds);
+        if (this.allRepos().has(key)) {
+            this.state.lastCommentIds.set(key, newIds);
+        }
     }
 
     // ─── PR Review Polling ──────────────────────────────────────────────
@@ -665,7 +704,9 @@ export class GitHubPollIntegration implements Integration {
             }
         }
 
-        this.state.lastReviewIds.set(key, newIds);
+        if (this.allRepos().has(key)) {
+            this.state.lastReviewIds.set(key, newIds);
+        }
     }
 
     // ─── Helpers ────────────────────────────────────────────────────────
