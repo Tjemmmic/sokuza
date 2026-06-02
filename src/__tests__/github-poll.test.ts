@@ -65,13 +65,15 @@ async function setupAndPoll(opts: {
         events: opts.events,
     }, TEST_LOGGER);
 
-    // Capture the onEvent handler by calling registerRoutes with a fake server
-    const fakeServer = {} as any;
-    integration.registerRoutes(fakeServer, async (event) => {
-        emitted.push(event);
-    });
-    // Stop the timer immediately — we'll drive polling manually
-    integration.stop();
+    // Wire onEvent directly without going through registerRoutes/stop.
+    // The previous pattern (registerRoutes to wire onEvent, then stop()
+    // to halt the 2s startup timer) is incompatible with the new
+    // cooperative-cancellation check at the top of poll()'s loop —
+    // `stop()` flips `this.stopped` and the next manually-driven
+    // `poll()` would bail immediately. Setting onEvent directly skips
+    // both the timer scheduling and the stopped flag.
+    (integration as unknown as { onEvent: (e: EventPayload) => Promise<void> })
+        .onEvent = async (event) => { emitted.push(event); };
 
     // Mock global fetch
     const fetchMock = vi.fn(async (url: string | URL | Request) => ({
@@ -194,6 +196,29 @@ describe('GitHubPollIntegration', () => {
             await expect(
                 integration.initialize({ token: 'tok', repos: ['', '   '] }, TEST_LOGGER),
             ).rejects.toThrow('at least one of `repos` or `orgs`');
+        });
+
+        it('initialize() resets stopped/refreshing/polling so an instance can be reused after stop()', async () => {
+            // Engine config hot-reload may call stop() then initialize()
+            // on the same integration object rather than constructing
+            // a fresh one. Without resetting the lifecycle flags,
+            // `this.stopped === true` would persist and the next
+            // registerRoutes' 2s setTimeout would bail at its first
+            // check, leaving the integration silently dead.
+            const integration = new GitHubPollIntegration();
+            await integration.initialize({ token: 'tok', orgs: ['my-org'] }, TEST_LOGGER);
+            integration.stop();
+            expect((integration as any).stopped).toBe(true);
+
+            // Force the other two flags to true so the test verifies
+            // ALL three are reset (not just stopped).
+            (integration as any).refreshing = true;
+            (integration as any).polling = true;
+
+            await integration.initialize({ token: 'tok', orgs: ['my-org'] }, TEST_LOGGER);
+            expect((integration as any).stopped).toBe(false);
+            expect((integration as any).refreshing).toBe(false);
+            expect((integration as any).polling).toBe(false);
         });
     });
 
@@ -933,6 +958,62 @@ describe('GitHubPollIntegration', () => {
                 globalThis.fetch = originalFetch;
             }
         });
+
+        it('stop() called mid-poll halts further repo iteration', async () => {
+            // Symmetric with the refresh-mid-flight test. poll() iterates
+            // a snapshot of `allRepos()`; without a cooperative
+            // cancellation point it would keep fetching every remaining
+            // repo and emitting events into a consumer that may have
+            // already torn down. With the guard, the next iteration
+            // boundary bails.
+            const emitted: EventPayload[] = [];
+            const integration = new GitHubPollIntegration();
+            await integration.initialize({
+                token: 'tok',
+                repos: ['org/alpha', 'org/beta', 'org/gamma'],
+                events: ['pull_request.opened'],
+            }, TEST_LOGGER);
+            (integration as unknown as { onEvent: (e: EventPayload) => Promise<void> })
+                .onEvent = async (e) => { emitted.push(e); };
+
+            let polledRepos: string[] = [];
+            let alphaResolved: (() => void) | null = null;
+            const alphaPromise = new Promise<void>((r) => { alphaResolved = r; });
+
+            const fetchMock = vi.fn(async (url: string | URL | Request) => {
+                const s = String(url);
+                const m = s.match(/\/repos\/(org\/[^/]+)\/pulls/);
+                if (m) {
+                    const repo = m[1];
+                    polledRepos.push(repo);
+                    if (repo === 'org/alpha') {
+                        await alphaPromise;
+                        return jsonOk([]);
+                    }
+                    return jsonOk([]);
+                }
+                return jsonOk([]);
+            }) as unknown as typeof globalThis.fetch;
+            const originalFetch = globalThis.fetch;
+            globalThis.fetch = fetchMock;
+
+            try {
+                // Start a poll; it suspends inside pollPullRequests for alpha.
+                const pollPromise = (integration as any).poll();
+                await new Promise((r) => setImmediate(r));
+                expect(polledRepos).toEqual(['org/alpha']);
+
+                // Stop mid-poll. The cancellation check at the top of
+                // the next iteration must skip beta and gamma.
+                integration.stop();
+                alphaResolved!();
+                await pollPromise;
+
+                expect(polledRepos).toEqual(['org/alpha']);
+            } finally {
+                globalThis.fetch = originalFetch;
+            }
+        });
     });
 
     // ─── State pruning on org-set churn ─────────────────────────────────────
@@ -1370,6 +1451,128 @@ describe('GitHubPollIntegration', () => {
 
                 expect((integration as any).state.seededRepos.has('my-org/beta')).toBe(false);
                 expect((integration as any).state.lastPrIds.has('my-org/beta')).toBe(false);
+            } finally {
+                globalThis.fetch = originalFetch;
+            }
+        });
+
+        it('mid-poll guard protects ALL sub-pollers — issues, push, comments, reviews — not just PRs', async () => {
+            // The 'resurrect pruned state' test above only enables
+            // pull_request.opened, so only `pollPullRequests`' final
+            // `if (this.allRepos().has(key))` guard is exercised. The
+            // identical guards in pollIssues / pollPushes / pollComments
+            // / pollPullRequestReviews are not — a future refactor that
+            // removed one of them would not fail any existing test.
+            // Pin them end-to-end by enabling every event type, holding
+            // a single sub-poller's fetch suspended, pruning the repo
+            // mid-flight, then asserting NONE of the lastXxxIds maps
+            // were resurrected.
+            const integration = new GitHubPollIntegration();
+            await integration.initialize({
+                token: 'tok',
+                orgs: ['my-org'],
+                events: [
+                    'pull_request.opened',
+                    'issues.opened',
+                    'push',
+                    'issue_comment.created',
+                    'pull_request_review.submitted',
+                ],
+            }, TEST_LOGGER);
+            (integration as unknown as { onEvent: (e: EventPayload) => Promise<void> })
+                .onEvent = async () => { /* discard */ };
+
+            let orgCycle = 0;
+            let betaReviewCycle = 0;
+            let reviewResolver: ((value: unknown) => void) | null = null;
+            const reviewPromise = new Promise((r) => { reviewResolver = r; });
+
+            const fetchMock = vi.fn(async (url: string | URL | Request) => {
+                const s = String(url);
+                if (s.includes('/orgs/my-org/repos')) {
+                    orgCycle++;
+                    if (orgCycle === 1) return jsonOk([{ full_name: 'my-org/beta' }]);
+                    return jsonOk([]); // beta drops on cycle 2
+                }
+                // Sub-poller responses for beta. Suspension is on the
+                // LAST sub-poller (PR reviews) so by the time we drive
+                // the mid-flight refresh, the other four sub-pollers
+                // have already returned and *attempted* their terminal
+                // state writes. With the guards, the writes that happen
+                // BEFORE the prune succeed (correct — repo was still
+                // watched at that moment); the prune then deletes them.
+                // The review write that happens AFTER the prune is the
+                // critical case, and its guard must prevent the write.
+                //
+                // To cover ALL FIVE guards in one test we need to drive
+                // TWO cycles: cycle 1 seeds beta (so cycle 2 has
+                // firstSight=false and would actually do diff writes),
+                // cycle 2 is where the race happens.
+                if (s.match(/\/repos\/my-org\/beta\/(pulls|issues|branches|issues\/comments)/)) {
+                    if (s.endsWith('/pulls')) return jsonOk([makePr({ number: 1 })]);
+                    if (s.endsWith('/issues?state=all&sort=updated&direction=desc&per_page=20&filter=all')) return jsonOk([makeIssue({ number: 100 })]);
+                    if (s.endsWith('/branches?per_page=50')) return jsonOk([makeBranch('main', 'sha-1')]);
+                    if (s.includes('/issues/comments')) return jsonOk([makeComment(5000, 100)]);
+                    return jsonOk([]);
+                }
+                if (s.includes('/repos/my-org/beta/pulls/1/reviews')) {
+                    betaReviewCycle++;
+                    if (betaReviewCycle === 1) return jsonOk([{ id: 9000 }]);
+                    // Cycle 2: suspend on the last sub-poller so we
+                    // can drive a refresh that prunes beta mid-flight.
+                    await reviewPromise;
+                    return jsonOk([{ id: 9001 }]);
+                }
+                if (s.includes('/repos/my-org/beta/pulls?state=open')) {
+                    // pollPullRequestReviews fetches open PRs first.
+                    return jsonOk([{ number: 1, head: { sha: 'sha' }, state: 'open' }]);
+                }
+                return jsonOk([]);
+            }) as unknown as typeof globalThis.fetch;
+            const originalFetch = globalThis.fetch;
+            globalThis.fetch = fetchMock;
+
+            try {
+                // Cycle 1: seed all five sub-pollers' state for beta.
+                await (integration as any).refreshOrgRepos();
+                await (integration as any).poll();
+                const state = (integration as any).state;
+                expect(state.lastPrIds.has('my-org/beta')).toBe(true);
+                expect(state.lastIssueIds.has('my-org/beta')).toBe(true);
+                expect(state.lastBranchShas.has('my-org/beta')).toBe(true);
+                expect(state.lastCommentIds.has('my-org/beta')).toBe(true);
+                expect(state.lastReviewIds.has('my-org/beta')).toBe(true);
+
+                // Cycle 2: start a poll that hangs on the reviews fetch.
+                const pollPromise = (integration as any).poll();
+                await new Promise((r) => setImmediate(r));
+
+                // Drive a refresh that drops beta and prunes its state.
+                await (integration as any).refreshOrgRepos();
+                expect(state.lastPrIds.has('my-org/beta')).toBe(false);
+                expect(state.lastIssueIds.has('my-org/beta')).toBe(false);
+                expect(state.lastBranchShas.has('my-org/beta')).toBe(false);
+                expect(state.lastCommentIds.has('my-org/beta')).toBe(false);
+                expect(state.lastReviewIds.has('my-org/beta')).toBe(false);
+
+                // Release the suspended reviews fetch. The terminal
+                // `lastReviewIds.set` runs AFTER the prune and the
+                // guard there must abandon it. Same for the other
+                // sub-pollers whose terminal writes had been
+                // computing newIds since before the suspension —
+                // actually, the other four had already written
+                // BEFORE the suspension, so their writes were valid
+                // at that time. The prune then deleted everything.
+                // Result: none of the state maps should have beta.
+                reviewResolver!(undefined);
+                await pollPromise;
+
+                expect(state.lastPrIds.has('my-org/beta')).toBe(false);
+                expect(state.lastIssueIds.has('my-org/beta')).toBe(false);
+                expect(state.lastBranchShas.has('my-org/beta')).toBe(false);
+                expect(state.lastCommentIds.has('my-org/beta')).toBe(false);
+                expect(state.lastReviewIds.has('my-org/beta')).toBe(false);
+                expect(state.seededRepos.has('my-org/beta')).toBe(false);
             } finally {
                 globalThis.fetch = originalFetch;
             }

@@ -189,6 +189,16 @@ export class GitHubPollIntegration implements Integration {
     async initialize(config: IntegrationConfig, logger: Logger): Promise<void> {
         this.config = config as unknown as PollConfig;
         this.logger = logger;
+        // Reset lifecycle flags so an instance reused via the engine's
+        // reloadConfig path (stop() → initialize() on the same object)
+        // doesn't silently no-op: a sticky `stopped === true` would bail
+        // the next registerRoutes' 2s setTimeout out at its first check
+        // and the integration would never start polling. Fresh
+        // construction zeroes these via field initializers; this matches
+        // the reuse contract.
+        this.stopped = false;
+        this.refreshing = false;
+        this.polling = false;
         if (!this.config.token) {
             throw new Error('github-poll: token is required');
         }
@@ -422,6 +432,15 @@ export class GitHubPollIntegration implements Integration {
             // Computed fresh each poll so a background org refresh that
             // landed between cycles is picked up immediately.
             for (const repoFull of this.allRepos()) {
+                // Cooperative cancellation point — symmetric with
+                // refreshOrgRepos. Without this, an in-flight poll
+                // started before stop() would keep iterating its entire
+                // snapshot of `allRepos()` (potentially hundreds of
+                // org-enumerated repos × 5 sub-pollers × per-fetch
+                // latency), burning API quota AND delivering events into
+                // a consumer that may already be tearing down. Bail at
+                // each iteration boundary.
+                if (this.stopped) return;
                 try {
                     await this.pollRepo(repoFull);
                 } catch (err) {
