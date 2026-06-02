@@ -762,6 +762,37 @@ describe('GitHubPollIntegration', () => {
             expect(watched.size).toBe(1);
         });
 
+        it('excludes archived repos from the watch set', async () => {
+            // Archived repos are immutable — no PR/issue/push events
+            // possible — but each one still costs 5 API calls per poll
+            // cycle. For orgs with deep history (often 10:1 archived
+            // ratio) this can dominate the rate-limit budget. Filtered
+            // at enumeration time so they never enter `orgRepos`.
+            const { integration } = await makeIntegrationWithOrgs({
+                orgs: ['my-org'],
+                apiResponses: (url) => {
+                    if (url.includes('/orgs/my-org/repos')) {
+                        return [
+                            { full_name: 'my-org/active', archived: false },
+                            { full_name: 'my-org/dormant', archived: true },
+                            { full_name: 'my-org/legacy', archived: true },
+                            { full_name: 'my-org/current' }, // no archived field
+                        ];
+                    }
+                    return [];
+                },
+            });
+
+            await (integration as any).refreshOrgRepos();
+            const watched = (integration as any).allRepos() as Set<string>;
+
+            expect(watched.has('my-org/active')).toBe(true);
+            expect(watched.has('my-org/current')).toBe(true);
+            expect(watched.has('my-org/dormant')).toBe(false);
+            expect(watched.has('my-org/legacy')).toBe(false);
+            expect(watched.size).toBe(2);
+        });
+
         // Regression guard: enumerateOrgRepos delegates pagination to the
         // shared `apiGetAllPages` helper, which walks `Link: rel="next"`.
         // The other org tests use a no-Link mock so they never exercise

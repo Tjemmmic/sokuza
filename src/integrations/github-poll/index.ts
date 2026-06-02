@@ -416,8 +416,14 @@ export class GitHubPollIntegration implements Integration {
         const url = `${GITHUB_API}/orgs/${encodeURIComponent(org)}/repos?per_page=100&type=all&sort=updated`;
         const data = await this.apiGet(url);
         if (!Array.isArray(data)) return [];
+        // Exclude archived repos from the watch set. They're immutable
+        // (no PR/issue/push/comment events possible) but each one would
+        // still cost 5 API calls per poll cycle indefinitely. For orgs
+        // with deep history this is often a 10:1 archived:active ratio,
+        // so the savings on rate-limit budget are substantial.
         return data
-            .map((r) => (r as Record<string, unknown>).full_name)
+            .filter((r): r is Record<string, unknown> => r !== null && typeof r === 'object' && !(r as Record<string, unknown>).archived)
+            .map((r) => r.full_name)
             .filter((n): n is string => typeof n === 'string' && n.length > 0);
     }
 
