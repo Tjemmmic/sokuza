@@ -481,4 +481,128 @@ describe('aiReviewAction', () => {
         expect(record.error).toMatch(/missing api_key/);
         expect(record.output.parseSucceeded).toBe(false);
     });
+
+    // The user's real auto-PR-review failure mode (PR #13 follow-up):
+    //   primary provider (opencode + zai-coding-plan/glm-5.1) emits a
+    //   stream of exploration narration with no JSON, the repair pass
+    //   gives up too, the PR #13 hard-reject correctly refuses to post
+    //   that prose — but with a single-provider chain there's nowhere
+    //   to fall back to, and the workflow fails.
+    //
+    // The fix promotes the no-JSON-after-repair signal to a chain-level
+    // "try next provider" so when the user has additional providers
+    // configured (the common case: anthropic API key as a backup), the
+    // workflow succeeds with the next provider's review instead of
+    // failing the entire run on the primary's flake.
+    //
+    // This test fakes the topology directly: a 'flaky' primary that
+    // always returns exploration prose, with 'anthropic' as the
+    // fallback. The action must reach anthropic and use its JSON.
+    it('falls back to next provider in chain when primary produces no JSON even after repair', async () => {
+        process.env.ANTHROPIC_API_KEY = 'test-key';
+
+        // Build a registry where 'flaky' is the default and 'anthropic'
+        // is the fallback. 'flaky' is registered as an anthropic-api
+        // provider so it reuses the mockCreate mock — `mockCreate`
+        // returns sequenced responses below depending on which provider
+        // is calling, but the SDK mock is shared, so we sequence in the
+        // intended call order: flaky-initial → flaky-repair →
+        // anthropic-initial.
+        const registry = loadAIProviders({
+            default_provider: 'flaky',
+            providers: {
+                flaky: {
+                    kind: 'anthropic-api',
+                    api_key: 'flaky-key',
+                    default_model: 'flaky-model',
+                },
+            },
+            fallback_providers: ['anthropic'],
+        });
+
+        const exploration =
+            'Let me start by exploring the codebase structure. Looking at the diff, ' +
+            'I need to understand the context. Let me grep for related code...';
+        const validReview = JSON.stringify({
+            summary: 'Anthropic recovered the review',
+            issues: [],
+            decision: 'APPROVE',
+            justification: 'Looks good after fallback',
+        });
+
+        mockCreate
+            // 1: flaky initial → exploration narration
+            .mockResolvedValueOnce({
+                content: [{ type: 'text', text: exploration }],
+                model: 'flaky-model',
+                usage: { input_tokens: 100, output_tokens: 50 },
+            })
+            // 2: flaky repair → still narration (model can't recover)
+            .mockResolvedValueOnce({
+                content: [{ type: 'text', text: exploration }],
+                model: 'flaky-model',
+                usage: { input_tokens: 100, output_tokens: 50 },
+            })
+            // 3: anthropic initial → valid JSON
+            .mockResolvedValueOnce({
+                content: [{ type: 'text', text: validReview }],
+                model: 'claude-sonnet-4-6',
+                usage: { input_tokens: 80, output_tokens: 40 },
+            });
+
+        const context = makeContext({
+            ai: registry,
+            steps: { fd: { diff: 'diff content' } },
+        });
+
+        const result = (await aiReviewAction({ parse_repair_retries: 1 }, context)) as Record<string, unknown>;
+
+        // Action returned the anthropic review, not the flaky exploration.
+        expect((result.parsed as Record<string, unknown> | undefined)?.decision).toBe('APPROVE');
+        expect(result.summary).toBe('Anthropic recovered the review');
+        expect(result.provider).toBe('anthropic');
+
+        // flaky was called twice (initial + 1 repair), anthropic once.
+        expect(mockCreate).toHaveBeenCalledTimes(3);
+    });
+
+    // Sister case: every provider in the chain produces narration. The
+    // action must surface the chain-exhausted error (preserving the
+    // "produced no JSON" diagnostic) and NOT post the last provider's
+    // raw output. Otherwise the very thing PR #13 fixed reopens at the
+    // tail of the chain.
+    it('throws chain-exhausted when every provider in the chain produces no JSON after repair', async () => {
+        process.env.ANTHROPIC_API_KEY = 'test-key';
+
+        const registry = loadAIProviders({
+            default_provider: 'flaky',
+            providers: {
+                flaky: {
+                    kind: 'anthropic-api',
+                    api_key: 'flaky-key',
+                    default_model: 'flaky-model',
+                },
+            },
+            fallback_providers: ['anthropic'],
+        });
+
+        // Every call returns the same exploration narration.
+        mockCreate.mockResolvedValue({
+            content: [{ type: 'text', text: 'just narration, no json anywhere' }],
+            model: 'flaky-model',
+            usage: { input_tokens: 10, output_tokens: 5 },
+        });
+
+        const context = makeContext({
+            ai: registry,
+            steps: { fd: { diff: 'x' } },
+        });
+
+        await expect(
+            aiReviewAction({ parse_repair_retries: 1 }, context),
+        ).rejects.toThrow(/produced no JSON/);
+
+        // flaky: initial + 1 repair = 2; anthropic: initial + 1 repair = 2.
+        expect(mockCreate).toHaveBeenCalledTimes(4);
+    });
 });

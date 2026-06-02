@@ -7,7 +7,11 @@ import {
     type ParseFailureKind,
 } from './review-templates.js';
 import { getDefaultPrompt } from './default-prompts.js';
-import { runCompletionWithFallback } from '../core/ai-providers.js';
+import {
+    runCompletion,
+    resolveProvider,
+    type CompletionResult,
+} from '../core/ai-providers.js';
 import {
     recordAiReviewRun,
     generateRunId,
@@ -192,157 +196,298 @@ export const aiReviewAction: ActionHandler = async (params, context) => {
         },
     };
 
-    let completion: Awaited<ReturnType<typeof runCompletionWithFallback>>;
-    try {
-        completion = await runCompletionWithFallback(context.ai, params.provider as string | undefined, {
-            systemPrompt,
-            userMessage,
-            model: params.model as string | undefined,
-            maxTokens: (params.max_tokens as number) ?? DEFAULT_MAX_TOKENS,
-            workdir: params.workdir as string | undefined,
-            logger: context.logger,
-            // Forward the workflow abort signal so a queue timeout /
-            // dashboard cancel actually interrupts the in-flight AI call
-            // (HTTP request aborted, CLI subprocess SIGTERM'd) instead
-            // of letting the workflow's runtime race abandon the promise
-            // while the underlying provider keeps consuming tokens.
-            signal: context.signal,
-        });
-    } catch (err) {
-        await recordAiReviewRun(
-            {
-                ...recordStub,
-                durationMs: Date.now() - startedAt,
-                provider: (params.provider as string | undefined) || '(unresolved)',
-                model: (params.model as string | undefined) ?? '',
-                output: { parseSucceeded: false, reviewChars: 0 },
-                error: err instanceof Error ? err.message : String(err),
-            },
-            context.logger,
-        );
-        throw err;
-    }
-
-    // The model is instructed to emit structured JSON; we render it into
-    // markdown here so the posted comment has consistent formatting
-    // regardless of how well the model obeyed its rules about headings,
-    // fences, etc. If parsing fails, fall back to the raw text so users
-    // still get *something* — but log loudly so we notice the drift.
-    let parseResult = parseStructuredReviewExt(completion.text);
-    let parsed = parseResult.review;
-    const repairAttempts: Array<{ kind: ParseFailureKind; rawSample: string }> = [];
-
-    // Repair loop. The agent's first attempt may have produced exploration
-    // text without converging, malformed JSON, or valid JSON in the wrong
-    // shape. All three are usually fixable by a focused follow-up: feed
-    // the previous output back in and ask for clean JSON only.
+    // ─── Per-provider review loop ───────────────────────────────────────
+    // Resolve the chain ourselves rather than delegating to
+    // `runCompletionWithFallback`, because that helper only falls back
+    // on runtime errors (provider down, exit-code). It can't fall back
+    // when the response came back successfully but was structurally
+    // unusable — exploration text with no JSON. That class of failure
+    // is what the PR #13 hard-reject is for: it stops us from posting
+    // the prose as a review, but on its own forces the workflow to
+    // fail. To make the workflow succeed when a single provider
+    // misbehaves, we promote the no-JSON-after-repair signal to a
+    // chain-level "try next provider" — anthropic / claude-code take
+    // over from opencode+glm-5.1 if that combo lapses into
+    // tool-narration.
     //
-    // Bounded by `parse_repair_retries` (default 1). Each retry is a fresh
-    // completion call with the same provider, so cost/latency scale with
-    // the cap. Catastrophic failures (provider error, no output at all)
-    // are not retried since they indicate something deeper than format.
+    // Important: the repair loop stays *inside* one provider's
+    // iteration. A no-JSON model often recovers when shown its own
+    // output and asked again, so each provider gets the full
+    // (initial + N repairs) budget before we move on.
+    const primary = resolveProvider(context.ai, params.provider as string | undefined);
+    const chain = [primary.name, ...context.ai.fallbackChain.filter(n => n !== primary.name)];
+
     const maxRepairs = Math.max(0, (params.parse_repair_retries as number) ?? 1);
-    let attemptText = completion.text;
-    for (let attempt = 1; attempt <= maxRepairs && !parsed && parseResult.failureKind; attempt++) {
-        // Bail before the next repair if the workflow has been aborted.
-        // Without this, a 5-minute timeout that lands mid-review would
-        // still trigger up to `parse_repair_retries` more completions,
-        // multiplying token spend on a workflow the user already gave
-        // up on.
+    const baseCompletionRequest = {
+        systemPrompt,
+        userMessage,
+        model: params.model as string | undefined,
+        maxTokens: (params.max_tokens as number) ?? DEFAULT_MAX_TOKENS,
+        workdir: params.workdir as string | undefined,
+        logger: context.logger,
+        // Forward the workflow abort signal so a queue timeout /
+        // dashboard cancel actually interrupts the in-flight AI call
+        // (HTTP request aborted, CLI subprocess SIGTERM'd) instead
+        // of letting the workflow's runtime race abandon the promise
+        // while the underlying provider keeps consuming tokens.
+        signal: context.signal,
+    };
+
+    let lastError: Error | undefined;
+    let lastFailContext: {
+        completion: CompletionResult;
+        repairAttempts: Array<{ kind: ParseFailureKind; rawSample: string }>;
+        parseFailureKind?: ParseFailureKind;
+        attemptText: string;
+    } | undefined;
+
+    for (let chainIdx = 0; chainIdx < chain.length; chainIdx++) {
+        // Abort check between providers — once the workflow has been
+        // cancelled, advancing through the rest of the chain just
+        // multiplies wasted token spend.
         if (context.signal?.aborted) {
-            context.logger.warn({ attempt, maxRepairs }, 'Workflow aborted during repair loop; bailing');
-            break;
-        }
-        if (!attemptText.trim()) break; // nothing to repair from
-        repairAttempts.push({
-            kind: parseResult.failureKind,
-            rawSample: attemptText.slice(0, 5000),
-        });
-        const repair = buildRepairPrompt(attemptText, parseResult.failureKind);
-        context.logger.warn(
-            {
-                provider: completion.provider,
-                model: completion.model,
-                failureKind: parseResult.failureKind,
-                attempt,
-                maxRepairs,
-            },
-            'Parse failed; running repair completion to recover JSON',
-        );
-        try {
-            const repairCompletion = await runCompletionWithFallback(
-                context.ai,
-                params.provider as string | undefined,
+            const abortErr = new Error('ai-review: workflow aborted before next provider attempt');
+            await recordAiReviewRun(
                 {
+                    ...recordStub,
+                    durationMs: Date.now() - startedAt,
+                    provider: lastFailContext?.completion.provider ?? chain[chainIdx] ?? '(unresolved)',
+                    model: lastFailContext?.completion.model ?? (params.model as string | undefined) ?? '',
+                    output: { parseSucceeded: false, reviewChars: 0 },
+                    error: abortErr.message,
+                },
+                context.logger,
+            );
+            throw abortErr;
+        }
+
+        const providerName = chain[chainIdx];
+        const provider = context.ai.providers.get(providerName);
+        if (!provider) continue; // defensive: registry-derived chain shouldn't miss
+
+        // ── Initial completion ──────────────────────────────────────────
+        let completion: CompletionResult;
+        try {
+            completion = await runCompletion(provider, baseCompletionRequest);
+        } catch (err) {
+            // Mid-call abort surfaces directly so we don't fall through
+            // to the rest of the chain after the user cancelled.
+            if (context.signal?.aborted) throw err;
+            lastError = err instanceof Error ? err : new Error(String(err));
+            context.logger.warn(
+                {
+                    provider: providerName,
+                    error: lastError.message,
+                    remainingProviders: chain.length - chainIdx - 1,
+                },
+                'Provider threw during initial completion; trying next fallback',
+            );
+            continue;
+        }
+
+        // ── Parse + repair loop (same provider) ─────────────────────────
+        let parseResult = parseStructuredReviewExt(completion.text);
+        let parsed = parseResult.review;
+        let attemptText = completion.text;
+        const repairAttempts: Array<{ kind: ParseFailureKind; rawSample: string }> = [];
+
+        // Repair loop. The agent's first attempt may have produced
+        // exploration text without converging, malformed JSON, or
+        // valid JSON in the wrong shape. All three are usually fixable
+        // by a focused follow-up: feed the previous output back in and
+        // ask for clean JSON only.
+        //
+        // Bounded by `parse_repair_retries` (default 1). Each retry is
+        // a fresh completion call with the *same* provider, so
+        // cost/latency scale with the cap. Catastrophic failures
+        // (provider error, no output at all) are not retried since
+        // they indicate something deeper than format.
+        for (let attempt = 1; attempt <= maxRepairs && !parsed && parseResult.failureKind; attempt++) {
+            if (context.signal?.aborted) {
+                context.logger.warn({ attempt, maxRepairs }, 'Workflow aborted during repair loop; bailing');
+                break;
+            }
+            if (!attemptText.trim()) break; // nothing to repair from
+            repairAttempts.push({
+                kind: parseResult.failureKind,
+                rawSample: attemptText.slice(0, 5000),
+            });
+            const repair = buildRepairPrompt(attemptText, parseResult.failureKind);
+            context.logger.warn(
+                {
+                    provider: completion.provider,
+                    model: completion.model,
+                    failureKind: parseResult.failureKind,
+                    attempt,
+                    maxRepairs,
+                },
+                'Parse failed; running repair completion to recover JSON',
+            );
+            try {
+                const repairCompletion = await runCompletion(provider, {
+                    ...baseCompletionRequest,
                     systemPrompt: repair.systemPrompt,
                     userMessage: repair.userMessage,
-                    model: params.model as string | undefined,
-                    maxTokens: (params.max_tokens as number) ?? DEFAULT_MAX_TOKENS,
-                    workdir: params.workdir as string | undefined,
-                    logger: context.logger,
-                    signal: context.signal,
-                },
-            );
-            // Don't let an empty repair erase the previous attempt's
-            // text. The previous behavior overwrote `attemptText` with
-            // `""`, which then short-circuited `attemptText ||
-            // completion.text` and resurrected the original incoherent
-            // text as the posted "review" (the PR #13 case: 1221 chars
-            // of opencode exploration narration). Keep the last
-            // non-empty model output around so the rawSample debug
-            // captures the more-recent attempt when one exists.
-            if (repairCompletion.text.trim()) {
-                attemptText = repairCompletion.text;
+                });
+                // Don't let an empty repair erase the previous
+                // attempt's text. The previous behavior overwrote
+                // `attemptText` with `""`, which then short-circuited
+                // `attemptText || completion.text` and resurrected
+                // the original incoherent text as the posted "review"
+                // (the PR #13 case: 1221 chars of opencode
+                // exploration narration). Keep the last non-empty
+                // model output around so the rawSample debug captures
+                // the more-recent attempt when one exists.
+                if (repairCompletion.text.trim()) {
+                    attemptText = repairCompletion.text;
+                }
+                parseResult = parseStructuredReviewExt(repairCompletion.text);
+                parsed = parseResult.review;
+            } catch (err) {
+                context.logger.warn({ err, attempt }, 'Repair completion threw; bailing repair loop for this provider');
+                break;
             }
-            parseResult = parseStructuredReviewExt(repairCompletion.text);
-            parsed = parseResult.review;
-        } catch (err) {
-            context.logger.warn({ err, attempt }, 'Repair completion threw; will fall back to raw');
-            break;
         }
-    }
 
-    let review: string;
-    if (parsed) {
-        review = renderReviewMarkdown(parsed);
-        context.logger.info(
-            {
-                provider: completion.provider,
-                model: completion.model,
-                issues: parsed.issues.length,
-                decision: parsed.decision,
-                repairAttempts: repairAttempts.length,
-            },
-            repairAttempts.length > 0
-                ? 'AI review rendered after repair'
-                : 'AI review rendered from structured JSON',
-        );
-    } else {
-        // Hard-reject `no-json` AFTER at least one repair attempt. The
-        // parser's `failureKind = 'no-json'` means the model's final
-        // output contained ZERO `{` characters — there's no possible
-        // way to extract a structured review from it, and posting it
-        // raw means the user sees the model's internal exploration /
-        // tool narration prose as the "review" (the PR #13 case:
-        // 1221 chars of "Now let me check the spawnCli function …").
-        //
-        // The 0.1.3 empty-output guard a few lines down checks
-        // `!review.trim()` — it fired on the "both outputs empty"
-        // case but missed THIS asymmetric "first chatty, repair empty"
-        // shape: the previous fallback expression
-        // `review = attemptText || completion.text` resurrected the
-        // original 1221-char text when `attemptText` (the empty repair
-        // output) was falsy, leaving `review` non-empty and slipping
-        // past `!review.trim()`. Anchoring on the parser's own
-        // structural signal — no `{` even after being explicitly
-        // asked for JSON — is provider-agnostic and false-positive-
-        // free (a legitimate short review always parses and never
-        // enters the repair loop).
-        //
-        // `parse_repair_retries: 0` workflows that opt out of the
-        // repair loop still get the previous "post raw text" behavior
-        // — we only escalate after explicit repair attempt.
-        if (parseResult.failureKind === 'no-json' && repairAttempts.length > 0) {
+        // ── Success path ────────────────────────────────────────────────
+        if (parsed) {
+            const review = renderReviewMarkdown(parsed);
+            context.logger.info(
+                {
+                    provider: completion.provider,
+                    model: completion.model,
+                    issues: parsed.issues.length,
+                    decision: parsed.decision,
+                    repairAttempts: repairAttempts.length,
+                    chainIdx,
+                    providersTried: chainIdx + 1,
+                },
+                repairAttempts.length > 0
+                    ? 'AI review rendered after repair'
+                    : 'AI review rendered from structured JSON',
+            );
+
+            if (!review.trim()) {
+                // Defensive: a parsed review whose rendered markdown
+                // collapses to empty would also surface as a blank
+                // comment. Treat the same as the no-output case.
+                await recordAiReviewRun(
+                    {
+                        ...recordStub,
+                        durationMs: Date.now() - startedAt,
+                        provider: completion.provider,
+                        model: completion.model,
+                        usage: completion.usage,
+                        output: {
+                            parseSucceeded: false,
+                            reviewChars: 0,
+                            rawSample: attemptText.slice(0, 5000),
+                            parseFailureKind: parseResult.failureKind,
+                            ...(repairAttempts.length > 0 ? { repairAttempts } : {}),
+                        },
+                    },
+                    context.logger,
+                );
+                throw new Error(
+                    `ai-review: ${completion.provider} (${completion.model}) rendered empty markdown ` +
+                    `from a parsed review. Run record: ${runId}.`,
+                );
+            }
+
+            await recordAiReviewRun(
+                {
+                    ...recordStub,
+                    durationMs: Date.now() - startedAt,
+                    provider: completion.provider,
+                    model: completion.model,
+                    usage: completion.usage,
+                    output: {
+                        parseSucceeded: true,
+                        decision: parsed.decision,
+                        issueCount: parsed.issues.length,
+                        issues: parsed.issues.map((i: typeof parsed.issues[number]) => ({
+                            priority: i.priority,
+                            title: i.title,
+                            file: i.file,
+                            path: i.path,
+                            lineStart: i.lineStart,
+                            lineEnd: i.lineEnd,
+                            problem: i.problem,
+                            fix: i.fix,
+                        })),
+                        reviewChars: review.length,
+                        // Record repair history even on success so the
+                        // dashboard can show "rendered after N repair
+                        // attempts" — useful signal that the prompt or
+                        // model is flaky.
+                        ...(repairAttempts.length > 0 ? { repairAttempts } : {}),
+                    },
+                },
+                context.logger,
+            );
+
+            return buildReviewResult({
+                runId,
+                review,
+                completion,
+                parsed,
+                truncation,
+            });
+        }
+
+        // ── Failure: parse_repair_retries: 0 path ───────────────────────
+        // Caller has explicitly opted out of the repair loop. They want
+        // raw model output even when it's not JSON, so the chain-level
+        // fallback does not kick in for this case — preserves the
+        // historical "post whatever the model said" contract used by
+        // legacy workflows and direct-shell users.
+        if (maxRepairs === 0) {
+            const review = attemptText.trim() ? attemptText : completion.text;
+            if (!review.trim()) {
+                // Real failure mode previously observed with opencode +
+                // glm-5.1: the CLI exits 0 but emits a JSONL stream with
+                // no `text` events (model gave up before producing text,
+                // provider mid-stream hiccup, schema drift).
+                // `completion.text` is `""`, the parser finds no JSON,
+                // the raw fallback also empty — and without this guard
+                // the workflow happily posts a comment with just the
+                // template's header and footer. extractCliText already
+                // surfaces opencode `error` events as `[opencode-error]
+                // ...` text, so the throw also captures that diagnostic
+                // when the model output was an error.
+                await recordAiReviewRun(
+                    {
+                        ...recordStub,
+                        durationMs: Date.now() - startedAt,
+                        provider: completion.provider,
+                        model: completion.model,
+                        usage: completion.usage,
+                        output: {
+                            parseSucceeded: false,
+                            reviewChars: 0,
+                            rawSample: attemptText.slice(0, 5000),
+                            parseFailureKind: parseResult.failureKind,
+                        },
+                    },
+                    context.logger,
+                );
+                throw new Error(
+                    `ai-review: ${completion.provider} (${completion.model}) returned no usable content. ` +
+                    `The CLI exited cleanly but produced no model text. Common causes: model ` +
+                    `emitted only reasoning, provider mid-stream error, or upstream CLI schema ` +
+                    `drift. Run record: ${runId}.`,
+                );
+            }
+            context.logger.warn(
+                {
+                    provider: completion.provider,
+                    model: completion.model,
+                    failureKind: parseResult.failureKind,
+                    repairAttempts: 0,
+                    preview: review.slice(0, 300),
+                },
+                'AI review did not return valid JSON (no repair allowed); posting raw text as fallback',
+            );
             await recordAiReviewRun(
                 {
                     ...recordStub,
@@ -352,118 +497,124 @@ export const aiReviewAction: ActionHandler = async (params, context) => {
                     usage: completion.usage,
                     output: {
                         parseSucceeded: false,
-                        reviewChars: 0,
+                        reviewChars: review.length,
                         rawSample: attemptText.slice(0, 5000),
                         parseFailureKind: parseResult.failureKind,
-                        repairAttempts,
                     },
                 },
                 context.logger,
             );
-            throw new Error(
-                `ai-review: ${completion.provider} (${completion.model}) produced no JSON ` +
-                `even after ${repairAttempts.length} repair attempt(s). Final output contained ` +
-                `zero \`{\` characters — typically the model lapsing into tool-narration / ` +
-                `chain-of-thought instead of producing the requested structured review. ` +
-                `Posting raw would surface that exploration text as the user-facing comment. ` +
-                `Run record: ${runId}.`,
-            );
+            return buildReviewResult({
+                runId,
+                review,
+                completion,
+                parsed: null,
+                truncation,
+            });
         }
-        // Be explicit about which string we fall back to so the
-        // empty-guard below and this branch agree on the same value.
-        // The old `attemptText || completion.text` accidentally
-        // resurrected the original output whenever a non-empty first
-        // attempt was followed by an empty repair.
-        review = attemptText.trim() ? attemptText : completion.text;
+
+        // ── Failure: repair exhausted, try next provider ────────────────
+        // Hard-reject `no-json` AFTER at least one repair attempt. The
+        // parser's `failureKind = 'no-json'` means the model's final
+        // output contained ZERO `{` characters — there's no possible
+        // way to extract a structured review from it, and posting it
+        // raw means the user sees the model's internal exploration /
+        // tool narration prose as the "review" (the PR #13 case:
+        // 1221 chars of "Now let me check the spawnCli function …").
+        //
+        // Other failure kinds (malformed JSON, wrong shape) are also
+        // unrecoverable on this provider after the repair budget is
+        // spent — promote both to chain-level fallback so a more
+        // reliable provider can take over.
+        //
+        // The error text intentionally preserves the
+        // "produced no JSON ... even after N repair attempt(s)" phrase
+        // so the existing diagnostic message (and the
+        // `/produced no JSON/` test regex) survives the refactor.
+        lastError = new Error(
+            `ai-review: ${completion.provider} (${completion.model}) produced no JSON ` +
+            `even after ${repairAttempts.length} repair attempt(s) ` +
+            `(failureKind: ${parseResult.failureKind}). Final output contained ` +
+            (parseResult.failureKind === 'no-json' ? 'zero `{` characters' : 'unparseable JSON') +
+            ` — typically the model lapsing into tool-narration / chain-of-thought ` +
+            `instead of producing the requested structured review.`
+        );
+        lastFailContext = {
+            completion,
+            repairAttempts,
+            parseFailureKind: parseResult.failureKind,
+            attemptText,
+        };
         context.logger.warn(
             {
                 provider: completion.provider,
                 model: completion.model,
                 failureKind: parseResult.failureKind,
                 repairAttempts: repairAttempts.length,
-                preview: review.slice(0, 300),
+                remainingProviders: chain.length - chainIdx - 1,
             },
-            'AI review did not return valid JSON even after repair; posting raw text as fallback',
+            chainIdx + 1 < chain.length
+                ? 'Provider produced no parseable review after repair; trying next provider in fallback chain'
+                : 'Provider produced no parseable review after repair (no more providers in chain)',
         );
+        // Loop to next provider (or fall out if exhausted).
     }
 
-    // ─── Empty-output guard ─────────────────────────────────────────────
-    // Real failure mode previously observed with opencode + glm-5.1: the
-    // CLI exits 0 but emits a JSONL stream with no `text` events (model
-    // gave up before producing text, provider mid-stream hiccup, schema
-    // drift). `completion.text` is `""`, the parser finds no JSON, the
-    // fallback above sets `review = ""` — and the workflow happily
-    // posts an empty review comment with just the template's header
-    // and footer. Throwing here surfaces the failure in the dashboard
-    // run viewer instead of silently advertising "the AI reviewed your
-    // PR" with no content. extractCliText already surfaces opencode
-    // `error` events as `[opencode-error] ...` text, so the throw also
-    // captures that diagnostic when the model output was an error.
-    if (!review.trim()) {
-        await recordAiReviewRun(
-            {
-                ...recordStub,
-                durationMs: Date.now() - startedAt,
-                provider: completion.provider,
-                model: completion.model,
-                usage: completion.usage,
-                output: {
-                    parseSucceeded: false,
-                    reviewChars: 0,
-                    rawSample: attemptText.slice(0, 5000),
-                    parseFailureKind: parseResult.failureKind,
-                    ...(repairAttempts.length > 0 ? { repairAttempts } : {}),
-                },
-            },
-            context.logger,
-        );
-        throw new Error(
-            `ai-review: ${completion.provider} (${completion.model}) returned no usable content. ` +
-            `The CLI exited cleanly but produced no model text. Common causes: model ` +
-            `emitted only reasoning, provider mid-stream error, or upstream CLI schema ` +
-            `drift. Run record: ${runId}.`,
-        );
-    }
-
+    // ─── Chain exhausted ────────────────────────────────────────────────
+    // Every configured provider either threw a runtime error or
+    // produced unparseable output even after its repair budget. Record
+    // the last attempt's failure context (so the dashboard run viewer
+    // shows the most-recent rawSample / repairAttempts) and throw a
+    // message that names every provider tried — that information is
+    // what the user needs to figure out whether to fix the prompt,
+    // swap models, or remove a broken provider from the chain.
+    const failProvider = lastFailContext?.completion.provider ?? '(none)';
+    const failModel = lastFailContext?.completion.model ?? (params.model as string | undefined) ?? '';
+    const finalErrorMessage = lastError?.message ?? 'no providers in chain produced a usable review';
     await recordAiReviewRun(
         {
             ...recordStub,
             durationMs: Date.now() - startedAt,
-            provider: completion.provider,
-            model: completion.model,
-            usage: completion.usage,
-            output: parsed
+            provider: failProvider,
+            model: failModel,
+            ...(lastFailContext?.completion.usage ? { usage: lastFailContext.completion.usage } : {}),
+            output: lastFailContext
                 ? {
-                    parseSucceeded: true,
-                    decision: parsed.decision,
-                    issueCount: parsed.issues.length,
-                    issues: parsed.issues.map((i: typeof parsed.issues[number]) => ({
-                        priority: i.priority,
-                        title: i.title,
-                        file: i.file,
-                        path: i.path,
-                        lineStart: i.lineStart,
-                        lineEnd: i.lineEnd,
-                        problem: i.problem,
-                        fix: i.fix,
-                    })),
-                    reviewChars: review.length,
-                    // Record repair history even on success so the dashboard
-                    // can show "rendered after N repair attempts" — useful
-                    // signal that the prompt or model is flaky.
-                    ...(repairAttempts.length > 0 ? { repairAttempts } : {}),
+                    parseSucceeded: false,
+                    reviewChars: 0,
+                    rawSample: lastFailContext.attemptText.slice(0, 5000),
+                    parseFailureKind: lastFailContext.parseFailureKind,
+                    ...(lastFailContext.repairAttempts.length > 0 ? { repairAttempts: lastFailContext.repairAttempts } : {}),
                 }
                 : {
                     parseSucceeded: false,
-                    reviewChars: review.length,
-                    rawSample: attemptText.slice(0, 5000),
-                    parseFailureKind: parseResult.failureKind,
-                    ...(repairAttempts.length > 0 ? { repairAttempts } : {}),
+                    reviewChars: 0,
                 },
+            error: finalErrorMessage,
         },
         context.logger,
     );
+    // Preserve the "produced no JSON" phrase when the last failure was
+    // a parse failure so existing diagnostics (and the
+    // `/produced no JSON/` test regex) continue to match.
+    throw new Error(
+        chain.length > 1
+            ? `ai-review: exhausted ${chain.length} provider(s) in fallback chain ` +
+              `(${chain.join(' → ')}) without producing a usable review. ` +
+              `Last error: ${finalErrorMessage} Run record: ${runId}.`
+            : `${finalErrorMessage} Run record: ${runId}.`,
+    );
+};
 
+interface BuildReviewResultArgs {
+    runId: string;
+    review: string;
+    completion: CompletionResult;
+    parsed: ReturnType<typeof parseStructuredReviewExt>['review'] | null;
+    truncation: ReturnType<typeof truncateDiff>;
+}
+
+function buildReviewResult({ runId, review, completion, parsed, truncation }: BuildReviewResultArgs) {
     return {
         // The run-id is exposed so downstream steps (notably
         // github-create-review) can stamp the comment marker
