@@ -1094,7 +1094,18 @@ export function spawnCli(opts: SpawnCliOptions): Promise<string> {
         child.stderr.on('data', (chunk: Buffer) => stderrChunks.push(chunk));
 
         child.on('error', (err: Error) => {
-            if (settled) return;
+            if (settled) {
+                // We already rejected via abort and scheduled the
+                // SIGKILL backstop; the child errored out before the
+                // backstop window. Cancel the timer now to free the
+                // event loop, matching the `close` handler's behavior.
+                // Without this, an aborted-then-errored spawn would
+                // leave a ~1.5s pending setTimeout hanging onto the
+                // event loop trying to SIGKILL an already-exited PID
+                // — harmless but wasteful.
+                if (killTimer) clearTimeout(killTimer);
+                return;
+            }
             settled = true;
             if (killTimer) clearTimeout(killTimer);
             signal?.removeEventListener('abort', onAbort);
