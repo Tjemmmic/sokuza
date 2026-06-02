@@ -17,7 +17,16 @@ const DEFAULTS: QueueSettings = {
     dedup: 'latest-wins',
     dedup_key: '{{workflow.name}}:{{event.metadata.repo}}:{{event.metadata.prNumber}}',
     priority: 'normal',
-    timeout: 300,
+    // 10 minutes. AI-driven workflows commonly chain a clone, a diff
+    // fetch, an ai.review call (1–3 min on its own with a CLI provider
+    // like opencode/claude-code), an optional repair retry, and a
+    // comment post. The previous 5-minute default tripped users running
+    // template: ai-pr-review against medium PRs even when nothing was
+    // wrong. The companion abort plumbing (signal → CLI subprocess
+    // SIGTERM, signal → HTTP fetch abort) ensures hitting the cap
+    // actually kills the underlying work, so a longer default doesn't
+    // mean a longer wall-clock leak when something legitimately hangs.
+    timeout: 600,
     retry: 0,
     retry_delay: 30,
 };

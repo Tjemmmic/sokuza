@@ -22,7 +22,16 @@ export function formatAbortError(reason: unknown): string {
     if (reason && typeof reason === 'object' && 'kind' in reason) {
         const r = reason as { kind: unknown; timeoutSec?: unknown };
         if (r.kind === 'timeout' && typeof r.timeoutSec === 'number') {
-            return `Workflow timed out after ${r.timeoutSec}s (raise queue.defaults.timeout or queue.per_workflow.<name>.timeout in sokuza.config.yaml)`;
+            return (
+                `Workflow timed out after ${r.timeoutSec}s. Raise this limit by ` +
+                `setting one of (in priority order, narrowest wins): the workflow's ` +
+                `\`queue.timeout\` field, \`queue.per_workflow.<name>.timeout\` in ` +
+                `sokuza.config.yaml, or \`queue.defaults.timeout\`. For finer ` +
+                `control of an individual long-running node (e.g. an ai.review ` +
+                `call), set \`timeout\` on that node — but the workflow-level cap ` +
+                `still wins, so make sure the workflow cap is at least as long as ` +
+                `the sum of the slowest path's node timeouts.`
+            );
         }
     }
     if (reason === 'cancelled') return 'Workflow cancelled';
