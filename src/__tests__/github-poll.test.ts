@@ -1045,6 +1045,83 @@ describe('GitHubPollIntegration', () => {
                 globalThis.fetch = originalFetch;
             }
         });
+
+        it('stop() called between sub-pollers halts the remaining sub-pollers for the current repo', async () => {
+            // Finer-grained than the outer-loop stop-mid-poll test. A
+            // stop() that lands AFTER pollPullRequests resolves but
+            // BEFORE pollIssues runs used to let the remaining four
+            // sub-pollers (issues, push, comments, reviews) fire — each
+            // making fetch() calls and possibly emit() against a
+            // stopped integration. The pollRepo body now mirrors poll()
+            // and refreshOrgRepos's cancellation pattern.
+            const integration = new GitHubPollIntegration();
+            await integration.initialize({
+                token: 'tok',
+                repos: ['org/alpha'],
+                events: [
+                    'pull_request.opened',
+                    'issues.opened',
+                    'push',
+                    'issue_comment.created',
+                    'pull_request_review.submitted',
+                ],
+            }, TEST_LOGGER);
+            (integration as unknown as { onEvent: (e: EventPayload) => Promise<void> })
+                .onEvent = async () => { /* discard */ };
+
+            let fetchedEndpoints: string[] = [];
+            let prResolved: (() => void) | null = null;
+            const prPromise = new Promise<void>((r) => { prResolved = r; });
+
+            const fetchMock = vi.fn(async (url: string | URL | Request) => {
+                const s = String(url);
+                if (s.includes('/repos/org/alpha/pulls') && !s.includes('/reviews')) {
+                    fetchedEndpoints.push('pulls');
+                    if (!s.includes('state=open')) {
+                        // pollPullRequests' /pulls?state=all — suspend so
+                        // we can stop() before the next sub-poller fires.
+                        await prPromise;
+                    }
+                    return jsonOk([]);
+                }
+                if (s.includes('/repos/org/alpha/issues') && !s.includes('/comments')) {
+                    fetchedEndpoints.push('issues');
+                    return jsonOk([]);
+                }
+                if (s.includes('/repos/org/alpha/branches')) {
+                    fetchedEndpoints.push('branches');
+                    return jsonOk([]);
+                }
+                if (s.includes('/repos/org/alpha/issues/comments')) {
+                    fetchedEndpoints.push('comments');
+                    return jsonOk([]);
+                }
+                if (s.includes('/reviews')) {
+                    fetchedEndpoints.push('reviews');
+                    return jsonOk([]);
+                }
+                return jsonOk([]);
+            }) as unknown as typeof globalThis.fetch;
+            const originalFetch = globalThis.fetch;
+            globalThis.fetch = fetchMock;
+
+            try {
+                const pollPromise = (integration as any).poll();
+                await new Promise((r) => setImmediate(r));
+                expect(fetchedEndpoints).toEqual(['pulls']);
+
+                // Stop while pollPullRequests is suspended. The check
+                // after pollPullRequests' await must bail before
+                // pollIssues runs.
+                integration.stop();
+                prResolved!();
+                await pollPromise;
+
+                expect(fetchedEndpoints).toEqual(['pulls']);
+            } finally {
+                globalThis.fetch = originalFetch;
+            }
+        });
     });
 
     // ─── State pruning on org-set churn ─────────────────────────────────────

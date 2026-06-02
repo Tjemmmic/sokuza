@@ -478,20 +478,33 @@ export class GitHubPollIntegration implements Integration {
         // emit events for the un-snapshotted sub-categories.
         const firstSight = !this.state.seededRepos.has(repoFull);
 
+        // Cooperative cancellation between sub-pollers, symmetric with the
+        // checks in `poll()`'s outer loop and `refreshOrgRepos`. Without
+        // these, a `stop()` landing after pollPullRequests resolves would
+        // still let pollIssues / pollPushes / pollComments /
+        // pollPullRequestReviews fire 1-4 more fetches against a stopped
+        // integration AND emit() events into a consumer that's already
+        // tearing down — violating the cooperative-cancellation contract
+        // the rest of the integration honors.
         if (this.wantsEvent('pull_request')) {
             await this.pollPullRequests(owner, repo, firstSight);
+            if (this.stopped) return;
         }
         if (this.wantsEvent('issues')) {
             await this.pollIssues(owner, repo, firstSight);
+            if (this.stopped) return;
         }
         if (this.enabledEvents.has('push')) {
             await this.pollPushes(owner, repo, firstSight);
+            if (this.stopped) return;
         }
         if (this.enabledEvents.has('issue_comment.created')) {
             await this.pollComments(owner, repo, firstSight);
+            if (this.stopped) return;
         }
         if (this.enabledEvents.has('pull_request_review.submitted')) {
             await this.pollPullRequestReviews(owner, repo, firstSight);
+            if (this.stopped) return;
         }
 
         // Mid-poll guard: an org-refresh that landed between our awaits
