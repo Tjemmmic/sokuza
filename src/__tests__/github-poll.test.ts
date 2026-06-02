@@ -220,6 +220,99 @@ describe('GitHubPollIntegration', () => {
             expect((integration as any).refreshing).toBe(false);
             expect((integration as any).polling).toBe(false);
         });
+
+        it('initialize() resets orgRepos so stale entries from a previous config do not leak into the new watch set', async () => {
+            // Sister to the lifecycle-flag reset above. The reuse path
+            // also has to drop stale per-org enumeration results,
+            // otherwise `allRepos()` unions them into the watch set
+            // indefinitely and they're polled forever — `refreshOrgRepos`
+            // only iterates `this.orgs` (the cleaned current list), so
+            // it can't see or prune org keys from the previous config.
+            const integration = new GitHubPollIntegration();
+            await integration.initialize({ token: 'tok', orgs: ['old-org'] }, TEST_LOGGER);
+
+            // Simulate a refresh having populated old-org's set.
+            (integration as any).orgRepos.set('old-org', new Set(['old-org/legacy-a', 'old-org/legacy-b']));
+            expect(((integration as any).allRepos() as Set<string>).has('old-org/legacy-a')).toBe(true);
+
+            integration.stop();
+            // Re-initialize with a completely different org. Without the
+            // reset, the next allRepos() would still return both
+            // old-org/* entries via `orgRepos` plus the new explicit
+            // repos — polling repos the user no longer wants to watch.
+            await integration.initialize({ token: 'tok', orgs: ['new-org'] }, TEST_LOGGER);
+            const watched = (integration as any).allRepos() as Set<string>;
+            expect(watched.has('old-org/legacy-a')).toBe(false);
+            expect(watched.has('old-org/legacy-b')).toBe(false);
+            expect((integration as any).orgRepos.size).toBe(0);
+        });
+
+        it('apiGetAllPages throws on a non-array body on a subsequent page (preserves prior pages via per-org isolation)', async () => {
+            // Pre-existing pagination edge case amplified by the new
+            // enumerateOrgRepos caller. If GitHub ever returned 200
+            // with a non-array body on page 2 (server contract
+            // violation, but possible via proxy/cache corruption), the
+            // old code returned that non-array and silently discarded
+            // every accumulated page in `all`. Downstream:
+            //   - enumerateOrgRepos sees [] and stores an empty set
+            //   - refreshOrgRepos diffs previous union against current
+            //     and prunes state for every repo that "disappeared"
+            //   - next poll re-emits every existing PR/issue/comment
+            //     across the entire org as new — the exact flood the
+            //     per-repo seeding refactor exists to prevent.
+            // Throwing instead lets the per-org catch in
+            // refreshOrgRepos preserve the previous set (the documented
+            // "transient API hiccup" contract).
+            const integration = new GitHubPollIntegration();
+            await integration.initialize({ token: 'tok', orgs: ['my-org'] }, TEST_LOGGER);
+
+            const PAGE_1_URL = 'https://api.github.com/orgs/my-org/repos?per_page=100&type=all&sort=updated';
+            const PAGE_2_URL = 'https://api.github.com/orgs/my-org/repos?per_page=100&page=2';
+
+            globalThis.fetch = vi.fn(async (url: string | URL | Request) => {
+                const s = String(url);
+                if (s === PAGE_1_URL) {
+                    return {
+                        ok: true, status: 200, statusText: 'OK',
+                        headers: { get: (h: string) => h.toLowerCase() === 'link' ? `<${PAGE_2_URL}>; rel="next"` : null },
+                        json: async () => ([{ full_name: 'my-org/page1-a' }, { full_name: 'my-org/page1-b' }]),
+                    };
+                }
+                if (s === PAGE_2_URL) {
+                    // Server contract violation: page 2 returns a
+                    // single object instead of an array.
+                    return {
+                        ok: true, status: 200, statusText: 'OK',
+                        headers: { get: () => null },
+                        json: async () => ({ message: 'something went sideways' }),
+                    };
+                }
+                throw new Error(`unexpected url: ${s}`);
+            }) as unknown as typeof globalThis.fetch;
+
+            await expect(
+                (integration as any).apiGetAllPages(PAGE_1_URL),
+            ).rejects.toThrow(/expected array on subsequent page/i);
+        });
+
+        it('apiGetAllPages still allows a non-array body on the FIRST page (single-resource endpoints)', async () => {
+            // Sanity: the new guard must only fire on subsequent pages.
+            // Endpoints like `/repos/{owner}/{repo}/issues/{n}` return
+            // a single object on page 1, and callers downstream expect
+            // that object — throwing here would break every
+            // single-resource call.
+            const integration = new GitHubPollIntegration();
+            await integration.initialize({ token: 'tok', orgs: ['my-org'] }, TEST_LOGGER);
+
+            globalThis.fetch = vi.fn(async () => ({
+                ok: true, status: 200, statusText: 'OK',
+                headers: { get: () => null },
+                json: async () => ({ number: 42, title: 'Single issue' }),
+            })) as unknown as typeof globalThis.fetch;
+
+            const result = await (integration as any).apiGetAllPages('https://api.github.com/repos/o/r/issues/42');
+            expect(result).toEqual({ number: 42, title: 'Single issue' });
+        });
     });
 
     describe('seed run', () => {

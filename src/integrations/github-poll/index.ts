@@ -196,9 +196,19 @@ export class GitHubPollIntegration implements Integration {
         // and the integration would never start polling. Fresh
         // construction zeroes these via field initializers; this matches
         // the reuse contract.
+        //
+        // Same logic applies to `orgRepos`: stale entries from the
+        // previous config's orgs would linger in the per-org map,
+        // `allRepos()` would union them into the watch set, and they
+        // would be polled forever. `refreshOrgRepos` only iterates
+        // `this.orgs` (the cleaned current list), so it can't see / prune
+        // org keys that aren't in the new config. Reset alongside the
+        // flags so re-initialize is fully equivalent to fresh construction
+        // for everything that varies with config.
         this.stopped = false;
         this.refreshing = false;
         this.polling = false;
+        this.orgRepos = new Map();
         if (!this.config.token) {
             throw new Error('github-poll: token is required');
         }
@@ -804,7 +814,34 @@ export class GitHubPollIntegration implements Integration {
             }
 
             const data: unknown = await res.json();
-            if (!Array.isArray(data)) return data;
+            if (!Array.isArray(data)) {
+                // On page 1 a non-array body is legitimate — endpoints
+                // like `/repos/{owner}/{repo}/issues/{n}` return a
+                // single object and the caller (e.g. apiGet for a
+                // single resource) expects it. Pass through.
+                //
+                // On any SUBSEQUENT page, a non-array body is a server
+                // contract violation: the Link header promised more
+                // results in the same shape. The original code silently
+                // returned `data`, throwing away every accumulated
+                // page in `all`. Downstream that meant
+                // `enumerateOrgRepos` would think the org shrank to
+                // a single repo (or zero), `refreshOrgRepos` would
+                // diff against the previous union, prune state for
+                // every dropped repo, and the next poll cycle would
+                // re-emit every existing PR/issue/comment as new —
+                // the exact flood the per-repo seeding refactor exists
+                // to prevent. Throw loudly so the caller's per-org
+                // catch isolates the failure and the previous set is
+                // preserved (the existing "transient API hiccup"
+                // contract), rather than silently corrupting state.
+                if (all.length > 0) {
+                    throw new Error(
+                        `GitHub API pagination: expected array on subsequent page but got ${typeof data} (URL: ${nextUrl})`,
+                    );
+                }
+                return data;
+            }
             all.push(...data);
 
             const link = res.headers?.get?.('link');
