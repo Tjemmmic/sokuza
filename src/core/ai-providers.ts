@@ -26,6 +26,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { spawn } from 'node:child_process';
 import type { Logger } from 'pino';
+import { abortErrorFromSignal } from './abort-error.js';
 
 /**
  * Quick non-blocking check that a CLI binary is on PATH.
@@ -416,6 +417,16 @@ export interface CompletionRequest {
     /** Working directory for CLI providers. */
     workdir?: string;
     logger: Logger;
+    /** Workflow-level abort signal. When it fires:
+     *   - API providers: the in-flight HTTP request is aborted via the
+     *     SDK's / fetch's native AbortSignal plumbing.
+     *   - CLI providers: the child process tree receives SIGTERM, then
+     *     SIGKILL after a 1.5s grace.
+     *  Required to honor `queue.defaults.timeout` and user-driven
+     *  `POST /api/queue/jobs/:id/cancel` — without it, a workflow
+     *  timeout / cancel leaves the underlying request running and the
+     *  user keeps burning tokens or holding a CLI subprocess open. */
+    signal?: AbortSignal;
 }
 
 export interface CompletionResult {
@@ -464,10 +475,23 @@ export async function runCompletionWithFallback(
 
     let lastError: Error | undefined;
     for (const name of chain) {
+        // Abort check between providers — without this a workflow
+        // timeout that fires while the primary's fetch is in flight
+        // would still trigger the fallback chain, multiplying wall-clock
+        // cost by the fan-out (e.g. claude → opencode → anthropic =
+        // up to 3× the budget). Each provider's underlying call also
+        // re-checks; this is the early-exit before the next attempt.
+        if (request.signal?.aborted) throw abortErrorFromSignal(request.signal);
         const provider = registry.providers.get(name)!;
         try {
             return await runCompletion(provider, request);
         } catch (err: any) {
+            // If the workflow was aborted during this provider's call,
+            // surface the abort directly rather than logging "failed,
+            // trying next fallback" and retrying — that would burn
+            // through every remaining provider AFTER the user told us
+            // to stop.
+            if (request.signal?.aborted) throw abortErrorFromSignal(request.signal);
             lastError = err;
             request.logger.warn(
                 { provider: name, error: err.message },
@@ -491,11 +515,13 @@ export async function runAgentWithFallback(
 
     let lastError: Error | undefined;
     for (const name of chain) {
+        if (request.signal?.aborted) throw abortErrorFromSignal(request.signal);
         const provider = registry.providers.get(name)!;
         if (provider.kind !== 'cli') continue;
         try {
             return await runAgent(provider, request);
         } catch (err: any) {
+            if (request.signal?.aborted) throw abortErrorFromSignal(request.signal);
             lastError = err;
             request.logger.warn(
                 { provider: name, error: err.message },
@@ -523,12 +549,21 @@ async function runAnthropicCompletion(
         });
     }
 
-    const response = await provider._client.messages.create({
-        model: request.model,
-        max_tokens: request.maxTokens ?? 4096,
-        system: request.systemPrompt,
-        messages: [{ role: 'user', content: request.userMessage }],
-    });
+    // Honor the workflow signal — the Anthropic SDK accepts `signal` via
+    // its second-arg request options. Without this, a workflow timeout
+    // would unblock the runtime but the in-flight HTTP request would
+    // still complete (or hang) in the background, burning the user's
+    // API quota for output they'll never see.
+    if (request.signal?.aborted) throw abortErrorFromSignal(request.signal);
+    const response = await provider._client.messages.create(
+        {
+            model: request.model,
+            max_tokens: request.maxTokens ?? 4096,
+            system: request.systemPrompt,
+            messages: [{ role: 'user', content: request.userMessage }],
+        },
+        request.signal ? { signal: request.signal } : undefined,
+    );
 
     const text = response.content
         .filter((block) => block.type === 'text')
@@ -570,6 +605,10 @@ async function runOpenAICompletion(
         throw new Error(`AI provider "${provider.name}" is missing base_url`);
     }
 
+    // Honor the workflow signal — fetch supports it natively. Without
+    // this, the HTTP socket would stay open until the OpenAI-compatible
+    // provider responds even though the workflow has already been killed.
+    if (request.signal?.aborted) throw abortErrorFromSignal(request.signal);
     const url = `${provider.baseUrl.replace(/\/$/, '')}/chat/completions`;
     const response = await fetch(url, {
         method: 'POST',
@@ -585,6 +624,7 @@ async function runOpenAICompletion(
                 { role: 'user', content: request.userMessage },
             ],
         }),
+        signal: request.signal,
     });
 
     if (!response.ok) {
@@ -650,6 +690,7 @@ async function runCliCompletion(
         stdin: invocation.stdin,
         logger: request.logger,
         providerName: provider.name,
+        signal: request.signal,
     });
 
     const text = extractCliText(provider.argsStyle!, stdout);
@@ -679,6 +720,9 @@ export interface AgentRequest {
     /** Output format hint ("text" or "json"). */
     outputFormat?: 'text' | 'json';
     logger: Logger;
+    /** See `CompletionRequest.signal`. The CLI subprocess receives
+     *  SIGTERM then SIGKILL after a 1.5s grace when this fires. */
+    signal?: AbortSignal;
 }
 
 export interface AgentResult {
@@ -729,6 +773,7 @@ export async function runAgent(
         stdin: invocation.stdin,
         logger: request.logger,
         providerName: provider.name,
+        signal: request.signal,
     });
 
     const text = extractCliText(provider.argsStyle!, stdout);
@@ -944,10 +989,31 @@ interface SpawnCliOptions {
     stdin: string | null;
     logger: Logger;
     providerName: string;
+    /** When this fires (workflow timeout / dashboard cancel), the child
+     *  process tree is SIGTERM'd immediately and SIGKILL'd after
+     *  `SIGKILL_BACKSTOP_MS`. The spawnCli promise rejects with
+     *  `abortErrorFromSignal(signal)` so callers see a "Workflow timed
+     *  out / cancelled" message rather than a confusing "exited with
+     *  code null" trail. */
+    signal?: AbortSignal;
 }
 
-function spawnCli(opts: SpawnCliOptions): Promise<string> {
-    const { command, args, env, cwd, stdin, logger, providerName } = opts;
+/** Grace period between SIGTERM and the fallback SIGKILL. Mirrors the
+ *  shell-exec backstop. AI CLIs (claude, opencode) exit cleanly on
+ *  SIGTERM within ~100ms; 1.5s is plenty for the well-behaved case while
+ *  still keeping a misbehaving child from outliving the workflow. */
+const SIGKILL_BACKSTOP_MS = 1500;
+
+/** Exported for the abort/SIGTERM-escalation regression test. Production
+ *  callers go through `runCompletion` / `runAgent`. */
+export function spawnCli(opts: SpawnCliOptions): Promise<string> {
+    const { command, args, env, cwd, stdin, logger, providerName, signal } = opts;
+
+    // Pre-abort guard: caller already aborted before we even tried to
+    // spawn. Reject without launching anything.
+    if (signal?.aborted) {
+        return Promise.reject(abortErrorFromSignal(signal));
+    }
 
     // Merge provider-injected env on top of the current process env.
     // Provider env wins (that's the whole point — e.g. ANTHROPIC_BASE_URL).
@@ -964,12 +1030,62 @@ function spawnCli(opts: SpawnCliOptions): Promise<string> {
         'Spawning AI CLI',
     );
 
+    const isWindows = process.platform === 'win32';
+
     return new Promise<string>((resolve, reject) => {
         const child = spawn(command, args, {
             env: mergedEnv,
             cwd: cwd || undefined,
             stdio: ['pipe', 'pipe', 'pipe'],
+            // POSIX: become process-group leader so we can SIGTERM the
+            // whole tree on abort, not just the direct child. Necessary
+            // when the CLI exec()s helpers (claude → claude-helper, etc.)
+            // — without this, killing only the parent leaves grandchildren
+            // running until they finish their own work. Mirrors the
+            // pattern used by shell-exec.ts.
+            detached: !isWindows,
+            windowsHide: true,
         });
+
+        let killTimer: NodeJS.Timeout | null = null;
+        let settled = false;
+
+        // Kill the entire process tree. Best-effort: ESRCH means the
+        // target is already gone (clean), EPERM means the kernel
+        // dropped the right and there's nothing useful we can do.
+        const killTree = (sig: 'SIGTERM' | 'SIGKILL'): void => {
+            if (!child.pid) return;
+            try {
+                if (isWindows) {
+                    // Windows has no process groups; best-effort
+                    // terminate the parent. Same trade-off as
+                    // shell-exec: a more complete fix would shell out
+                    // to taskkill /F /T, but the AI CLIs we wrap don't
+                    // commonly grandchild on Windows.
+                    process.kill(child.pid, sig);
+                } else {
+                    process.kill(-child.pid, sig);
+                }
+            } catch {
+                // ESRCH / EPERM — child is gone or we don't have the
+                // right. Either way the caller still gets the rejection
+                // below.
+            }
+        };
+
+        const onAbort = () => {
+            if (settled) return;
+            settled = true;
+            killTree('SIGTERM');
+            // Schedule SIGKILL as a backstop. Without this a CLI that
+            // ignores SIGTERM (rare but possible — buggy wrapper script,
+            // forked daemon) would keep running and the user would
+            // continue paying for it.
+            killTimer = setTimeout(() => killTree('SIGKILL'), SIGKILL_BACKSTOP_MS);
+            signal?.removeEventListener('abort', onAbort);
+            reject(abortErrorFromSignal(signal!));
+        };
+        if (signal) signal.addEventListener('abort', onAbort, { once: true });
 
         const chunks: Buffer[] = [];
         const stderrChunks: Buffer[] = [];
@@ -978,6 +1094,10 @@ function spawnCli(opts: SpawnCliOptions): Promise<string> {
         child.stderr.on('data', (chunk: Buffer) => stderrChunks.push(chunk));
 
         child.on('error', (err: Error) => {
+            if (settled) return;
+            settled = true;
+            if (killTimer) clearTimeout(killTimer);
+            signal?.removeEventListener('abort', onAbort);
             logger.error(
                 { provider: providerName, command, err: err.message },
                 'AI CLI spawn error',
@@ -988,6 +1108,16 @@ function spawnCli(opts: SpawnCliOptions): Promise<string> {
         });
 
         child.on('close', (code: number | null) => {
+            if (settled) {
+                // We already rejected via abort. Free the SIGKILL timer
+                // now that the child has exited so the event loop can
+                // drain — otherwise it lingers until SIGKILL_BACKSTOP_MS.
+                if (killTimer) clearTimeout(killTimer);
+                return;
+            }
+            settled = true;
+            signal?.removeEventListener('abort', onAbort);
+
             const stdout = Buffer.concat(chunks).toString('utf-8');
             const stderr = Buffer.concat(stderrChunks).toString('utf-8');
 

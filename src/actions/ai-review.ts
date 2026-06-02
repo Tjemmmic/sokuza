@@ -201,6 +201,12 @@ export const aiReviewAction: ActionHandler = async (params, context) => {
             maxTokens: (params.max_tokens as number) ?? DEFAULT_MAX_TOKENS,
             workdir: params.workdir as string | undefined,
             logger: context.logger,
+            // Forward the workflow abort signal so a queue timeout /
+            // dashboard cancel actually interrupts the in-flight AI call
+            // (HTTP request aborted, CLI subprocess SIGTERM'd) instead
+            // of letting the workflow's runtime race abandon the promise
+            // while the underlying provider keeps consuming tokens.
+            signal: context.signal,
         });
     } catch (err) {
         await recordAiReviewRun(
@@ -238,6 +244,15 @@ export const aiReviewAction: ActionHandler = async (params, context) => {
     const maxRepairs = Math.max(0, (params.parse_repair_retries as number) ?? 1);
     let attemptText = completion.text;
     for (let attempt = 1; attempt <= maxRepairs && !parsed && parseResult.failureKind; attempt++) {
+        // Bail before the next repair if the workflow has been aborted.
+        // Without this, a 5-minute timeout that lands mid-review would
+        // still trigger up to `parse_repair_retries` more completions,
+        // multiplying token spend on a workflow the user already gave
+        // up on.
+        if (context.signal?.aborted) {
+            context.logger.warn({ attempt, maxRepairs }, 'Workflow aborted during repair loop; bailing');
+            break;
+        }
         if (!attemptText.trim()) break; // nothing to repair from
         repairAttempts.push({
             kind: parseResult.failureKind,
@@ -265,6 +280,7 @@ export const aiReviewAction: ActionHandler = async (params, context) => {
                     maxTokens: (params.max_tokens as number) ?? DEFAULT_MAX_TOKENS,
                     workdir: params.workdir as string | undefined,
                     logger: context.logger,
+                    signal: context.signal,
                 },
             );
             attemptText = repairCompletion.text;

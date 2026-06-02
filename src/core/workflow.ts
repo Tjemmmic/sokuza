@@ -307,12 +307,20 @@ function makeContext(
     workflowName?: string,
     recordWebhookDelivery?: import('./types.js').ActionContext['recordWebhookDelivery'],
     extras?: MakeContextExtras,
+    signal?: AbortSignal,
 ): ActionContext {
     return {
         event, results, steps, integrationConfigs, ai, logger, workflowName,
         recordWebhookDelivery,
         workdirManager: extras?.workdirManager,
         getConfig: extras?.getConfig,
+        // Forward the workflow abort signal to legacy-step actions so
+        // they can interrupt in-flight work (HTTP, subprocess, polling).
+        // The graph runtime threads this through `RunNodeDeps.signal`
+        // automatically; the legacy steps path used to drop it on the
+        // floor, leaving ai-review and friends unable to honor a queue
+        // timeout / dashboard cancel.
+        signal,
     };
 }
 
@@ -393,7 +401,7 @@ export async function executeWorkflow(
 
             if (group.kind === 'sequential') {
                 const { index, step } = group.steps[0];
-                const ctx = makeContext(event, results, steps, integrationConfigs, aiRegistry, logger, workflow.name, recordWebhookDelivery, extras);
+                const ctx = makeContext(event, results, steps, integrationConfigs, aiRegistry, logger, workflow.name, recordWebhookDelivery, extras, _signal);
 
                 if (shouldSkip(step, ctx)) {
                     logger.info(
