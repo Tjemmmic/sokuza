@@ -283,7 +283,17 @@ export const aiReviewAction: ActionHandler = async (params, context) => {
                     signal: context.signal,
                 },
             );
-            attemptText = repairCompletion.text;
+            // Don't let an empty repair erase the previous attempt's
+            // text. The previous behavior overwrote `attemptText` with
+            // `""`, which then short-circuited `attemptText ||
+            // completion.text` and resurrected the original incoherent
+            // text as the posted "review" (the PR #13 case: 1221 chars
+            // of opencode exploration narration). Keep the last
+            // non-empty model output around so the rawSample debug
+            // captures the more-recent attempt when one exists.
+            if (repairCompletion.text.trim()) {
+                attemptText = repairCompletion.text;
+            }
             parseResult = parseStructuredReviewExt(repairCompletion.text);
             parsed = parseResult.review;
         } catch (err) {
@@ -308,7 +318,63 @@ export const aiReviewAction: ActionHandler = async (params, context) => {
                 : 'AI review rendered from structured JSON',
         );
     } else {
-        review = attemptText || completion.text;
+        // Hard-reject `no-json` AFTER at least one repair attempt. The
+        // parser's `failureKind = 'no-json'` means the model's final
+        // output contained ZERO `{` characters — there's no possible
+        // way to extract a structured review from it, and posting it
+        // raw means the user sees the model's internal exploration /
+        // tool narration prose as the "review" (the PR #13 case:
+        // 1221 chars of "Now let me check the spawnCli function …").
+        //
+        // The 0.1.3 empty-output guard a few lines down checks
+        // `!review.trim()` — it fired on the "both outputs empty"
+        // case but missed THIS asymmetric "first chatty, repair empty"
+        // shape: the previous fallback expression
+        // `review = attemptText || completion.text` resurrected the
+        // original 1221-char text when `attemptText` (the empty repair
+        // output) was falsy, leaving `review` non-empty and slipping
+        // past `!review.trim()`. Anchoring on the parser's own
+        // structural signal — no `{` even after being explicitly
+        // asked for JSON — is provider-agnostic and false-positive-
+        // free (a legitimate short review always parses and never
+        // enters the repair loop).
+        //
+        // `parse_repair_retries: 0` workflows that opt out of the
+        // repair loop still get the previous "post raw text" behavior
+        // — we only escalate after explicit repair attempt.
+        if (parseResult.failureKind === 'no-json' && repairAttempts.length > 0) {
+            await recordAiReviewRun(
+                {
+                    ...recordStub,
+                    durationMs: Date.now() - startedAt,
+                    provider: completion.provider,
+                    model: completion.model,
+                    usage: completion.usage,
+                    output: {
+                        parseSucceeded: false,
+                        reviewChars: 0,
+                        rawSample: attemptText.slice(0, 5000),
+                        parseFailureKind: parseResult.failureKind,
+                        repairAttempts,
+                    },
+                },
+                context.logger,
+            );
+            throw new Error(
+                `ai-review: ${completion.provider} (${completion.model}) produced no JSON ` +
+                `even after ${repairAttempts.length} repair attempt(s). Final output contained ` +
+                `zero \`{\` characters — typically the model lapsing into tool-narration / ` +
+                `chain-of-thought instead of producing the requested structured review. ` +
+                `Posting raw would surface that exploration text as the user-facing comment. ` +
+                `Run record: ${runId}.`,
+            );
+        }
+        // Be explicit about which string we fall back to so the
+        // empty-guard below and this branch agree on the same value.
+        // The old `attemptText || completion.text` accidentally
+        // resurrected the original output whenever a non-empty first
+        // attempt was followed by an empty repair.
+        review = attemptText.trim() ? attemptText : completion.text;
         context.logger.warn(
             {
                 provider: completion.provider,
@@ -317,9 +383,7 @@ export const aiReviewAction: ActionHandler = async (params, context) => {
                 repairAttempts: repairAttempts.length,
                 preview: review.slice(0, 300),
             },
-            parseResult.failureKind === 'no-json'
-                ? 'AI review agent did not produce JSON output (model gave up before converging) even after repair; posting raw text as fallback'
-                : 'AI review did not return valid JSON even after repair; posting raw text as fallback',
+            'AI review did not return valid JSON even after repair; posting raw text as fallback',
         );
     }
 
