@@ -38,6 +38,37 @@ export function createServer(logger: Logger): FastifyInstance {
         logger: false, // We use our own pino instance
     });
 
+    // Tolerate empty bodies on application/json POSTs. Fastify's default
+    // parser rejects `Content-Length: 0 + Content-Type: application/json`
+    // with FST_ERR_CTP_EMPTY_JSON_BODY (HTTP 400) — that's the symptom
+    // behind issue #3's "cancel button does nothing" report, and any
+    // curl/HTTP-client that sets the JSON content-type by default (axios,
+    // Postman, REST extensions) hits the same wall on action-only routes
+    // like `POST /api/queue/jobs/:id/cancel`. Our routes that DO require
+    // a body still validate it themselves; this parser only relaxes the
+    // pre-handler empty check, returning `null` so route code can read
+    // `request.body` uniformly. Same JSON.parse semantics otherwise.
+    server.addContentTypeParser(
+        'application/json',
+        { parseAs: 'string' },
+        (_req, body, done) => {
+            if (typeof body !== 'string' || body.length === 0) {
+                done(null, null);
+                return;
+            }
+            try {
+                done(null, JSON.parse(body));
+            } catch (err) {
+                // Mirror Fastify's default parser: a JSON.parse failure
+                // is a client error, not a 500. Without setting
+                // statusCode the route layer treats the thrown
+                // SyntaxError as an internal failure.
+                (err as Error & { statusCode?: number }).statusCode = 400;
+                done(err as Error, undefined);
+            }
+        },
+    );
+
     // ─── Discovery: /health ────────────────────────────────────────────────
     // Public surface probed by https://sokuza.ai to detect a locally running
     // instance. Response shape is stable — it is the contract the public site

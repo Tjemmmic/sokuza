@@ -38,7 +38,7 @@ describe('resolveQueueConfig', () => {
         expect(config.concurrency).toBe(DEFAULT_QUEUE_SETTINGS.concurrency);
         expect(config.dedup).toBe('latest-wins');
         expect(config.priority).toBe('normal');
-        expect(config.timeout).toBe(300);
+        expect(config.timeout).toBe(600);
         expect(config.retry).toBe(0);
         expect(config.retryDelay).toBe(30);
     });

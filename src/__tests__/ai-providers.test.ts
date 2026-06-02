@@ -1,11 +1,15 @@
 import { describe, it, expect, beforeEach } from 'vitest';
+import pino from 'pino';
 import {
     loadAIProviders,
     resolveProvider,
     buildCliArgs,
     buildCliInvocation,
     extractCliText,
+    spawnCli,
 } from '../core/ai-providers.js';
+
+const TEST_LOGGER = pino({ level: 'silent' });
 
 describe('loadAIProviders', () => {
     beforeEach(() => {
@@ -310,5 +314,67 @@ describe('extractCliText', () => {
         // the diagnostic.
         const jsonl = '{"type":"error","error":{"name":"UnknownError"}}';
         expect(extractCliText('opencode', jsonl)).toBe('[opencode-error] UnknownError');
+    });
+});
+
+// ─── spawnCli abort behavior ────────────────────────────────────────────────
+//
+// Before the signal plumbing in this PR, hitting `queue.defaults.timeout`
+// would reject the workflow promise but the AI CLI subprocess (claude,
+// opencode, …) would keep running — eating tokens for output the user
+// would never see, and on a busy box piling up zombie processes across
+// repeated timeouts. spawnCli now wires the workflow's AbortSignal to
+// SIGTERM the child, with a 1.5s SIGKILL backstop for processes that
+// ignore SIGTERM.
+
+describe('spawnCli — abort signal propagation', () => {
+    it('SIGTERMs a long-running child within ~100ms of abort', async () => {
+        // Surrogate "AI CLI": a Node subprocess that sleeps 30s and
+        // then prints. If our signal plumbing works, this should die
+        // well before the 30s.
+        const ac = new AbortController();
+        const startedAt = Date.now();
+        const promise = spawnCli({
+            command: process.execPath,
+            args: ['-e', 'setTimeout(() => process.stdout.write("done"), 30_000);'],
+            stdin: null,
+            logger: TEST_LOGGER,
+            providerName: 'test-cli',
+            signal: ac.signal,
+        });
+        // Abort shortly after spawn — gives the child a moment to
+        // actually start. Without the plumbing this rejection never
+        // fires; the test would time out after vitest's default 5s.
+        setTimeout(() => ac.abort({ kind: 'timeout', timeoutSec: 30 }), 50);
+        await expect(promise).rejects.toThrow(/timed out/i);
+        const elapsed = Date.now() - startedAt;
+        // 2s budget = abort delay (50ms) + SIGTERM kill (~10ms) +
+        // event-loop overhead. The 30s setTimeout would push us past
+        // this only if SIGTERM never reached the child.
+        expect(elapsed).toBeLessThan(2000);
+    });
+
+    it('rejects immediately if signal is already aborted before spawn', async () => {
+        const ac = new AbortController();
+        ac.abort({ kind: 'cancelled' });
+        await expect(spawnCli({
+            command: process.execPath,
+            args: ['-e', 'process.stdout.write("should-not-run")'],
+            stdin: null,
+            logger: TEST_LOGGER,
+            providerName: 'test-cli',
+            signal: ac.signal,
+        })).rejects.toThrow();
+    });
+
+    it('lets a normal (non-aborted) completion succeed', async () => {
+        const stdout = await spawnCli({
+            command: process.execPath,
+            args: ['-e', 'process.stdout.write("hello")'],
+            stdin: null,
+            logger: TEST_LOGGER,
+            providerName: 'test-cli',
+        });
+        expect(stdout).toBe('hello');
     });
 });

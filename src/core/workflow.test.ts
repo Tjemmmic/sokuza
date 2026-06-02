@@ -1231,6 +1231,47 @@ describe('parallel steps', () => {
         expect(order[0]).toBe('a');
         expect(order).toContain('d');
     });
+
+    // Regression for PR #13 review-feedback P1: runParallelGroup used to
+    // omit `_signal` when constructing each parallel step's
+    // ActionContext, so the abort plumbing introduced for ai.review /
+    // ai.agent silently bypassed every parallel group (dual-review
+    // template, parallel address-review fan-out, etc.). Workflow
+    // timeouts and dashboard cancels reached the sequential and graph
+    // paths but left parallel-step AI subprocesses running. Pin that
+    // every parallel step receives the SAME AbortSignal the sequential
+    // path does.
+    it('forwards the workflow AbortSignal to every parallel step\'s ActionContext', async () => {
+        const seenSignals: Array<AbortSignal | undefined> = [];
+        const captureSignal: ActionHandler = async (_params, ctx) => {
+            seenSignals.push(ctx.signal);
+            return { ok: true };
+        };
+
+        const registry = new Map<string, ActionHandler>();
+        registry.set('parallel-a', captureSignal);
+        registry.set('parallel-b', captureSignal);
+        registry.set('parallel-c', captureSignal);
+
+        const wf = makeWorkflow({
+            steps: [
+                { action: 'parallel-a', id: 'a', run: 'parallel', params: {} },
+                { action: 'parallel-b', id: 'b', run: 'parallel', params: {} },
+                { action: 'parallel-c', id: 'c', run: 'parallel', params: {} },
+            ],
+        });
+
+        const ac = new AbortController();
+        await executeWorkflow(wf, makeEvent(), registry, noopLogger, {}, undefined, ac.signal);
+
+        // All three parallel steps must have seen the SAME signal
+        // instance — proving the plumbing reaches `makeContext` inside
+        // `runParallelGroup`, not just the sequential path.
+        expect(seenSignals).toHaveLength(3);
+        for (const seen of seenSignals) {
+            expect(seen).toBe(ac.signal);
+        }
+    });
 });
 
 // ─── AI Config Resolution ───────────────────────────────────────────────────

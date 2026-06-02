@@ -112,7 +112,11 @@ describe('aiReviewAction', () => {
             steps: { fetch_diff: { diff: '+added\n-removed', files: ['a.ts'] } },
         });
 
-        const result = (await aiReviewAction({}, context)) as Record<string, unknown>;
+        // parse_repair_retries: 0 — the default mock returns non-JSON
+        // prose; with the PR #13 fix, exhausting the repair loop on
+        // no-json now throws. This test pins provider-routing behavior,
+        // not the raw-text fallback, so opt out of the repair loop.
+        const result = (await aiReviewAction({ parse_repair_retries: 0 }, context)) as Record<string, unknown>;
         expect(result.provider).toBe('anthropic');
         expect(result.review).toContain('looks good overall');
     });
@@ -177,6 +181,69 @@ describe('aiReviewAction', () => {
         ).rejects.toThrow(/returned no usable content/);
     });
 
+    // PR #13's exact timeline (from the user's log):
+    //   completion #1 → 1221 chars of "Now let me check the spawnCli
+    //   function..." opencode exploration narration. failureKind=no-json.
+    //   completion #2 (repair) → outputLength=0.
+    //
+    // The pre-fix fallback expression `review = attemptText || completion.text`
+    // resurrected the original exploration text when `attemptText` (the
+    // empty repair output) was falsy, and the empty-output guard saw a
+    // 1221-char non-empty string and let it through. The action then
+    // returned that exploration prose as `markdown` and downstream
+    // github.comment posted it as the user-facing review. Pin the fix.
+    it('throws on no-json after at least one repair attempt instead of resurrecting incoherent text', async () => {
+        process.env.ANTHROPIC_API_KEY = 'test-key';
+        const explorationText =
+            'Now let me check one more thing about the spawnCli function — whether the ' +
+            'detached: true combined with the process not being unref()\'d could cause the ' +
+            'event loop to hang. Let me grep for child.unref() calls...';
+        mockCreate
+            // First completion: exploration prose, no JSON.
+            .mockResolvedValueOnce({
+                content: [{ type: 'text', text: explorationText }],
+                model: 'claude-sonnet-4-6',
+                usage: { input_tokens: 100, output_tokens: 200 },
+            })
+            // Repair completion: empty (model gave up).
+            .mockResolvedValueOnce({
+                content: [{ type: 'text', text: '' }],
+                model: 'claude-sonnet-4-6',
+                usage: { input_tokens: 100, output_tokens: 0 },
+            });
+        const context = makeContext({
+            ai: loadAIProviders(undefined),
+            steps: { fetch_diff: { diff: '+a' } },
+        });
+        await expect(
+            aiReviewAction({ parse_repair_retries: 1 }, context),
+        ).rejects.toThrow(/produced no JSON/);
+        // Both completions should have been called — repair runs first
+        // before the new throw triggers.
+        expect(mockCreate).toHaveBeenCalledTimes(2);
+    });
+
+    // Belt-and-suspenders sister test: when only `parse_repair_retries: 0`
+    // is set, the user opted out of the repair loop entirely. The
+    // no-json throw is gated on `repairAttempts.length > 0` so this
+    // path still posts the raw text — preserving the existing
+    // "unparseable response" behavior tested above.
+    it('still posts raw text when parse_repair_retries=0 (no repair attempted)', async () => {
+        process.env.ANTHROPIC_API_KEY = 'test-key';
+        mockCreate.mockResolvedValue({
+            content: [{ type: 'text', text: 'just some prose, no JSON' }],
+            model: 'claude-sonnet-4-6',
+            usage: { input_tokens: 10, output_tokens: 5 },
+        });
+        const context = makeContext({
+            ai: loadAIProviders(undefined),
+            steps: { fetch_diff: { diff: '+a' } },
+        });
+        const result = (await aiReviewAction({ parse_repair_retries: 0 }, context)) as Record<string, unknown>;
+        expect(typeof result.markdown).toBe('string');
+        expect((result.markdown as string)).toContain('just some prose');
+    });
+
     it('returns markdown + undefined structured ports when the response is unparseable', async () => {
         process.env.ANTHROPIC_API_KEY = 'test-key';
         // Unparseable response — repair loop will exhaust and the action
@@ -210,7 +277,7 @@ describe('aiReviewAction', () => {
             steps: { fetch_diff: { diff: '+added\n-removed' } },
         });
 
-        const result = (await aiReviewAction({ provider: 'api' }, context)) as Record<string, unknown>;
+        const result = (await aiReviewAction({ provider: 'api', parse_repair_retries: 0 }, context)) as Record<string, unknown>;
         expect(result.provider).toBe('anthropic');
     });
 
@@ -281,7 +348,7 @@ describe('aiReviewAction', () => {
             workflowName: 'ai-pr-review',
         });
 
-        await aiReviewAction({}, context);
+        await aiReviewAction({ parse_repair_retries: 0 }, context);
 
         const dateDir = (await readdir(join(runsRoot, 'ai-review')))[0];
         const files = await readdir(join(runsRoot, 'ai-review', dateDir));
@@ -369,7 +436,7 @@ describe('aiReviewAction', () => {
         expect(mockCreate).toHaveBeenCalledTimes(1);
     });
 
-    it('gives up after the configured retries with parseFailureKind set', async () => {
+    it('gives up after the configured retries by throwing (with parseFailureKind recorded)', async () => {
         process.env.ANTHROPIC_API_KEY = 'test-key';
         mockCreate.mockResolvedValue({
             content: [{ type: 'text', text: 'still no json after retry' }],
@@ -381,7 +448,13 @@ describe('aiReviewAction', () => {
             ai: loadAIProviders(undefined),
             steps: { fd: { diff: 'x' } },
         });
-        await aiReviewAction({ parse_repair_retries: 2 }, context);
+        // PR #13 fix: after `parse_repair_retries` exhausts with the
+        // parser still reporting `no-json`, ai-review now throws
+        // instead of posting raw exploration text. The run record
+        // still captures the failure for the dashboard run viewer.
+        await expect(
+            aiReviewAction({ parse_repair_retries: 2 }, context),
+        ).rejects.toThrow(/produced no JSON/);
         // 1 initial + 2 repairs = 3 total.
         expect(mockCreate).toHaveBeenCalledTimes(3);
 

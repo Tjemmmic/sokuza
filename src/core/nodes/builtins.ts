@@ -327,6 +327,8 @@ const aiReviewNode = actionNode({
         { name: 'max_diff_chars', label: 'Max Diff Chars', role: 'input', config: true, control: 'number', type: 'number' },
         { name: 'max_tokens', label: 'Max Tokens', role: 'input', config: true, control: 'number', type: 'number' },
         { name: 'parse_repair_retries', label: 'Parse Repair Retries', role: 'input', config: true, control: 'number', type: 'number', default: 1 },
+        { name: 'timeout', label: 'Node Timeout (seconds)', role: 'input', config: true, control: 'number', type: 'number', default: 600,
+          helpText: 'Cap on a single ai.review call. Counts against the workflow\'s queue.timeout — if the workflow cap is lower, that fires first. Set to 0 to disable the node-level cap and let only the workflow cap apply.' },
         // Outputs
         { name: 'markdown', label: 'Review Markdown', role: 'output', wire: true, type: 'string' },
         { name: 'structured', label: 'Structured Review', role: 'output', wire: true, type: 'review' },

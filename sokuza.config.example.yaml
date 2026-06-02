@@ -115,7 +115,14 @@ queue:
     dedup: latest-wins
     dedup_key: "{{workflow.name}}:{{event.metadata.repo}}:{{event.metadata.prNumber}}"
     priority: normal
-    timeout: 300
+    # 10 minutes. AI-driven workflows commonly chain clone + fetch-diff +
+    # ai.review (1–3 min on a medium PR with a CLI provider) + comment.
+    # Bumped from 5 minutes — the 300s default tripped users running
+    # `template: ai-pr-review` even when nothing was wrong. Companion
+    # change: abort signal now propagates through to the in-flight AI
+    # call so hitting the cap actually kills the underlying request /
+    # subprocess, rather than letting it leak tokens in the background.
+    timeout: 600
     retry: 0
     retry_delay: 30
 
@@ -128,18 +135,44 @@ queue:
     opencode:
       concurrency: 2
 
-  # Per-workflow overrides
+  # Per-workflow overrides. The narrowest-matching layer wins, so a
+  # workflow that needs a longer cap than `defaults.timeout` provides
+  # can opt in here without raising the global limit for everyone.
   # per_workflow:
   #   auto-pr-review:
   #     concurrency: 2
   #     dedup_key: "{{workflow.name}}:{{event.metadata.repo}}:{{event.metadata.prNumber}}"
   #     priority: high
-  #     timeout: 120
+  #     # Large PRs (or slower providers like opencode + zai-glm) can
+  #     # need 15+ minutes for review + repair + comment. Raise the cap
+  #     # only for this workflow; everything else stays at the 600s default.
+  #     timeout: 900
   #   fix-github-issue:
   #     concurrency: 1
   #     priority: low
-  #     timeout: 600
+  #     timeout: 1800       # 30 min — agentic auto-fix loops can be long-lived
   #     retry: 1
+
+  # Per-node timeouts (graph workflows only): each node in the graph
+  # supports a top-level `timeout` field in seconds. The runtime races
+  # the node's execution against this value AND against the workflow-
+  # level cap above — whichever fires first wins. Useful for clamping
+  # an individual long-running step (e.g. an ai.review call) without
+  # raising the workflow cap. The `ai.review` node ships with a default
+  # of 600s exposed on its node config; set it via the dashboard
+  # inspector or directly in the workflow YAML:
+  #
+  #   workflows:
+  #     - name: my-review
+  #       graph:
+  #         nodes:
+  #           - id: review
+  #             type: ai.review
+  #             timeout: 900            # cap on this node only
+  #             config: { ... }
+  #
+  # `timeout: 0` on a node disables that node's cap so only the workflow
+  # cap applies.
 
   # Per-repo overrides
   # per_repo:
