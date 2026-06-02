@@ -307,12 +307,20 @@ function makeContext(
     workflowName?: string,
     recordWebhookDelivery?: import('./types.js').ActionContext['recordWebhookDelivery'],
     extras?: MakeContextExtras,
+    signal?: AbortSignal,
 ): ActionContext {
     return {
         event, results, steps, integrationConfigs, ai, logger, workflowName,
         recordWebhookDelivery,
         workdirManager: extras?.workdirManager,
         getConfig: extras?.getConfig,
+        // Forward the workflow abort signal to legacy-step actions so
+        // they can interrupt in-flight work (HTTP, subprocess, polling).
+        // The graph runtime threads this through `RunNodeDeps.signal`
+        // automatically; the legacy steps path used to drop it on the
+        // floor, leaving ai-review and friends unable to honor a queue
+        // timeout / dashboard cancel.
+        signal,
     };
 }
 
@@ -393,7 +401,7 @@ export async function executeWorkflow(
 
             if (group.kind === 'sequential') {
                 const { index, step } = group.steps[0];
-                const ctx = makeContext(event, results, steps, integrationConfigs, aiRegistry, logger, workflow.name, recordWebhookDelivery, extras);
+                const ctx = makeContext(event, results, steps, integrationConfigs, aiRegistry, logger, workflow.name, recordWebhookDelivery, extras, _signal);
 
                 if (shouldSkip(step, ctx)) {
                     logger.info(
@@ -435,7 +443,7 @@ export async function executeWorkflow(
                 const parallelResults = await runParallelGroup(
                     workflow, group.steps, event, results, steps,
                     actionRegistry, integrationConfigs, aiRegistry, logger,
-                    recordWebhookDelivery, extras,
+                    recordWebhookDelivery, extras, _signal,
                 );
                 for (const pr of parallelResults) {
                     if (pr) collectTempPath(pr.result, tempPaths);
@@ -468,10 +476,21 @@ async function runParallelGroup(
     logger: Logger,
     recordWebhookDelivery?: import('./types.js').ActionContext['recordWebhookDelivery'],
     extras?: MakeContextExtras,
+    _signal?: AbortSignal,
 ): Promise<ParallelStepResult[]> {
     const settled = await Promise.allSettled(
         groupSteps.map(async ({ index, step }): Promise<ParallelStepResult | undefined> => {
-            const ctx = makeContext(event, results, steps, integrationConfigs, aiRegistry, logger, workflow.name, recordWebhookDelivery, extras);
+            // Same signal-forwarding contract as the sequential path:
+            // a `run: parallel` group of ai.review / ai.agent steps
+            // must honor a workflow timeout / dashboard cancel and
+            // kill its in-flight CLI subprocesses + HTTP requests.
+            // The previous omission silently broke abort propagation
+            // for the entire parallel-group path — the headline use
+            // case here is the dual-review template (claude + opencode
+            // reviewing the same PR in parallel), which would have
+            // continued burning tokens on both providers after the
+            // workflow gave up.
+            const ctx = makeContext(event, results, steps, integrationConfigs, aiRegistry, logger, workflow.name, recordWebhookDelivery, extras, _signal);
 
             if (shouldSkip(step, ctx)) {
                 logger.info(
