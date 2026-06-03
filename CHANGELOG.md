@@ -96,6 +96,10 @@ publishes automatically.
 - **`safeRefresh` / `safePoll` wrappers** with a terminal `.catch` on the periodic callbacks so a future refactor that introduces a non-per-repo throw can't surface as an `unhandledRejection`.
 - **Structured logging** — `initialize` now stores the pino `Logger` the engine passes in, and every error site (`refreshOrgRepos` per-org catch, `poll()` per-repo catch, startup chain `.catch`) uses `this.logger.error({...}, '...')` instead of `console.error`. An `errMessage(unknown)` helper coerces non-Error throws (string, plain object, null) into a useful string so a malformed throw never surfaces as `{ err: undefined }` in the logs.
 
+### Fixed
+
+- **`ai.review` system prompt reordered so the "JSON only" instruction is genuinely terminal.** The previous `STANDARD_OUTPUT_FORMAT` ended with `## Critical: do not give up before emitting JSON` — a section whose final line said "you MAY perform any number of file reads, greps, or searches first" — directly *after* the `Remember: JSON only. First character \`{\`, last character \`}\`.` line. Because models weight the end of the system prompt most heavily, the tool-use permission was being treated as the operative directive, contradicting the "JSON only" line two paragraphs above. The visible symptom against `opencode + zai-coding-plan/glm-5.1` (the latent failure that PR #13's hard-reject made user-visible) was the model lapsing into 1000+ chars of exploration narration ("Now let me check the spawnCli function …") without ever emitting JSON. The block ordering is now: decision rules → "If genuinely fine" line → `## Critical: do not give up before emitting JSON` (with the tool-use permission softened from "any number of" to "a small number of focused" reads) → `Remember: JSON only. No leading commentary, no trailing commentary. First character \`{\`, last character \`}\`.` as the actual final line. No new fallback wrappers, no retry magic — just the prompt structure aligned with how models read it.
+
 ## [0.1.7] - 2026-06-02
 
 ### Fixed
