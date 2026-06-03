@@ -134,16 +134,18 @@ Decision rules (STRICT):
 
 If the PR is genuinely fine: return an empty \`issues\` array and \`"decision": "APPROVE"\`.
 
-## Critical: do not give up before emitting JSON
+## Critical: respond with JSON immediately — do not investigate
 
-If you are an agentic CLI (opencode, claude-code, cursor, …) capable of tool use:
-you MAY perform a small number of focused file reads, greps, or searches first.
-But your FINAL message MUST be the single JSON object above. If you finish your
-investigation without emitting that JSON, you have failed the task. There is
-no scenario where "I gathered enough context but didn't produce the JSON" is
-acceptable — produce the JSON even if you are unsure, with whatever findings
-you have. An empty \`issues\` array with \`"decision": "APPROVE"\` is a valid
-output if you found nothing.
+Review using ONLY the diff and any context provided in this prompt. Do NOT use
+tools, read files, run commands, or explore a working directory. You do not have
+access to the PR's repository beyond what is shown here — any code you might find
+on disk belongs to an unrelated project and must be ignored. Reason about
+correctness directly from the diff.
+
+Your FINAL message MUST be the single JSON object above and nothing else.
+Produce it even if you are unsure, with whatever findings you have. An empty
+\`issues\` array with \`"decision": "APPROVE"\` is a valid output if you found
+nothing.
 
 Remember: JSON only. No leading commentary, no trailing commentary. First character \`{\`, last character \`}\`.
 `;
@@ -161,7 +163,7 @@ export const MANDATORY_CHECKLIST = `
 - [ ] **Race Conditions**: Concurrent access, TOCTOU bugs, missing locks or atomicity?
 - [ ] **Resource Cleanup**: Unclosed handles, missing cleanup in finally blocks, memory leaks?
 - [ ] **API Contract**: Does the change break any existing callers or consumers? Are return types stable?
-- [ ] **Project Guidelines**: Read \`CLAUDE.md\` if it exists, \`.memory/pitfalls/\` if it exists (flag violations as P1)
+- [ ] **Project Guidelines**: If project conventions or guidelines are included in the PR context above, flag any violations (as P1 where the violation is serious)
 - [ ] **Tests**: Check whether tests exist for the changed code. If significant logic changed and no tests were added or updated, flag it as P2.
 - [ ] **Documentation**: Check if documentation needs updating (README, JSDoc, API docs).
 `;
@@ -177,7 +179,7 @@ export const REVIEW_RULES = `
 - Every issue MUST reference a specific file and line number.
 - Do NOT praise the code or add filler. Issues only, then the decision.
 - Do NOT approve just because no single issue is critical — cumulative risk matters.
-- If you're unsure whether something is a bug, investigate it (read the code, check callers) before dismissing it.
+- If you're unsure whether something is a bug, reason it through from the diff and the context shown before dismissing it.
 - No \`Co-Authored-By\` or AI attribution in the output.
 - If genuinely no issues: return \`issues: []\` and \`decision: "APPROVE"\` with a one-sentence \`summary\` and \`justification\`.
 `;

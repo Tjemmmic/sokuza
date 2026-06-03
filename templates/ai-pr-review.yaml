@@ -1,9 +1,18 @@
-# AI-Powered PR Review
+# AI-Powered PR Review (agentic)
 #
-# Clones the repo, fetches the PR diff, sends both to the configured AI
-# provider for review, and posts the rendered review back as a PR
-# comment. Works with any AI provider in the registry (Anthropic API,
-# Claude Code CLI, opencode, etc.).
+# Clones the PR into a temp workdir, fetches the authoritative diff, and
+# hands both to a tool-using agent: the agent reads the diff AND explores
+# the surrounding code in the checkout to ground its findings in real
+# behaviour, then posts the rendered review back as a PR comment. Works
+# with any AI provider in the registry (Anthropic API, Claude Code CLI,
+# opencode, etc.).
+#
+# Why clone + agent (not the diff-only `ai.review` node)? `ai.review`
+# reviews from the diff text alone — it has no checkout to investigate,
+# so it can't verify a concern against callers or surrounding code. The
+# clone gives the agent that context. (The clone wiring was dropped by
+# accident in the steps→graph rewrite; this template restores it via the
+# maintained `ai.agent` node.)
 #
 # For the closed review→fix→re-review loop, use the auto-fix-pr-review
 # template instead, which posts via github-create-review (with the
@@ -15,10 +24,8 @@
 #     trigger:
 #       event: pull_request.opened
 #       repo: "my-org/my-repo"
-#       # source: gh-cli                          # override default github webhook source
-#       # source: [github, github-poll, gh-cli]   # OR match any inbound source
 
-description: AI review every new PR — fetch diff, run review, post comment
+description: Clone the PR, run a tool-using agent over diff + checkout, post the review as a comment
 icon: 🔍
 
 trigger:
@@ -32,17 +39,70 @@ graph:
       position: { x: 60, y: 200 }
       config:
         events: [pull_request.opened]
-    - id: fetch_diff
-      type: github.fetch-diff
+    - id: clone
+      type: github.clone-repo
       position: { x: 360, y: 200 }
       config: {}
-    - id: review
-      type: ai.review
-      position: { x: 660, y: 200 }
+    - id: fetch_diff
+      type: github.fetch-diff
+      position: { x: 360, y: 380 }
       config: {}
+    - id: review
+      type: ai.agent
+      position: { x: 680, y: 200 }
+      config:
+        # parse_as_review: treat the agent's output as a structured
+        # review, render it to markdown, and record a run under
+        # ~/.sokuza/runs/ai-review/ — same output ports as ai.review.
+        parse_as_review: true
+        # The diff is embedded here (ai.agent does not read the `context`
+        # port). The clone is wired into `workdir` so the agent can read
+        # the surrounding files. The shallow clone is the PR branch only,
+        # so the agent cannot compute the diff itself — hence we feed it
+        # the authoritative diff from github.fetch-diff.
+        prompt: |
+          You are a senior staff engineer conducting a thorough, skeptical
+          code review. Your working directory is a clone of the PR branch —
+          use it to read changed files and their callers and verify that
+          every concern reflects real behaviour, not a surface pattern. You
+          may run read-only checks (grep, type-check, look up test names) to
+          confirm hypotheses. Do not modify anything.
+
+          The authoritative PR diff:
+
+          ```diff
+          {{nodes.fetch_diff.diff}}
+          ```
+
+          When done investigating, respond with a SINGLE JSON object and
+          NOTHING else — no prose before or after. The FIRST character of
+          your response MUST be `{` and the LAST must be `}`.
+
+          {
+            "summary": "1-3 sentence plain-text overview of the PR and your overall take.",
+            "issues": [
+              {
+                "priority": "P1 | P2 | P3",
+                "title": "Specific, descriptive one-line title.",
+                "file": "path/to/file.ts:L42-L50",
+                "problem": "What is wrong and WHY it matters. Concrete.",
+                "fix": "Concrete fix suggestion."
+              }
+            ],
+            "decision": "APPROVE | CHANGES_REQUESTED",
+            "justification": "Short paragraph explaining the decision."
+          }
+
+          Priorities: P1 = a bug that WILL fail, a security hole, or data
+          loss; P2 = missing error handling, untested new logic, perf
+          regressions, maintainability risks; P3 = nice-to-have. Choose
+          `CHANGES_REQUESTED` if any P1 exists or there are 3 or more P2s;
+          otherwise `APPROVE`. An empty `issues` array with `APPROVE` is a
+          valid output if the PR is clean. Reference a real file and line
+          in every issue. Output the JSON now.
     - id: post
       type: github.comment
-      position: { x: 980, y: 200 }
+      position: { x: 1000, y: 200 }
       config:
         body: |
           ## 🤖 AI Code Review
@@ -52,23 +112,23 @@ graph:
           ---
           _Reviewed by Sokuza AI_
   edges:
+    - from: { node: trigger, port: repo }
+      to: { node: clone, port: repo }
+    - from: { node: trigger, port: branch }
+      to: { node: clone, port: ref }
     - from: { node: trigger, port: prNumber }
       to: { node: fetch_diff, port: pr_number }
     - from: { node: trigger, port: repo }
       to: { node: fetch_diff, port: repo }
-    - from: { node: fetch_diff, port: diff }
-      to: { node: review, port: diff }
-    - from: { node: trigger, port: prNumber }
-      to: { node: review, port: pr_number }
-    - from: { node: trigger, port: repo }
-      to: { node: review, port: repo }
+    - from: { node: clone, port: path }
+      to: { node: review, port: workdir }
     - from: { node: trigger, port: prNumber }
       to: { node: post, port: pr_number }
     - from: { node: trigger, port: repo }
       to: { node: post, port: repo }
     # Sequencing edge — post's body interpolates {{nodes.review.markdown}}
-    # so it must run after review. The runtime would now infer this from
-    # the config ref, but stating it explicitly keeps the dataflow visible
-    # in the editor and self-documents the dependency.
+    # so it must run after the agent. The runtime also infers this from the
+    # config ref, but stating it explicitly keeps the dataflow visible in
+    # the editor and self-documents the dependency.
     - from: { node: review, port: markdown }
       to: { node: post, port: __seq }
