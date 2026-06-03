@@ -295,6 +295,53 @@ describe('GitHubPollIntegration', () => {
             expect(stateAfter.lastReviewIds.size).toBe(0);
         });
 
+        it('initialize() rejects non-positive / non-finite interval / org_refresh values', async () => {
+            // `setInterval(fn, 0)` / `setInterval(fn, NaN)` fire every
+            // tick — the re-entrance guards keep work from overlapping
+            // but each tick still allocates a Promise and burns CPU
+            // indefinitely. NaN slips past the `??` default downstream
+            // because `NaN ?? x === NaN`, so checking only `undefined`
+            // wouldn't catch it. Symmetric error shape with the
+            // repos/orgs validator above so misconfigs surface at
+            // init, not silently as a hot poll loop.
+            const cases: Array<{ field: 'interval' | 'org_refresh'; value: unknown; label: string }> = [
+                { field: 'interval', value: 0, label: 'zero' },
+                { field: 'interval', value: -1, label: 'negative' },
+                { field: 'interval', value: Number.NaN, label: 'NaN' },
+                { field: 'interval', value: Number.POSITIVE_INFINITY, label: '+Infinity' },
+                { field: 'interval', value: '60' as unknown, label: 'string' },
+                { field: 'org_refresh', value: 0, label: 'zero' },
+                { field: 'org_refresh', value: -3600, label: 'negative' },
+                { field: 'org_refresh', value: Number.NaN, label: 'NaN' },
+            ];
+            for (const { field, value, label } of cases) {
+                const integration = new GitHubPollIntegration();
+                await expect(
+                    integration.initialize(
+                        { token: 'tok', orgs: ['my-org'], [field]: value },
+                        TEST_LOGGER,
+                    ),
+                    `${field} = ${label} should reject`,
+                ).rejects.toThrow(new RegExp(`${field} must be a positive number`));
+            }
+        });
+
+        it('initialize() accepts undefined / positive interval and org_refresh values (default + explicit)', async () => {
+            // Sanity: the validation MUST NOT regress the documented
+            // defaults-when-omitted contract, and MUST accept the
+            // common explicit value shapes the example config shows.
+            for (const cfg of [
+                { token: 'tok', orgs: ['my-org'] }, // both omitted → defaults
+                { token: 'tok', orgs: ['my-org'], interval: 60, org_refresh: 3600 }, // explicit
+                { token: 'tok', orgs: ['my-org'], interval: 1, org_refresh: 1 }, // boundary
+                { token: 'tok', orgs: ['my-org'], interval: 0.5 }, // sub-second is legal
+            ]) {
+                const integration = new GitHubPollIntegration();
+                await integration.initialize(cfg, TEST_LOGGER);
+                // No throw = pass.
+            }
+        });
+
         it('apiGetAllPages throws on a non-array body on a subsequent page (preserves prior pages via per-org isolation)', async () => {
             // Pre-existing pagination edge case amplified by the new
             // enumerateOrgRepos caller. If GitHub ever returned 200

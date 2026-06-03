@@ -238,6 +238,24 @@ export class GitHubPollIntegration implements Integration {
         if (!this.config.token) {
             throw new Error('github-poll: token is required');
         }
+        // Numeric interval validation. `setInterval(fn, 0)` (or any
+        // value ≤ 0 / NaN, which Node coerces to ~1ms) fires every
+        // tick — the re-entrance guards (`polling`, `refreshing`) keep
+        // it from overlapping work but each tick still allocates a
+        // Promise and burns CPU. NaN slips past the `??` default in
+        // registerRoutes because `NaN ?? x === NaN`, then the `* 1000`
+        // is still NaN, then setInterval treats NaN as 0. Reject these
+        // up front with the same shape as the repos/orgs validation
+        // above so misconfigs surface at init, not silently as a hot
+        // poll loop.
+        const validateInterval = (name: string, value: unknown): void => {
+            if (value === undefined) return;
+            if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+                throw new Error(`github-poll: ${name} must be a positive number`);
+            }
+        };
+        validateInterval('interval', this.config.interval);
+        validateInterval('org_refresh', this.config.org_refresh);
         // Trim+filter+dedupe both inputs before validation. An empty or
         // whitespace-only entry passes the raw `xs?.length > 0` check
         // (length is 1) but is meaningless: empty orgs hit `/orgs//repos`
