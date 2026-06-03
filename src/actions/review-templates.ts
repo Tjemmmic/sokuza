@@ -134,18 +134,18 @@ Decision rules (STRICT):
 
 If the PR is genuinely fine: return an empty \`issues\` array and \`"decision": "APPROVE"\`.
 
-Remember: JSON only. No leading commentary, no trailing commentary. First character \`{\`, last character \`}\`.
-
 ## Critical: do not give up before emitting JSON
 
 If you are an agentic CLI (opencode, claude-code, cursor, …) capable of tool use:
-you MAY perform any number of file reads, greps, or searches first. But your
-FINAL message MUST be the single JSON object above. If you finish your
+you MAY perform a small number of focused file reads, greps, or searches first.
+But your FINAL message MUST be the single JSON object above. If you finish your
 investigation without emitting that JSON, you have failed the task. There is
 no scenario where "I gathered enough context but didn't produce the JSON" is
 acceptable — produce the JSON even if you are unsure, with whatever findings
 you have. An empty \`issues\` array with \`"decision": "APPROVE"\` is a valid
 output if you found nothing.
+
+Remember: JSON only. No leading commentary, no trailing commentary. First character \`{\`, last character \`}\`.
 `;
 
 /**

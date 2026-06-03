@@ -7,8 +7,11 @@
  * Config:
  *   github-poll:
  *     token: ${GITHUB_TOKEN}
- *     repos:
- *       - owner/repo
+ *     repos:             # explicit repos to watch (at least one of
+ *       - owner/repo     # `repos` or `orgs` is required)
+ *     orgs:              # OPTIONAL: orgs whose repos to auto-enumerate
+ *       - my-org         # — refreshed every `org_refresh` seconds so
+ *                        # newly-created org repos start being watched.
  *     events:
  *       - pull_request.opened
  *       - pull_request.synchronize
@@ -17,7 +20,8 @@
  *       - issues.opened
  *       - issues.closed
  *       - issue_comment.created
- *     interval: 60  # seconds
+ *     interval: 60         # seconds between polls
+ *     org_refresh: 3600    # seconds between org-repo re-enumerations
  */
 
 import type { FastifyInstance, FastifyRequest } from 'fastify';
@@ -31,9 +35,20 @@ import type { Logger } from 'pino';
 
 interface PollConfig {
     token: string;
-    repos: string[];
+    /** Explicit repos to watch (always included). Either this or `orgs`
+     *  — or both — must be supplied. Order: explicit repos are always
+     *  watched; org-enumerated repos are added on top. */
+    repos?: string[];
+    /** Orgs whose accessible repos to auto-enumerate via
+     *  `GET /orgs/{org}/repos`. Refreshed every `org_refresh` seconds. */
+    orgs?: string[];
     events?: string[];
     interval?: number;
+    /** Seconds between re-enumerations of `orgs`. Defaults to 3600 (1h).
+     *  Orgs don't churn often; the refresh primarily exists so a newly-
+     *  created repo eventually shows up in the watch set without a
+     *  restart. */
+    org_refresh?: number;
 }
 
 interface PollState {
@@ -53,12 +68,52 @@ interface PollState {
     lastCommentIds: Map<string, Set<number>>;
     /** Last-seen PR review IDs per repo */
     lastReviewIds: Map<string, Set<number>>;
-    /** Whether initial seed has completed (skip first batch) */
-    seeded: boolean;
+    /** Per-repo seed flag. A repo enters this set after its first
+     *  `pollRepo()` completes, marking that we've recorded its current
+     *  PR/issue/branch/comment/review snapshot. Subsequent polls only
+     *  emit events for changes against that snapshot.
+     *
+     *  Per-repo (not global) because dynamic org enumeration can add
+     *  repos to the watch set AFTER the first poll cycle has flipped a
+     *  global flag. A global flag would let the freshly-discovered
+     *  repo's first poll fire `pull_request.opened` / `issues.opened` /
+     *  `push` events for every existing PR/issue/branch on it — exactly
+     *  the flood the seed-run guard exists to prevent. */
+    seededRepos: Set<string>;
 }
 
 const GITHUB_API = 'https://api.github.com';
 const DEFAULT_INTERVAL = 60;
+/** Default cadence for re-enumerating orgs. 1 hour is well below the
+ *  rate-limit budget for `/orgs/{org}/repos` (5000/h authenticated) for
+ *  any realistic number of orgs, and is short enough that newly-created
+ *  org repos start being watched within an hour without a restart. */
+const DEFAULT_ORG_REFRESH = 3600;
+
+/** Trim whitespace, drop empty entries, dedupe. Shared by `repos` and
+ *  `orgs` so the two config inputs go through the same cleaning. */
+function clean(xs: string[] | undefined): string[] {
+    return Array.from(new Set(
+        (xs ?? []).map((s) => s.trim()).filter((s) => s.length > 0),
+    ));
+}
+
+/** Best-effort string representation of an unknown thrown value. `(err as
+ *  Error).message` would coerce non-Error throws (strings, plain objects,
+ *  `null`) to `undefined` and pino would then log `{ err: undefined }`,
+ *  losing the actual cause. We expect the only thing we ever throw to be
+ *  an Error, but the type system can't enforce that across third-party
+ *  code we call, and the per-org "isolation" guarantee leans on the log
+ *  being legible. */
+function errMessage(err: unknown): string {
+    if (err instanceof Error) return err.message;
+    if (typeof err === 'string') return err;
+    try {
+        return JSON.stringify(err);
+    } catch {
+        return String(err);
+    }
+}
 
 const SUPPORTED_EVENTS = [
     'pull_request.opened',
@@ -76,6 +131,7 @@ export class GitHubPollIntegration implements Integration {
     readonly supportedEvents = SUPPORTED_EVENTS;
 
     private config!: PollConfig;
+    private logger!: Logger;
     private state: PollState = {
         lastPrIds: new Map(),
         lastPrHeadShas: new Map(),
@@ -85,31 +141,201 @@ export class GitHubPollIntegration implements Integration {
         lastBranchShas: new Map(),
         lastCommentIds: new Map(),
         lastReviewIds: new Map(),
-        seeded: false,
+        seededRepos: new Set(),
     };
     private timer: ReturnType<typeof setInterval> | null = null;
+    private orgRefreshTimer: ReturnType<typeof setInterval> | null = null;
+    /** Startup-delay timer scheduled in registerRoutes. Stored so `stop()`
+     *  can cancel it during the first 2s of an integration's life — without
+     *  this handle a fast graceful shutdown leaks the deferred poll/refresh
+     *  intervals it would otherwise arm on a supposedly-stopped instance. */
+    private startupTimer: ReturnType<typeof setTimeout> | null = null;
+    /** Sticky shutdown flag. Set in `stop()` so any deferred callback that
+     *  was already in flight when stop was called bails out instead of
+     *  arming a fresh interval on a stopped integration. */
+    private stopped = false;
+    /** Re-entrance guard for `refreshOrgRepos`. Without this, a slow
+     *  enumeration cycle (large org, retries) running longer than
+     *  `org_refresh` would race a second concurrent refresh — both writing
+     *  to `this.orgRepos` for the same key with last-writer-wins ordering
+     *  that isn't tied to data freshness. */
+    private refreshing = false;
+    /** Re-entrance guard for `poll()`. setInterval fires every `interval`
+     *  seconds and does not await the previous poll's completion. With
+     *  static `config.repos` the cycle was bounded, but org-enumerated
+     *  watch sets (N repos × 5 sub-pollers × per-fetch latency) can
+     *  routinely exceed `interval`. Two overlapping polls would both
+     *  read `oldIds=[1,2,3]` for repo X, see PR #4 as new in their
+     *  independent snapshots, and both `emit('pull_request.opened', #4)`
+     *  — duplicate event for the user. Same shape for synchronize/closed
+     *  transitions on shared PR state. Skip the cycle if a prior poll is
+     *  still draining; the next tick picks up. */
+    private polling = false;
     private onEvent: EventHandler | null = null;
     private enabledEvents: Set<string> = new Set();
+    /** Repos supplied verbatim in `config.repos`. Never mutated after init —
+     *  these are always watched regardless of org-refresh outcomes. */
+    private explicitRepos = new Set<string>();
+    /** Cleaned org list (trimmed, non-empty, deduped) derived from
+     *  `config.orgs` at init time. Empty/whitespace entries would otherwise
+     *  hit `/orgs//repos` (404), and duplicate entries would burn API quota
+     *  re-enumerating the same org on every refresh. */
+    private orgs: string[] = [];
+    /** Per-org enumerated repo sets, keyed by org name. Each entry is
+     *  REPLACED on every refresh so repos that were removed or made
+     *  private silently drop out of the watch set instead of accumulating. */
+    private orgRepos = new Map<string, Set<string>>();
 
-    async initialize(config: IntegrationConfig, _logger: Logger): Promise<void> {
+    async initialize(config: IntegrationConfig, logger: Logger): Promise<void> {
         this.config = config as unknown as PollConfig;
+        this.logger = logger;
+        // Reset lifecycle flags so an instance reused via the engine's
+        // reloadConfig path (stop() → initialize() on the same object)
+        // doesn't silently no-op: a sticky `stopped === true` would bail
+        // the next registerRoutes' 2s setTimeout out at its first check
+        // and the integration would never start polling. Fresh
+        // construction zeroes these via field initializers; this matches
+        // the reuse contract.
+        //
+        // Same logic applies to `orgRepos`: stale entries from the
+        // previous config's orgs would linger in the per-org map,
+        // `allRepos()` would union them into the watch set, and they
+        // would be polled forever. `refreshOrgRepos` only iterates
+        // `this.orgs` (the cleaned current list), so it can't see / prune
+        // org keys that aren't in the new config. Reset alongside the
+        // flags so re-initialize is fully equivalent to fresh construction
+        // for everything that varies with config.
+        this.stopped = false;
+        this.refreshing = false;
+        this.polling = false;
+        this.orgRepos = new Map();
+        // Reset every per-repo map in `state` too. Without this, a reload
+        // that drops an org from the config leaves stale `lastXxxIds` /
+        // `seededRepos` entries for the now-untracked repos: they can't
+        // be cleaned by `refreshOrgRepos`'s previousUnion-vs-currentUnion
+        // diff because the `orgRepos` reset above shrinks previousUnion
+        // before the diff runs (allRepos() = explicitRepos ∪ {} =
+        // explicitRepos), so the dropped repos never appear in
+        // previousUnion and never get pruneState'd. On a subsequent
+        // reload that re-adds the org, `seededRepos.has(repo)` still
+        // returns true and `firstSight` evaluates to false against a
+        // stale snapshot — emitting transition events for every change
+        // that happened across the reload gap. With per-repo seeding the
+        // re-seed is silent (no event emission, just re-snapshots
+        // state), so the cost of resetting here is one poll cycle's API
+        // budget per reload — well worth a clean baseline.
+        this.state = {
+            lastPrIds: new Map(),
+            lastPrHeadShas: new Map(),
+            lastPrStates: new Map(),
+            lastIssueIds: new Map(),
+            lastIssueStates: new Map(),
+            lastBranchShas: new Map(),
+            lastCommentIds: new Map(),
+            lastReviewIds: new Map(),
+            seededRepos: new Set(),
+        };
         if (!this.config.token) {
             throw new Error('github-poll: token is required');
         }
-        if (!this.config.repos?.length) {
-            throw new Error('github-poll: at least one repo is required');
+        // Numeric interval validation. `setInterval(fn, 0)` (or any
+        // value ≤ 0 / NaN, which Node coerces to ~1ms) fires every
+        // tick — the re-entrance guards (`polling`, `refreshing`) keep
+        // it from overlapping work but each tick still allocates a
+        // Promise and burns CPU. NaN slips past the `??` default in
+        // registerRoutes because `NaN ?? x === NaN`, then the `* 1000`
+        // is still NaN, then setInterval treats NaN as 0. Reject these
+        // up front with the same shape as the repos/orgs validation
+        // above so misconfigs surface at init, not silently as a hot
+        // poll loop.
+        const validateInterval = (name: string, value: unknown): void => {
+            if (value === undefined) return;
+            if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+                throw new Error(`github-poll: ${name} must be a positive number`);
+            }
+        };
+        validateInterval('interval', this.config.interval);
+        validateInterval('org_refresh', this.config.org_refresh);
+        // Trim+filter+dedupe both inputs before validation. An empty or
+        // whitespace-only entry passes the raw `xs?.length > 0` check
+        // (length is 1) but is meaningless: empty orgs hit `/orgs//repos`
+        // and 404, empty repos are dropped at poll time by the owner/repo
+        // split guard. Duplicates waste API quota. Cleaning both inputs
+        // through the same pipeline keeps explicit-repos and orgs
+        // symmetric — there's no reason orgs would be stricter.
+        const repos = clean(this.config.repos);
+        const orgs = clean(this.config.orgs);
+        if (repos.length === 0 && orgs.length === 0) {
+            throw new Error('github-poll: at least one of `repos` or `orgs` is required');
         }
+        this.orgs = orgs;
         this.enabledEvents = new Set(this.config.events ?? SUPPORTED_EVENTS);
+
+        // Seed explicit repos immediately. Org enumeration is async and
+        // happens in registerRoutes (we don't want initialize to block on
+        // network during engine startup).
+        this.explicitRepos = new Set(repos);
     }
 
     registerRoutes(server: FastifyInstance, onEvent: EventHandler): void {
         this.onEvent = onEvent;
-        // No HTTP routes needed — polling is timer-based
-        // Start polling after a short delay to let the server finish booting
+        // No HTTP routes needed — polling is timer-based.
+        // Start polling after a short delay to let the server finish booting.
         const interval = (this.config.interval ?? DEFAULT_INTERVAL) * 1000;
-        setTimeout(() => {
-            this.poll(); // Initial poll to seed state
-            this.timer = setInterval(() => this.poll(), interval);
+        const orgRefreshMs = (this.config.org_refresh ?? DEFAULT_ORG_REFRESH) * 1000;
+
+        // Wrapped invocation of refreshOrgRepos with a terminal `.catch`.
+        // refreshOrgRepos doesn't reject today — per-org failures are
+        // already caught inside — but the org-refresh setInterval below
+        // and the startup chain don't await the promise. A future
+        // refactor that lets a top-level synchronous throw escape (e.g.
+        // adding a metrics call, a snapshot helper, or a config
+        // re-validation) would otherwise produce an unhandledRejection
+        // and crash the process under Node's default behaviour. Cheap
+        // hardening while the surface is small.
+        const safeRefresh = (): Promise<void> => {
+            return this.refreshOrgRepos().catch((err: unknown) => {
+                this.logger.error(
+                    { err: errMessage(err) },
+                    'github-poll: refreshOrgRepos failed',
+                );
+            });
+        };
+        // Same defensive shape for `poll()`. Per-repo errors are caught
+        // inside the loop, but a synchronous throw outside the inner
+        // try (allRepos failing, logger.error throwing under a misconfig)
+        // would surface as an unhandledRejection at the `setInterval`
+        // call site. Symmetric with safeRefresh so a future maintainer
+        // sees one wrap-style for both periodic operations.
+        const safePoll = (): Promise<void> => {
+            return this.poll().catch((err: unknown) => {
+                this.logger.error(
+                    { err: errMessage(err) },
+                    'github-poll: poll failed',
+                );
+            });
+        };
+
+        // Store the startup-delay handle and re-check `stopped` at every
+        // async boundary. Without these guards, `stop()` called during the
+        // first 2s (common in tests and fast graceful shutdowns) would
+        // race: the setTimeout still fires, refreshOrgRepos issues a
+        // network call, and then `setInterval` arms two timers that the
+        // already-returned stop() can never clear.
+        this.startupTimer = setTimeout(() => {
+            this.startupTimer = null;
+            if (this.stopped) return;
+            // Block the first poll on the initial org enumeration so the
+            // seed run sees the full repo set. Subsequent refreshes
+            // happen on a separate timer in the background.
+            void safeRefresh().then(() => {
+                if (this.stopped) return;
+                void safePoll();
+                this.timer = setInterval(safePoll, interval);
+                if (this.orgs.length > 0) {
+                    this.orgRefreshTimer = setInterval(safeRefresh, orgRefreshMs);
+                }
+            });
         }, 2000);
     }
 
@@ -118,28 +344,175 @@ export class GitHubPollIntegration implements Integration {
         throw new Error('github-poll does not use parseEvent');
     }
 
-    /** Stop the poll timer (for clean shutdown) */
+    /** Stop the poll timer (for clean shutdown).
+     *
+     *  Idempotent: clears the startup setTimeout, the poll setInterval, the
+     *  org-refresh setInterval, and flips `stopped` so any deferred
+     *  callback that was already scheduled bails out before re-arming
+     *  intervals on an already-stopped integration. */
     stop(): void {
+        this.stopped = true;
+        if (this.startupTimer) {
+            clearTimeout(this.startupTimer);
+            this.startupTimer = null;
+        }
         if (this.timer) {
             clearInterval(this.timer);
             this.timer = null;
         }
+        if (this.orgRefreshTimer) {
+            clearInterval(this.orgRefreshTimer);
+            this.orgRefreshTimer = null;
+        }
+    }
+
+    /** Union of explicit repos + every org's enumerated repos. Computed
+     *  on demand so the poll loop always sees the latest refresh state. */
+    private allRepos(): Set<string> {
+        const out = new Set<string>(this.explicitRepos);
+        for (const repos of this.orgRepos.values()) {
+            for (const r of repos) out.add(r);
+        }
+        return out;
+    }
+
+    /** Re-enumerate every configured org and REPLACE its slot in
+     *  `this.orgRepos`. A network failure for one org logs and keeps
+     *  that org's previous set in place — beats blanking the watch
+     *  list because of a transient API hiccup.
+     *
+     *  Re-entrance guard (`this.refreshing`): if a previous refresh is
+     *  still in flight when the interval timer fires (slow API, large
+     *  org, retries inside `apiGetAllPages`), the second invocation
+     *  exits immediately rather than racing the first. Without this,
+     *  both runs would write to `this.orgRepos.set(org, ...)` for the
+     *  same key with last-writer-wins ordering that isn't tied to data
+     *  freshness — the late writer might be stale.
+     *
+     *  State pruning: any repo that dropped out of the watch-set union
+     *  between the pre- and post-refresh snapshots has its per-repo
+     *  entries deleted from `this.state`. Diffing the *union* (not just
+     *  one org's set) is what makes this safe — a repo that's also in
+     *  the explicit list, or that's still enumerated by another org,
+     *  stays in the union and isn't pruned. Without that nuance, a
+     *  cross-org or explicit-list overlap would lose its state and
+     *  reseed on the next poll (re-emitting every PR as "new"). */
+    private async refreshOrgRepos(): Promise<void> {
+        if (this.refreshing) return;
+        this.refreshing = true;
+        try {
+            const previousUnion = this.allRepos();
+            for (const org of this.orgs) {
+                // Cooperative cancellation point: stop() may have been
+                // called while we were awaiting the previous org's
+                // enumeration. The startup-tick guard alone doesn't help
+                // mid-refresh — bail before issuing the next fetch so
+                // we don't burn API quota on a stopped integration.
+                if (this.stopped) return;
+                try {
+                    const repos = await this.enumerateOrgRepos(org);
+                    // Re-check after the await: stop() could have fired
+                    // while the fetch was in flight. We DO want to
+                    // discard the response rather than mutate
+                    // `this.orgRepos` post-stop.
+                    if (this.stopped) return;
+                    this.orgRepos.set(org, new Set(repos));
+                } catch (err) {
+                    this.logger.error(
+                        { org, err: errMessage(err) },
+                        'github-poll: failed to refresh repos for org',
+                    );
+                }
+            }
+            if (this.stopped) return;
+            const currentUnion = this.allRepos();
+            for (const repoFull of previousUnion) {
+                if (!currentUnion.has(repoFull)) {
+                    this.pruneState(repoFull);
+                }
+            }
+        } finally {
+            this.refreshing = false;
+        }
+    }
+
+    /** Drop every per-repo entry from the poll state. Called for repos
+     *  that just fell out of the watch-set union (org removed them, or
+     *  the user re-configured). Long-lived processes with org churn
+     *  would otherwise accumulate map entries without bound.
+     *
+     *  Also removes the repo from `seededRepos` so that if it later
+     *  re-enters the watch set (a "briefly private, then public again"
+     *  churn path that org enumeration specifically enables), its first
+     *  re-poll is treated as a seed — populates the lastXxxIds snapshots
+     *  silently — rather than flooding `pull_request.opened` /
+     *  `issues.opened` / `push` / `issue_comment.created` for every
+     *  existing item it sees on the re-introduced repo. Forgetting this
+     *  delete defeats the entire per-repo seeding invariant on the
+     *  re-join case. */
+    private pruneState(repoFull: string): void {
+        this.state.lastPrIds.delete(repoFull);
+        this.state.lastPrHeadShas.delete(repoFull);
+        this.state.lastPrStates.delete(repoFull);
+        this.state.lastIssueIds.delete(repoFull);
+        this.state.lastIssueStates.delete(repoFull);
+        this.state.lastBranchShas.delete(repoFull);
+        this.state.lastCommentIds.delete(repoFull);
+        this.state.lastReviewIds.delete(repoFull);
+        this.state.seededRepos.delete(repoFull);
+    }
+
+    private async enumerateOrgRepos(org: string): Promise<string[]> {
+        // `type=all` returns public + private repos the token can see;
+        // `sort=updated` puts active repos first which doesn't matter
+        // for correctness but makes the early-pagination cancel paths
+        // (rate-limit, network blip) skew toward useful entries.
+        const url = `${GITHUB_API}/orgs/${encodeURIComponent(org)}/repos?per_page=100&type=all&sort=updated`;
+        const data = await this.apiGet(url);
+        if (!Array.isArray(data)) return [];
+        // Exclude archived repos from the watch set. They're immutable
+        // (no PR/issue/push/comment events possible) but each one would
+        // still cost 5 API calls per poll cycle indefinitely. For orgs
+        // with deep history this is often a 10:1 archived:active ratio,
+        // so the savings on rate-limit budget are substantial.
+        return data
+            .filter((r): r is Record<string, unknown> => r !== null && typeof r === 'object' && !(r as Record<string, unknown>).archived)
+            .map((r) => r.full_name)
+            .filter((n): n is string => typeof n === 'string' && n.length > 0);
     }
 
     // ─── Polling Logic ──────────────────────────────────────────────────
 
     private async poll(): Promise<void> {
-        for (const repoFull of this.config.repos) {
-            try {
-                await this.pollRepo(repoFull);
-            } catch (err) {
-                // Don't crash on individual repo errors
-                console.error(`github-poll: error polling ${repoFull}:`, (err as Error).message);
+        // Re-entrance guard. See `polling` field comment for rationale.
+        if (this.polling) return;
+        this.polling = true;
+        try {
+            // Iterate the union of explicit + org-enumerated repos.
+            // Computed fresh each poll so a background org refresh that
+            // landed between cycles is picked up immediately.
+            for (const repoFull of this.allRepos()) {
+                // Cooperative cancellation point — symmetric with
+                // refreshOrgRepos. Without this, an in-flight poll
+                // started before stop() would keep iterating its entire
+                // snapshot of `allRepos()` (potentially hundreds of
+                // org-enumerated repos × 5 sub-pollers × per-fetch
+                // latency), burning API quota AND delivering events into
+                // a consumer that may already be tearing down. Bail at
+                // each iteration boundary.
+                if (this.stopped) return;
+                try {
+                    await this.pollRepo(repoFull);
+                } catch (err) {
+                    // Don't crash on individual repo errors
+                    this.logger.error(
+                        { repo: repoFull, err: errMessage(err) },
+                        'github-poll: error polling repo',
+                    );
+                }
             }
-        }
-        // After first run, mark as seeded so subsequent runs emit events
-        if (!this.state.seeded) {
-            this.state.seeded = true;
+        } finally {
+            this.polling = false;
         }
     }
 
@@ -147,29 +520,57 @@ export class GitHubPollIntegration implements Integration {
         const [owner, repo] = repoFull.split('/');
         if (!owner || !repo) return;
 
-        // Poll PRs
+        // Per-repo first-sight flag. A repo that joins the watch set via
+        // a post-startup org refresh has empty per-repo state maps; the
+        // first cycle must populate them silently rather than firing
+        // pull_request.opened / issues.opened / push events for every
+        // existing item on that repo. Sub-pollers gate their emit logic
+        // on this flag and we commit it to `seededRepos` only after the
+        // full repo's poll completes successfully — a partial-failure
+        // cycle (one sub-poller throws) replays as another first-sight
+        // next time instead of leaving a half-seeded repo that would
+        // emit events for the un-snapshotted sub-categories.
+        const firstSight = !this.state.seededRepos.has(repoFull);
+
+        // Cooperative cancellation between sub-pollers, symmetric with the
+        // checks in `poll()`'s outer loop and `refreshOrgRepos`. Without
+        // these, a `stop()` landing after pollPullRequests resolves would
+        // still let pollIssues / pollPushes / pollComments /
+        // pollPullRequestReviews fire 1-4 more fetches against a stopped
+        // integration AND emit() events into a consumer that's already
+        // tearing down — violating the cooperative-cancellation contract
+        // the rest of the integration honors.
         if (this.wantsEvent('pull_request')) {
-            await this.pollPullRequests(owner, repo);
+            await this.pollPullRequests(owner, repo, firstSight);
+            if (this.stopped) return;
         }
-
-        // Poll issues
         if (this.wantsEvent('issues')) {
-            await this.pollIssues(owner, repo);
+            await this.pollIssues(owner, repo, firstSight);
+            if (this.stopped) return;
         }
-
-        // Poll pushes (via branch SHAs)
         if (this.enabledEvents.has('push')) {
-            await this.pollPushes(owner, repo);
+            await this.pollPushes(owner, repo, firstSight);
+            if (this.stopped) return;
         }
-
-        // Poll comments
         if (this.enabledEvents.has('issue_comment.created')) {
-            await this.pollComments(owner, repo);
+            await this.pollComments(owner, repo, firstSight);
+            if (this.stopped) return;
+        }
+        if (this.enabledEvents.has('pull_request_review.submitted')) {
+            await this.pollPullRequestReviews(owner, repo, firstSight);
+            if (this.stopped) return;
         }
 
-        // Poll PR reviews
-        if (this.enabledEvents.has('pull_request_review.submitted')) {
-            await this.pollPullRequestReviews(owner, repo);
+        // Mid-poll guard: an org-refresh that landed between our awaits
+        // may have pruneState()'d this repo (dropped from the watch-set
+        // union). Re-adding it to seededRepos here would mean a later
+        // re-entry finds firstSight=false against empty lastXxxIds and
+        // floods every existing PR/issue/comment/branch as a "new"
+        // event — exactly the failure mode the per-repo seeding refactor
+        // exists to prevent. Skip the seed bookkeeping for a repo we no
+        // longer watch.
+        if (firstSight && this.allRepos().has(repoFull)) {
+            this.state.seededRepos.add(repoFull);
         }
     }
 
@@ -182,7 +583,7 @@ export class GitHubPollIntegration implements Integration {
 
     // ─── PR Polling ─────────────────────────────────────────────────────
 
-    private async pollPullRequests(owner: string, repo: string): Promise<void> {
+    private async pollPullRequests(owner: string, repo: string, firstSight: boolean): Promise<void> {
         const key = `${owner}/${repo}`;
         const url = `${GITHUB_API}/repos/${owner}/${repo}/pulls?state=all&sort=updated&direction=desc&per_page=20`;
         const prs = await this.apiGet(url) as Array<Record<string, unknown>>;
@@ -206,7 +607,7 @@ export class GitHubPollIntegration implements Integration {
             newHeadShas.set(num, headSha);
             newStates.set(num, merged ? 'merged' : state);
 
-            if (!this.state.seeded) continue; // Seed run — just collect state
+            if (firstSight) continue; // Seed run — just collect state
 
             if (!oldIds.has(num)) {
                 // ── New PR ───────────────────────────────────────────────
@@ -250,14 +651,20 @@ export class GitHubPollIntegration implements Integration {
             }
         }
 
-        this.state.lastPrIds.set(key, newIds);
-        this.state.lastPrHeadShas.set(key, newHeadShas);
-        this.state.lastPrStates.set(key, newStates);
+        // Mid-poll guard: see comment in pollRepo. If a refresh has
+        // pruneState()'d this repo while our awaits were in flight,
+        // restoring the snapshot would resurrect state that the prune
+        // intentionally cleared.
+        if (this.allRepos().has(key)) {
+            this.state.lastPrIds.set(key, newIds);
+            this.state.lastPrHeadShas.set(key, newHeadShas);
+            this.state.lastPrStates.set(key, newStates);
+        }
     }
 
     // ─── Issue Polling ──────────────────────────────────────────────────
 
-    private async pollIssues(owner: string, repo: string): Promise<void> {
+    private async pollIssues(owner: string, repo: string, firstSight: boolean): Promise<void> {
         const key = `${owner}/${repo}`;
         const url = `${GITHUB_API}/repos/${owner}/${repo}/issues?state=all&sort=updated&direction=desc&per_page=20&filter=all`;
         const issues = await this.apiGet(url) as Array<Record<string, unknown>>;
@@ -278,7 +685,7 @@ export class GitHubPollIntegration implements Integration {
             newIds.add(num);
             newStates.set(num, state);
 
-            if (!this.state.seeded) continue;
+            if (firstSight) continue;
 
             if (!oldIds.has(num)) {
                 // ── New issue ────────────────────────────────────────────
@@ -304,13 +711,15 @@ export class GitHubPollIntegration implements Integration {
             }
         }
 
-        this.state.lastIssueIds.set(key, newIds);
-        this.state.lastIssueStates.set(key, newStates);
+        if (this.allRepos().has(key)) {
+            this.state.lastIssueIds.set(key, newIds);
+            this.state.lastIssueStates.set(key, newStates);
+        }
     }
 
     // ─── Push Polling (via branches) ────────────────────────────────────
 
-    private async pollPushes(owner: string, repo: string): Promise<void> {
+    private async pollPushes(owner: string, repo: string, firstSight: boolean): Promise<void> {
         const key = `${owner}/${repo}`;
         const url = `${GITHUB_API}/repos/${owner}/${repo}/branches?per_page=50`;
         const branches = await this.apiGet(url) as Array<Record<string, unknown>>;
@@ -325,7 +734,7 @@ export class GitHubPollIntegration implements Integration {
 
             newShas.set(name, sha);
 
-            if (!this.state.seeded) continue;
+            if (firstSight) continue;
 
             const oldSha = oldShas.get(name);
             if (oldSha && sha !== oldSha) {
@@ -338,12 +747,14 @@ export class GitHubPollIntegration implements Integration {
             }
         }
 
-        this.state.lastBranchShas.set(key, newShas);
+        if (this.allRepos().has(key)) {
+            this.state.lastBranchShas.set(key, newShas);
+        }
     }
 
     // ─── Comment Polling ────────────────────────────────────────────────
 
-    private async pollComments(owner: string, repo: string): Promise<void> {
+    private async pollComments(owner: string, repo: string, firstSight: boolean): Promise<void> {
         const key = `${owner}/${repo}`;
         const url = `${GITHUB_API}/repos/${owner}/${repo}/issues/comments?sort=updated&direction=desc&per_page=20`;
         const comments = await this.apiGet(url) as Array<Record<string, unknown>>;
@@ -355,7 +766,7 @@ export class GitHubPollIntegration implements Integration {
             const id = comment.id as number;
             newIds.add(id);
 
-            if (!this.state.seeded) continue;
+            if (firstSight) continue;
 
             if (!oldIds.has(id)) {
                 // Extract the issue number from the issue_url
@@ -373,12 +784,14 @@ export class GitHubPollIntegration implements Integration {
             }
         }
 
-        this.state.lastCommentIds.set(key, newIds);
+        if (this.allRepos().has(key)) {
+            this.state.lastCommentIds.set(key, newIds);
+        }
     }
 
     // ─── PR Review Polling ──────────────────────────────────────────────
 
-    private async pollPullRequestReviews(owner: string, repo: string): Promise<void> {
+    private async pollPullRequestReviews(owner: string, repo: string, firstSight: boolean): Promise<void> {
         const key = `${owner}/${repo}`;
 
         // Get open PRs to check reviews on
@@ -403,7 +816,7 @@ export class GitHubPollIntegration implements Integration {
                 const id = review.id as number;
                 newIds.add(id);
 
-                if (!this.state.seeded) continue;
+                if (firstSight) continue;
                 if (oldIds.has(id)) continue;
 
                 // Emit event for new reviews
@@ -415,7 +828,9 @@ export class GitHubPollIntegration implements Integration {
             }
         }
 
-        this.state.lastReviewIds.set(key, newIds);
+        if (this.allRepos().has(key)) {
+            this.state.lastReviewIds.set(key, newIds);
+        }
     }
 
     // ─── Helpers ────────────────────────────────────────────────────────
@@ -443,7 +858,34 @@ export class GitHubPollIntegration implements Integration {
             }
 
             const data: unknown = await res.json();
-            if (!Array.isArray(data)) return data;
+            if (!Array.isArray(data)) {
+                // On page 1 a non-array body is legitimate — endpoints
+                // like `/repos/{owner}/{repo}/issues/{n}` return a
+                // single object and the caller (e.g. apiGet for a
+                // single resource) expects it. Pass through.
+                //
+                // On any SUBSEQUENT page, a non-array body is a server
+                // contract violation: the Link header promised more
+                // results in the same shape. The original code silently
+                // returned `data`, throwing away every accumulated
+                // page in `all`. Downstream that meant
+                // `enumerateOrgRepos` would think the org shrank to
+                // a single repo (or zero), `refreshOrgRepos` would
+                // diff against the previous union, prune state for
+                // every dropped repo, and the next poll cycle would
+                // re-emit every existing PR/issue/comment as new —
+                // the exact flood the per-repo seeding refactor exists
+                // to prevent. Throw loudly so the caller's per-org
+                // catch isolates the failure and the previous set is
+                // preserved (the existing "transient API hiccup"
+                // contract), rather than silently corrupting state.
+                if (all.length > 0) {
+                    throw new Error(
+                        `GitHub API pagination: expected array on subsequent page but got ${typeof data} (URL: ${nextUrl})`,
+                    );
+                }
+                return data;
+            }
             all.push(...data);
 
             const link = res.headers?.get?.('link');
