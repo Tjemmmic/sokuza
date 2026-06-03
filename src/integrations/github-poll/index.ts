@@ -209,6 +209,32 @@ export class GitHubPollIntegration implements Integration {
         this.refreshing = false;
         this.polling = false;
         this.orgRepos = new Map();
+        // Reset every per-repo map in `state` too. Without this, a reload
+        // that drops an org from the config leaves stale `lastXxxIds` /
+        // `seededRepos` entries for the now-untracked repos: they can't
+        // be cleaned by `refreshOrgRepos`'s previousUnion-vs-currentUnion
+        // diff because the `orgRepos` reset above shrinks previousUnion
+        // before the diff runs (allRepos() = explicitRepos ∪ {} =
+        // explicitRepos), so the dropped repos never appear in
+        // previousUnion and never get pruneState'd. On a subsequent
+        // reload that re-adds the org, `seededRepos.has(repo)` still
+        // returns true and `firstSight` evaluates to false against a
+        // stale snapshot — emitting transition events for every change
+        // that happened across the reload gap. With per-repo seeding the
+        // re-seed is silent (no event emission, just re-snapshots
+        // state), so the cost of resetting here is one poll cycle's API
+        // budget per reload — well worth a clean baseline.
+        this.state = {
+            lastPrIds: new Map(),
+            lastPrHeadShas: new Map(),
+            lastPrStates: new Map(),
+            lastIssueIds: new Map(),
+            lastIssueStates: new Map(),
+            lastBranchShas: new Map(),
+            lastCommentIds: new Map(),
+            lastReviewIds: new Map(),
+            seededRepos: new Set(),
+        };
         if (!this.config.token) {
             throw new Error('github-poll: token is required');
         }

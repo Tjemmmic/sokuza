@@ -247,6 +247,54 @@ describe('GitHubPollIntegration', () => {
             expect((integration as any).orgRepos.size).toBe(0);
         });
 
+        it('initialize() resets per-repo state so stale seededRepos/lastXxxIds entries from a previous config do not survive a reload', async () => {
+            // Sister to the lifecycle-flag and orgRepos reset tests
+            // above. Without resetting `state` too, a reload that drops
+            // an org from the config leaves `seededRepos` and
+            // `lastXxxIds` populated for the now-untracked repos —
+            // they can't be cleaned by `refreshOrgRepos`'s
+            // previousUnion-vs-currentUnion diff because the orgRepos
+            // reset above shrinks previousUnion before the diff runs
+            // (allRepos() = explicitRepos ∪ {} = explicitRepos). On a
+            // subsequent reload that re-adds the org,
+            // `seededRepos.has(repo)` still returns true and firstSight
+            // evaluates to false against a stale snapshot — emitting
+            // transition events for every change across the reload gap.
+            const integration = new GitHubPollIntegration();
+            await integration.initialize({ token: 'tok', orgs: ['old-org'] }, TEST_LOGGER);
+
+            // Simulate a previous cycle having seeded state for old-org's repos.
+            const state = (integration as any).state;
+            state.seededRepos.add('old-org/legacy-a');
+            state.seededRepos.add('old-org/legacy-b');
+            state.lastPrIds.set('old-org/legacy-a', new Set([1, 2]));
+            state.lastPrHeadShas.set('old-org/legacy-a', new Map([[1, 'sha-1']]));
+            state.lastPrStates.set('old-org/legacy-a', new Map([[1, 'open']]));
+            state.lastIssueIds.set('old-org/legacy-a', new Set([10]));
+            state.lastIssueStates.set('old-org/legacy-a', new Map([[10, 'open']]));
+            state.lastBranchShas.set('old-org/legacy-a', new Map([['main', 'sha-main']]));
+            state.lastCommentIds.set('old-org/legacy-a', new Set([100]));
+            state.lastReviewIds.set('old-org/legacy-a', new Set([1000]));
+            expect(state.seededRepos.has('old-org/legacy-a')).toBe(true);
+            expect(state.lastPrIds.has('old-org/legacy-a')).toBe(true);
+
+            integration.stop();
+            await integration.initialize({ token: 'tok', orgs: ['new-org'] }, TEST_LOGGER);
+
+            const stateAfter = (integration as any).state;
+            // Every per-repo map and the seed set should be empty after
+            // re-initialize — fresh-construction equivalence.
+            expect(stateAfter.seededRepos.size).toBe(0);
+            expect(stateAfter.lastPrIds.size).toBe(0);
+            expect(stateAfter.lastPrHeadShas.size).toBe(0);
+            expect(stateAfter.lastPrStates.size).toBe(0);
+            expect(stateAfter.lastIssueIds.size).toBe(0);
+            expect(stateAfter.lastIssueStates.size).toBe(0);
+            expect(stateAfter.lastBranchShas.size).toBe(0);
+            expect(stateAfter.lastCommentIds.size).toBe(0);
+            expect(stateAfter.lastReviewIds.size).toBe(0);
+        });
+
         it('apiGetAllPages throws on a non-array body on a subsequent page (preserves prior pages via per-org isolation)', async () => {
             // Pre-existing pagination edge case amplified by the new
             // enumerateOrgRepos caller. If GitHub ever returned 200
