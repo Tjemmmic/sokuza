@@ -194,49 +194,16 @@ window.openGraphEditor = async function (workflowName, opts = {}) {
 //      where the library directory is empty. YAML-loaded recipes with the
 //      same id win.
 
-// Shared agentic-review prompt for the PR-review recipes. The agent runs
-// inside the cloned PR checkout (wired into `workdir`) and reads the
-// surrounding code to ground its findings; the authoritative diff is
-// embedded here because the shallow clone is the PR branch only and
-// ai.agent does not read the `context` port. Mirrors the prompt in
-// templates/ai-pr-review.yaml so the recipe and template stay in sync.
-const AGENTIC_REVIEW_PROMPT = `You are a senior staff engineer conducting a thorough, skeptical code review. Your working directory is a clone of the PR branch — read the changed files and their callers to verify that every concern reflects real behaviour, not a surface pattern. You may run read-only checks (grep, type-check, look up test names) to confirm hypotheses. Do not modify anything.
-
-The authoritative PR diff is between the <diff> markers:
-
-<diff>
-{{nodes.fetch_diff.diff}}
-</diff>
-
-When done investigating, respond with a SINGLE JSON object and NOTHING else — no prose before or after. The FIRST character of your response MUST be { and the LAST must be }.
-
-{
-  "summary": "1-3 sentence plain-text overview of the PR and your overall take.",
-  "issues": [
-    {
-      "priority": "P1 | P2 | P3",
-      "title": "Specific, descriptive one-line title.",
-      "file": "path/to/file.ts:L42-L50",
-      "problem": "What is wrong and WHY it matters. Concrete.",
-      "fix": "Concrete fix suggestion."
-    }
-  ],
-  "decision": "APPROVE | CHANGES_REQUESTED",
-  "justification": "Short paragraph explaining the decision."
-}
-
-Priorities: P1 = a bug that WILL fail, a security hole, or data loss; P2 = missing error handling, untested new logic, perf regressions, maintainability risks; P3 = nice-to-have. Choose CHANGES_REQUESTED if any P1 exists or there are 3 or more P2s; otherwise APPROVE. An empty issues array with APPROVE is a valid output if the PR is clean. Reference a real file and line in every issue. Output the JSON now.`;
-
 const BUILTIN_RECIPES = [
     {
         id: 'manual-pr-review',
         title: 'Manual PR Review',
         icon: '🎮',
-        tagline: 'Pick a PR from the dashboard and run an agentic AI review on it',
-        bullets: ['1 manual input (the PR)', 'Decompose into scalars', 'Clone + fetch diff', 'Agentic review (reads the checkout)', 'Post comment'],
+        tagline: 'Pick a PR from the dashboard and run an AI review on it',
+        bullets: ['1 manual input (the PR)', 'Decompose into scalars', 'Clone + fetch diff', 'AI review (reads the checkout)', 'Post comment'],
         build: () => ({
             name: 'manual-pr-review',
-            description: 'Run an agentic AI review on demand against any PR',
+            description: 'Run an AI review on demand against any PR',
             enabled: true,
             graph: {
                 // The github-pr picker emits the *whole PR object* on
@@ -252,8 +219,8 @@ const BUILTIN_RECIPES = [
                     { id: 'pr_fields', type: 'data.pr-fields', position: { x: 360, y: 160 }, config: {} },
                     { id: 'clone', type: 'github.clone-repo', position: { x: 680, y: 60 }, config: {} },
                     { id: 'fetch_diff', type: 'github.fetch-diff', position: { x: 680, y: 280 }, config: {} },
-                    { id: 'review', type: 'ai.agent', position: { x: 1000, y: 160 },
-                      config: { parse_as_review: true, prompt: AGENTIC_REVIEW_PROMPT } },
+                    { id: 'review', type: 'ai.review', position: { x: 1000, y: 160 },
+                      config: { timeout: 0 } },
                     { id: 'post', type: 'github.comment', position: { x: 1340, y: 160 },
                       config: { body: '{{nodes.review.markdown}}' } },
                 ],
@@ -264,9 +231,12 @@ const BUILTIN_RECIPES = [
                     { id: 'e4', from: { node: 'pr_fields', port: 'repo' }, to: { node: 'clone', port: 'repo' } },
                     { id: 'e5', from: { node: 'pr_fields', port: 'branch' }, to: { node: 'clone', port: 'ref' } },
                     { id: 'e6', from: { node: 'clone', port: 'path' }, to: { node: 'review', port: 'workdir' } },
-                    { id: 'e7', from: { node: 'pr_fields', port: 'number' }, to: { node: 'post', port: 'pr_number' } },
-                    { id: 'e8', from: { node: 'pr_fields', port: 'repo' }, to: { node: 'post', port: 'repo' } },
-                    { id: 'e9', from: { node: 'review', port: 'markdown' }, to: { node: 'post', port: '__seq' } },
+                    { id: 'e7', from: { node: 'fetch_diff', port: 'diff' }, to: { node: 'review', port: 'diff' } },
+                    { id: 'e8', from: { node: 'pr_fields', port: 'number' }, to: { node: 'review', port: 'pr_number' } },
+                    { id: 'e9', from: { node: 'pr_fields', port: 'repo' }, to: { node: 'review', port: 'repo' } },
+                    { id: 'e10', from: { node: 'pr_fields', port: 'number' }, to: { node: 'post', port: 'pr_number' } },
+                    { id: 'e11', from: { node: 'pr_fields', port: 'repo' }, to: { node: 'post', port: 'repo' } },
+                    { id: 'e12', from: { node: 'review', port: 'markdown' }, to: { node: 'post', port: '__seq' } },
                 ],
             },
         }),
@@ -276,10 +246,10 @@ const BUILTIN_RECIPES = [
         title: 'Auto PR Review',
         icon: '⚡',
         tagline: 'Review every new PR automatically when it opens',
-        bullets: ['GitHub trigger on pull_request.opened', 'Clone + fetch diff', 'Agentic review (reads the checkout)', 'Post comment'],
+        bullets: ['GitHub trigger on pull_request.opened', 'Clone + fetch diff', 'AI review (reads the checkout)', 'Post comment'],
         build: () => ({
             name: 'auto-pr-review',
-            description: 'Agentic AI review on every new PR',
+            description: 'AI review on every new PR',
             enabled: true,
             graph: {
                 nodes: [
@@ -287,8 +257,8 @@ const BUILTIN_RECIPES = [
                       config: { events: ['pull_request.opened'] } },
                     { id: 'clone', type: 'github.clone-repo', position: { x: 380, y: 60 }, config: {} },
                     { id: 'fetch_diff', type: 'github.fetch-diff', position: { x: 380, y: 280 }, config: {} },
-                    { id: 'review', type: 'ai.agent', position: { x: 720, y: 160 },
-                      config: { parse_as_review: true, prompt: AGENTIC_REVIEW_PROMPT } },
+                    { id: 'review', type: 'ai.review', position: { x: 720, y: 160 },
+                      config: { timeout: 0 } },
                     { id: 'post', type: 'github.comment', position: { x: 1060, y: 160 },
                       config: { body: '{{nodes.review.markdown}}' } },
                 ],
@@ -298,9 +268,12 @@ const BUILTIN_RECIPES = [
                     { id: 'e3', from: { node: 'trigger', port: 'prNumber' }, to: { node: 'fetch_diff', port: 'pr_number' } },
                     { id: 'e4', from: { node: 'trigger', port: 'repo' }, to: { node: 'fetch_diff', port: 'repo' } },
                     { id: 'e5', from: { node: 'clone', port: 'path' }, to: { node: 'review', port: 'workdir' } },
-                    { id: 'e6', from: { node: 'trigger', port: 'prNumber' }, to: { node: 'post', port: 'pr_number' } },
-                    { id: 'e7', from: { node: 'trigger', port: 'repo' }, to: { node: 'post', port: 'repo' } },
-                    { id: 'e8', from: { node: 'review', port: 'markdown' }, to: { node: 'post', port: '__seq' } },
+                    { id: 'e6', from: { node: 'fetch_diff', port: 'diff' }, to: { node: 'review', port: 'diff' } },
+                    { id: 'e7', from: { node: 'trigger', port: 'prNumber' }, to: { node: 'review', port: 'pr_number' } },
+                    { id: 'e8', from: { node: 'trigger', port: 'repo' }, to: { node: 'review', port: 'repo' } },
+                    { id: 'e9', from: { node: 'trigger', port: 'prNumber' }, to: { node: 'post', port: 'pr_number' } },
+                    { id: 'e10', from: { node: 'trigger', port: 'repo' }, to: { node: 'post', port: 'repo' } },
+                    { id: 'e11', from: { node: 'review', port: 'markdown' }, to: { node: 'post', port: '__seq' } },
                 ],
             },
         }),

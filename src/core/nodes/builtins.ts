@@ -318,6 +318,8 @@ const aiReviewNode = actionNode({
         { name: 'diff', label: 'Diff', role: 'input', wire: true, type: 'diff', helpText: 'Wire from a github-fetch-diff node, or paste raw diff' },
         { name: 'pr_number', label: 'PR Number', role: 'input', wire: true, config: true, control: 'number', type: 'number' },
         { name: 'repo', label: 'Repository', role: 'input', wire: true, config: true, control: 'text', type: 'string', placeholder: 'org/repo' },
+        { name: 'workdir', label: 'Workdir', role: 'input', wire: true, type: 'string',
+          helpText: 'Optional: a clone of the PR (from github-clone-repo) for the model to investigate. Runs the review in completion mode with this as cwd. Restores the pre-graph clone-aware review.' },
         { name: 'prompt', label: 'System Prompt', role: 'input', config: true, control: 'textarea', defaultSource: 'ai-review-system-prompt',
           helpText: 'Leave blank to use the built-in review prompt. Click "Edit in modal" → "Load default" to start from the built-in and customise.' },
         { name: 'provider', label: 'AI Provider', role: 'input', config: true, control: 'ai-provider',
