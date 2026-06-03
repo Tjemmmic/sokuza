@@ -15,6 +15,8 @@ under a new `## [X.Y.Z] - YYYY-MM-DD` heading, bump `version` in
 `package.json`, commit, push to main. The release workflow tags +
 publishes automatically.
 
+## [0.2.0] - 2026-06-03
+
 ### Added
 
 #### Visual editor and graph runtime
