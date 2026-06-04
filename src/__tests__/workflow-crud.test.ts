@@ -360,4 +360,36 @@ graph:
         const res = await server.inject({ method: 'POST', url: '/api/workflows/nope/toggle' });
         expect(res.statusCode).toBe(404);
     });
+
+    // ─── GET /:name/details applies syncTriggerNodeFromWorkflow ──────────
+
+    it('details endpoint projects the merged trigger into the graph trigger node', async () => {
+        // Mismatched: top-level trigger is gh-cli + author, but the graph
+        // trigger node is a stale trigger.github with no author — the exact
+        // shape that rendered wrong in the visual editor.
+        await server.inject({
+            method: 'POST',
+            url: '/api/workflows',
+            payload: {
+                name: 'sync-it',
+                trigger: { source: 'gh-cli', event: ['pull_request.opened'], author: 'Tjemmmic' },
+                graph: {
+                    nodes: [
+                        { id: 'trigger', type: 'trigger.github', config: { events: ['pull_request.opened'] } },
+                        { id: 'fetch', type: 'github.fetch-diff', config: {} },
+                    ],
+                    edges: [],
+                },
+            },
+        });
+
+        const detail = await server.inject({ method: 'GET', url: '/api/workflows/sync-it/details' });
+        expect(detail.statusCode).toBe(200);
+        const node = JSON.parse(detail.payload).workflow.graph.nodes.find((n: { id: string }) => n.id === 'trigger');
+        expect(node.type).toBe('trigger.gh-cli');
+        expect(node.config.authors).toEqual(['Tjemmmic']);
+        // The non-trigger node is untouched.
+        const fetch = JSON.parse(detail.payload).workflow.graph.nodes.find((n: { id: string }) => n.id === 'fetch');
+        expect(fetch.type).toBe('github.fetch-diff');
+    });
 });
