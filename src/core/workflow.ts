@@ -86,11 +86,19 @@ export function matchesTrigger(
         const shorthandChecks: Array<{ values: string[]; path: string }> = [
             { values: toArray(trigger.repo), path: 'metadata.repo' },
             { values: toArray(trigger.branch), path: 'payload.pull_request.base.ref' },
-            { values: toArray(trigger.author), path: 'payload.pull_request.user.login' },
         ];
         for (const { values, path } of shorthandChecks) {
             if (values.length <= 1) continue; // Single values handled by filters above
             if (!matchesAnyShorthand(event, path, values)) return false;
+        }
+
+        // Author is resolved across BOTH the PR and issue payload shapes
+        // (see AUTHOR_PATHS) so `author:` works for issue.* events too, not
+        // only pull_request.* — a silent no-op before. Single values are
+        // handled by resolveShorthands (which emits the same OR-path).
+        const includeAuthors = toArray(trigger.author);
+        if (includeAuthors.length > 1 && !matchesAnyAuthor(event, includeAuthors)) {
+            return false;
         }
 
         // Labels: include requires AT LEAST ONE of the listed labels to
@@ -110,11 +118,17 @@ export function matchesTrigger(
         const excludeChecks: Array<{ values: string[]; path: string }> = [
             { values: toArray(trigger.exclude.repo), path: 'metadata.repo' },
             { values: toArray(trigger.exclude.branch), path: 'payload.pull_request.base.ref' },
-            { values: toArray(trigger.exclude.author), path: 'payload.pull_request.user.login' },
         ];
         for (const { values, path } of excludeChecks) {
             if (values.length === 0) continue;
             if (matchesAnyShorthand(event, path, values)) return false;
+        }
+
+        // Author exclude — same PR-or-issue resolution as include, so
+        // `exclude.author: me` rejects my own PRs AND my own issues.
+        const excludeAuthors = toArray(trigger.exclude.author);
+        if (excludeAuthors.length > 0 && matchesAnyAuthor(event, excludeAuthors)) {
+            return false;
         }
 
         const excludeLabels = trigger.exclude.labels ?? [];
@@ -124,6 +138,24 @@ export function matchesTrigger(
     }
 
     return true;
+}
+
+/** The GitHub username of whoever the event is "about", resolved across the
+ *  PR and issue payload shapes. A pull_request.* event carries the author at
+ *  `payload.pull_request.user.login`; an issues.* event carries it at
+ *  `payload.issue.user.login`. Matching against both is what lets `author:`
+ *  / `exclude.author:` work uniformly for either event family instead of
+ *  silently never matching on issues. */
+export const AUTHOR_PATHS = [
+    'payload.pull_request.user.login',
+    'payload.issue.user.login',
+];
+
+/** True if the event's author (on either AUTHOR_PATHS shape) matches any of
+ *  the given values — honoring glob + case-insensitivity per
+ *  matchesAnyShorthand. */
+function matchesAnyAuthor(event: EventPayload, values: string[]): boolean {
+    return AUTHOR_PATHS.some((path) => matchesAnyShorthand(event, path, values));
 }
 
 /** Match a value list against a single dot-path on the event, honoring
@@ -152,7 +184,11 @@ function eventLabelsContainAny(event: EventPayload, labels: string[]): boolean {
             if (!item || typeof item !== 'object') continue;
             const name = (item as Record<string, unknown>).name;
             if (typeof name !== 'string') continue;
-            if (labels.includes(name)) return true;
+            // Glob support (e.g. `needs-*`, `area/*`) so label shorthand
+            // behaves like repo/branch/author, which already glob.
+            if (labels.some((l) => (l.includes('*') ? globMatch(l, name) : l === name))) {
+                return true;
+            }
         }
     }
     return false;
@@ -161,6 +197,7 @@ function eventLabelsContainAny(event: EventPayload, labels: string[]): boolean {
 /** Paths where comparison should be case-insensitive (GitHub usernames) */
 const CASE_INSENSITIVE_PATHS = new Set([
     'payload.pull_request.user.login',
+    'payload.issue.user.login',
 ]);
 
 /**

@@ -68,11 +68,26 @@ describe('normalizeWorkflow — shorthand resolution', () => {
         expect(wf.trigger.filters?.['payload.pull_request.base.ref']).toBe('main');
     });
 
-    it('resolves single author to a filter', async () => {
+    it('resolves single author to an OR-path filter spanning PR and issue shapes', async () => {
         const wf = await normalizeWorkflow(
             minWorkflow({ source: 'github', event: 'push', author: 'dependabot[bot]' }),
         );
-        expect(wf.trigger.filters?.['payload.pull_request.user.login']).toBe('dependabot[bot]');
+        // OR-path so `author:` matches issue events too, not only PRs.
+        expect(wf.trigger.filters?.['payload.pull_request.user.login|payload.issue.user.login'])
+            .toBe('dependabot[bot]');
+    });
+
+    it('single-value author matches both PR and issue events end-to-end', async () => {
+        const wf = await normalizeWorkflow(
+            minWorkflow({ source: 'github', event: ['pull_request.opened', 'issues.opened'], author: 'alice' }),
+        );
+        const base = { source: 'github', timestamp: '', metadata: {} };
+        expect(matchesTrigger(wf, { ...base, event: 'pull_request.opened',
+            payload: { pull_request: { user: { login: 'alice' } } } } as EventPayload)).toBe(true);
+        expect(matchesTrigger(wf, { ...base, event: 'issues.opened',
+            payload: { issue: { user: { login: 'alice' } } } } as EventPayload)).toBe(true);
+        expect(matchesTrigger(wf, { ...base, event: 'issues.opened',
+            payload: { issue: { user: { login: 'bob' } } } } as EventPayload)).toBe(false);
     });
 
     it('keeps multi-value repo on trigger without converting to filter', async () => {

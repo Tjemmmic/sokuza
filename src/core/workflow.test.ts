@@ -667,6 +667,88 @@ describe('matchesTrigger', () => {
         });
     });
 
+    describe('author filters resolve across PR and issue events', () => {
+        it('matches multi-value author on an issues.* event (issue.user.login)', () => {
+            // Issue events carry the author at payload.issue.user.login, not
+            // payload.pull_request.user.login — this used to silently never match.
+            const wf = makeWorkflow({
+                trigger: { source: 'github', event: 'issues.opened', author: ['alice', 'bob'] },
+            });
+            expect(matchesTrigger(wf, makeEvent({
+                event: 'issues.opened',
+                payload: { issue: { user: { login: 'alice' } } },
+            }))).toBe(true);
+            expect(matchesTrigger(wf, makeEvent({
+                event: 'issues.opened',
+                payload: { issue: { user: { login: 'carol' } } },
+            }))).toBe(false);
+        });
+
+        it('still matches multi-value author on a pull_request.* event', () => {
+            const wf = makeWorkflow({
+                trigger: { source: 'github', event: 'pull_request.opened', author: ['alice', 'bob'] },
+            });
+            expect(matchesTrigger(wf, makeEvent({
+                payload: { pull_request: { user: { login: 'bob' } } },
+            }))).toBe(true);
+        });
+
+        it('excludes by author on an issues.* event (case-insensitive)', () => {
+            const wf = makeWorkflow({
+                trigger: { source: 'github', event: 'issues.opened', exclude: { author: 'Alice' } },
+            });
+            expect(matchesTrigger(wf, makeEvent({
+                event: 'issues.opened',
+                payload: { issue: { user: { login: 'alice' } } },
+            }))).toBe(false);
+            expect(matchesTrigger(wf, makeEvent({
+                event: 'issues.opened',
+                payload: { issue: { user: { login: 'someone' } } },
+            }))).toBe(true);
+        });
+
+        it('matches a single-value author OR-path filter (resolveShorthands shape) on either payload', () => {
+            const wf = makeWorkflow({
+                trigger: {
+                    source: 'github', event: ['pull_request.opened', 'issues.opened'],
+                    filters: { 'payload.pull_request.user.login|payload.issue.user.login': 'alice' },
+                },
+            });
+            expect(matchesTrigger(wf, makeEvent({
+                event: 'issues.opened', payload: { issue: { user: { login: 'alice' } } },
+            }))).toBe(true);
+            expect(matchesTrigger(wf, makeEvent({
+                payload: { pull_request: { user: { login: 'alice' } } },
+            }))).toBe(true);
+        });
+    });
+
+    describe('label shorthand globs', () => {
+        it('matches include labels by glob', () => {
+            const wf = makeWorkflow({
+                trigger: { source: 'github', event: 'pull_request.opened', labels: ['needs-*', 'urgent'] },
+            });
+            expect(matchesTrigger(wf, makeEvent({
+                payload: { pull_request: { labels: [{ name: 'needs-review' }] } },
+            }))).toBe(true);
+            expect(matchesTrigger(wf, makeEvent({
+                payload: { pull_request: { labels: [{ name: 'frontend' }] } },
+            }))).toBe(false);
+        });
+
+        it('excludes labels by glob', () => {
+            const wf = makeWorkflow({
+                trigger: { source: 'github', event: 'pull_request.opened', exclude: { labels: ['area/*'] } },
+            });
+            expect(matchesTrigger(wf, makeEvent({
+                payload: { pull_request: { labels: [{ name: 'area/api' }] } },
+            }))).toBe(false);
+            expect(matchesTrigger(wf, makeEvent({
+                payload: { pull_request: { labels: [{ name: 'bug' }] } },
+            }))).toBe(true);
+        });
+    });
+
     // ─── Graph trigger + YAML override merge ────────────────────────────
     // Regression for the auto-PR-review trigger bug: a graph workflow that
     // hard-codes `trigger.github` in its first node used to silently

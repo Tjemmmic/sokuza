@@ -98,7 +98,10 @@ function getDefaultTemplateDir(): string {
 const GITHUB_SHORTHAND_MAP: Record<string, string> = {
     repo: 'metadata.repo',
     branch: 'payload.pull_request.base.ref',
-    author: 'payload.pull_request.user.login',
+    // OR-path so a single-value `author:` matches the PR *or* issue payload
+    // shape — same set as AUTHOR_PATHS in workflow.ts (matchesFilter splits
+    // on `|`). Without the issue path, `author:` silently no-ops on issues.*.
+    author: 'payload.pull_request.user.login|payload.issue.user.login',
 };
 
 /**
