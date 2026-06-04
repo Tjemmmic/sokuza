@@ -219,12 +219,10 @@ function resolveShorthands(
         }
     }
 
-    const labels = raw.labels as string[] | undefined;
-    if (labels && Array.isArray(labels) && labels.length > 0) {
-        if (labels.length === 1) {
-            filters[`payload.pull_request.labels[].name`] = labels[0];
-        }
-    }
+    // Labels are NOT converted to a filter. The array-contains filter path
+    // does exact matching, which would silently break the documented glob
+    // case (`labels: [needs-*]`). Labels of any arity stay on `trigger.labels`
+    // and are matched by `eventLabelsContainAny` (glob + case-insensitive).
 
     return {
         source,

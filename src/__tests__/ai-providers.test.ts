@@ -527,3 +527,37 @@ describe('completion: temperature + truncation (openai-compatible backend)', () 
         expect(r.truncated).toBe(false);
     });
 });
+
+describe('completion: truncation detection (anthropic-api backend)', () => {
+    function regWithFakeClient(stopReason: string) {
+        const reg = loadAIProviders({
+            providers: { anth: { kind: 'anthropic-api', api_key: 'k', default_model: 'claude-x' } },
+        });
+        const provider = reg.providers.get('anth')!;
+        // Inject a fake SDK client so no network call happens.
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (provider as any)._client = {
+            messages: {
+                create: async () => ({
+                    content: [{ type: 'text', text: 'some output' }],
+                    stop_reason: stopReason,
+                    model: 'claude-x',
+                    usage: { input_tokens: 10, output_tokens: 20 },
+                }),
+            },
+        };
+        return reg;
+    }
+
+    it('flags truncated when stop_reason is max_tokens', async () => {
+        const r = await runCompletionWithFallback(regWithFakeClient('max_tokens'), 'anth',
+            { systemPrompt: 's', userMessage: 'u', logger: TEST_LOGGER });
+        expect(r.truncated).toBe(true);
+    });
+
+    it('truncated is false on a normal end_turn', async () => {
+        const r = await runCompletionWithFallback(regWithFakeClient('end_turn'), 'anth',
+            { systemPrompt: 's', userMessage: 'u', logger: TEST_LOGGER });
+        expect(r.truncated).toBe(false);
+    });
+});

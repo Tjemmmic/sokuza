@@ -66,6 +66,23 @@ describe('GhCliIntegration', () => {
             await expect(integration.initialize({})).resolves.toBeUndefined();
             expect(integration.getUsername()).toBe('testuser');
         });
+
+        it('warns when a last-wins selector (authors) is given multiple values', async () => {
+            mockedGetGhAuthStatus.mockResolvedValue({ available: true, username: 'testuser' });
+            const warn = vi.fn();
+            const logger = { warn } as unknown as Parameters<GhCliIntegration['initialize']>[1];
+            await integration.initialize({ prs: { authors: ['alice', 'bob'] } }, logger);
+            expect(warn).toHaveBeenCalledTimes(1);
+            expect(warn.mock.calls[0][1]).toMatch(/can't be OR'd|only the last/i);
+        });
+
+        it('does not warn for a single author or for owners', async () => {
+            mockedGetGhAuthStatus.mockResolvedValue({ available: true, username: 'testuser' });
+            const warn = vi.fn();
+            const logger = { warn } as unknown as Parameters<GhCliIntegration['initialize']>[1];
+            await integration.initialize({ prs: { authors: ['alice'], owners: ['org-a', 'org-b'] } }, logger);
+            expect(warn).not.toHaveBeenCalled();
+        });
     });
 
     describe('buildPrSearchArgs', () => {

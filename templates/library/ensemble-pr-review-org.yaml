@@ -35,6 +35,9 @@ trigger:
     - pull_request.opened
     - pull_request.synchronize
   exclude:
+    # ⚠️ REPLACE <your-github-username> with your actual GitHub login before
+    # using. Left as-is, it matches no one — so the workflow would review
+    # ALL org PRs including your own, defeating the "not me" purpose.
     author: <your-github-username>
 
 graph:

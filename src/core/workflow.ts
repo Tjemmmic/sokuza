@@ -101,12 +101,12 @@ export function matchesTrigger(
             return false;
         }
 
-        // Labels: include requires AT LEAST ONE of the listed labels to
-        // be present. Single-value labels are converted to a filter by
-        // resolveShorthands; multi-value would silently be ignored
-        // without this branch.
+        // Labels: include requires AT LEAST ONE of the listed labels to be
+        // present. All label matching (single or multi) goes through
+        // eventLabelsContainAny so globs + case-insensitivity apply uniformly
+        // — single values are no longer demoted to an exact-match filter.
         const includeLabels = trigger.labels ?? [];
-        if (includeLabels.length > 1 && !eventLabelsContainAny(event, includeLabels)) {
+        if (includeLabels.length >= 1 && !eventLabelsContainAny(event, includeLabels)) {
             return false;
         }
     }
@@ -184,9 +184,14 @@ function eventLabelsContainAny(event: EventPayload, labels: string[]): boolean {
             if (!item || typeof item !== 'object') continue;
             const name = (item as Record<string, unknown>).name;
             if (typeof name !== 'string') continue;
-            // Glob support (e.g. `needs-*`, `area/*`) so label shorthand
-            // behaves like repo/branch/author, which already glob.
-            if (labels.some((l) => (l.includes('*') ? globMatch(l, name) : l === name))) {
+            // Glob support (`needs-*`, `area/*`) + case-insensitivity (GitHub
+            // label names are case-insensitive) so label shorthand behaves
+            // like repo/branch/author.
+            const target = name.toLowerCase();
+            if (labels.some((raw) => {
+                const l = raw.toLowerCase();
+                return l.includes('*') ? globMatch(l, target) : l === target;
+            })) {
                 return true;
             }
         }

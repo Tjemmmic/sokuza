@@ -86,11 +86,14 @@ const DEFAULT_INTERVAL = 60;
  * Each gh result still flows through matchesTrigger per workflow, so one
  * poll fans out to every matching workflow (no extra `gh` calls).
  *
- * Multi-value note: `gh search prs` does NOT OR a repeated selector flag —
- * the LAST value wins (verified: `--author a --author b` returns only b's).
- * So prefer one value per selector for the common case (a single org/user is
- * all most setups need), and use the raw `search` field for genuine OR
- * queries (e.g. `search: 'org:a org:b'`, which GitHub's search engine ORs).
+ * Multi-value note (verified against `gh search prs`):
+ *   - `owners` / `repos` repeated flags OR correctly (PRs across all of them).
+ *   - `authors` / `involves` repeated flags are LAST-WINS, not OR — GitHub
+ *     can't OR these in a single query (`author:a author:b` ANDs → empty).
+ * So multiple owners/repos work; for multiple authors use the raw `search`
+ * field or separate workflows. `buildPrSearchArgs` emits the flags either
+ * way; `GhCliIntegration.initialize` warns when a last-wins selector is
+ * given more than one value so it isn't silent.
  */
 export function buildPrSearchArgs(raw: unknown): string[] {
     if (!raw || typeof raw !== 'object') return ['--author', '@me'];
@@ -156,6 +159,17 @@ export class GhCliIntegration implements Integration {
         this.username = status.username ?? '';
         this.pollInterval = (config.interval as number) ?? DEFAULT_INTERVAL;
         this.prSearchArgs = buildPrSearchArgs(config.prs);
+        // `gh search prs` can't OR multiple authors/involves (last value
+        // wins) — warn rather than silently search a subset.
+        const prs = (config.prs ?? {}) as Record<string, unknown>;
+        for (const key of ['authors', 'involves'] as const) {
+            if (Array.isArray(prs[key]) && (prs[key] as unknown[]).length > 1) {
+                _logger?.warn(
+                    { selector: key, values: prs[key] },
+                    `gh-cli: multiple \`${key}\` values can't be OR'd in one search — only the last takes effect. Use the \`search\` field or separate workflows.`,
+                );
+            }
+        }
     }
 
     registerRoutes(_server: FastifyInstance, onEvent: EventHandler): void {

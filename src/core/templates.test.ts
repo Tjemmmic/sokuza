@@ -115,15 +115,26 @@ describe('normalizeWorkflow — shorthand resolution', () => {
         expect(wf.trigger.filters?.['payload.pull_request.user.login']).toBeUndefined();
     });
 
-    it('resolves single label to array-contains filter', async () => {
+    it('keeps a single label on the trigger (not an exact-match filter, so globs work)', async () => {
         const wf = await normalizeWorkflow(
-            minWorkflow({
-                source: 'github',
-                event: 'push',
-                labels: ['bug'],
-            }),
+            minWorkflow({ source: 'github', event: 'pull_request.opened', labels: ['bug'] }),
         );
-        expect(wf.trigger.filters?.['payload.pull_request.labels[].name']).toBe('bug');
+        expect(wf.trigger.labels).toEqual(['bug']);
+        // No exact-match filter — that path can't glob.
+        expect(wf.trigger.filters?.['payload.pull_request.labels[].name']).toBeUndefined();
+    });
+
+    it('single-value label glob matches case-insensitively (regression: needs-* → Needs-Review)', async () => {
+        const wf = await normalizeWorkflow(
+            minWorkflow({ source: 'github', event: 'pull_request.opened', labels: ['needs-*'] }),
+        );
+        const base = { source: 'github', event: 'pull_request.opened', timestamp: '', metadata: {} };
+        expect(matchesTrigger(wf, { ...base,
+            payload: { pull_request: { labels: [{ name: 'needs-review' }] } } } as EventPayload)).toBe(true);
+        expect(matchesTrigger(wf, { ...base,
+            payload: { pull_request: { labels: [{ name: 'Needs-Review' }] } } } as EventPayload)).toBe(true);
+        expect(matchesTrigger(wf, { ...base,
+            payload: { pull_request: { labels: [{ name: 'bug' }] } } } as EventPayload)).toBe(false);
     });
 
     it('keeps multi-value labels on trigger for multi-match resolution', async () => {
