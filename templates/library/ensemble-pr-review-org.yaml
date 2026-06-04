@@ -1,0 +1,156 @@
+# Ensemble PR Review — Org / others' PRs (auto, multi-provider + synthesis)
+#
+# Automatically review every PR in an org that you did NOT author, with
+# several reviewers running IN PARALLEL, then one synthesis pass merges them
+# into a single posted review. Demonstrates two things the plain ensemble
+# template doesn't:
+#
+#   1. Watching OTHER people's PRs. The `gh-cli` source defaults to your own
+#      PRs (`--author @me`). To watch an org, widen its search in config:
+#
+#        integrations:
+#          gh-cli:
+#            prs:
+#              owners: [my-org]        # all open PRs in my-org (every author)
+#
+#      (Or use `source: github-poll` with `orgs: [my-org]`.) The trigger's
+#      `exclude.author` then carves your OWN PRs back out, so this only fires
+#      on PRs by others. One poll fans out to every matching workflow.
+#
+#   2. Running the SAME provider more than once for diversity. Two legs with
+#      the same `provider` but different `temperature` produce genuinely
+#      different reviews (temperature applies to API providers; CLI providers
+#      ignore it). Tune the count/providers/temperatures to taste.
+#
+# Replace `<your-github-username>` and the example providers (zai-glm, kimi)
+# with yours. Each leg is `on_error: continue`, so an unavailable provider
+# just drops out and the synthesis proceeds with whatever came back.
+
+description: Auto-review an org's PRs you didn't author — 4 parallel reviewers (2 providers × 2 temperatures), synthesized
+icon: 🏛️
+
+trigger:
+  source: gh-cli
+  event:
+    - pull_request.opened
+    - pull_request.synchronize
+  exclude:
+    author: <your-github-username>
+
+graph:
+  nodes:
+    - id: trigger
+      type: trigger.gh-cli
+      position: { x: 60, y: 320 }
+      config:
+        events: [pull_request.opened, pull_request.synchronize]
+        exclude_authors: <your-github-username>
+    - id: fetch_diff
+      type: github.fetch-diff
+      position: { x: 320, y: 320 }
+      config: {}
+    # ── Four reviewers in parallel: two providers × two temperatures. ──
+    - id: review_a1
+      type: ai.review
+      position: { x: 600, y: 60 }
+      config: { provider: zai-glm, temperature: 0.3, timeout: 0 }
+      on_error: continue
+    - id: review_a2
+      type: ai.review
+      position: { x: 600, y: 220 }
+      config: { provider: zai-glm, temperature: 0.9, timeout: 0 }
+      on_error: continue
+    - id: review_b1
+      type: ai.review
+      position: { x: 600, y: 420 }
+      config: { provider: kimi, temperature: 0.3, timeout: 0 }
+      on_error: continue
+    - id: review_b2
+      type: ai.review
+      position: { x: 600, y: 580 }
+      config: { provider: kimi, temperature: 0.9, timeout: 0 }
+      on_error: continue
+    - id: synth
+      type: ai.review
+      position: { x: 920, y: 320 }
+      config:
+        timeout: 0
+        # Synthesis needs more headroom than a single review — it restates
+        # the merged findings. Raise max_tokens so the JSON isn't truncated.
+        max_tokens: 8192
+        prompt: |
+          You are the lead reviewer consolidating several INDEPENDENT code
+          reviews of the SAME pull request into ONE definitive review.
+
+          Independent reviews follow (any may be empty if that reviewer was
+          unavailable — ignore empty ones):
+
+          ===== Reviewer A1 =====
+          {{nodes.review_a1.markdown}}
+
+          ===== Reviewer A2 =====
+          {{nodes.review_a2.markdown}}
+
+          ===== Reviewer B1 =====
+          {{nodes.review_b1.markdown}}
+
+          ===== Reviewer B2 =====
+          {{nodes.review_b2.markdown}}
+
+          Merge them: drop duplicates, resolve disagreements using the diff
+          below as the tie-breaker, keep the most severe correct take on each
+          issue, and discard anything not supported by the diff.
+
+          Respond with a SINGLE JSON object and nothing else — first
+          character `{`, last `}`:
+
+          {
+            "summary": "1-3 sentence overview and your overall take.",
+            "issues": [
+              { "priority": "P1 | P2 | P3", "title": "Specific one-line title.",
+                "file": "path/to/file.ts:L42-L50",
+                "problem": "What is wrong and why it matters.",
+                "fix": "Concrete fix suggestion." }
+            ],
+            "decision": "APPROVE | CHANGES_REQUESTED",
+            "justification": "Short paragraph explaining the decision."
+          }
+
+          Decide CHANGES_REQUESTED if any P1 or 3+ P2s; otherwise APPROVE.
+          An empty issues array with APPROVE is valid. Output the JSON now.
+    - id: post
+      type: github.comment
+      position: { x: 1240, y: 320 }
+      config:
+        body: |
+          ## 🤖 AI Code Review (ensemble)
+
+          {{nodes.synth.markdown}}
+
+          ---
+          _Synthesized by Sokuza AI from multiple independent reviewers_
+  edges:
+    - from: { node: trigger, port: prNumber }
+      to: { node: fetch_diff, port: pr_number }
+    - from: { node: trigger, port: repo }
+      to: { node: fetch_diff, port: repo }
+    - from: { node: fetch_diff, port: diff }
+      to: { node: review_a1, port: diff }
+    - from: { node: fetch_diff, port: diff }
+      to: { node: review_a2, port: diff }
+    - from: { node: fetch_diff, port: diff }
+      to: { node: review_b1, port: diff }
+    - from: { node: fetch_diff, port: diff }
+      to: { node: review_b2, port: diff }
+    - from: { node: fetch_diff, port: diff }
+      to: { node: synth, port: diff }
+    - from: { node: trigger, port: prNumber }
+      to: { node: synth, port: pr_number }
+    - from: { node: trigger, port: repo }
+      to: { node: synth, port: repo }
+    - from: { node: trigger, port: prNumber }
+      to: { node: post, port: pr_number }
+    - from: { node: trigger, port: repo }
+      to: { node: post, port: repo }
+    - from: { node: synth, port: markdown }
+      to: { node: post, port: __seq }
