@@ -568,6 +568,11 @@ export interface CompletionRequest {
     model?: string;
     /** Max output tokens (API providers). */
     maxTokens?: number;
+    /** Sampling temperature (API providers). When undefined the provider's
+     *  own default is used — we don't send the field at all. Higher values
+     *  give more variation, which is what makes running the *same* provider
+     *  twice in an ensemble produce genuinely different reviews. */
+    temperature?: number;
     /** Working directory for CLI providers. */
     workdir?: string;
     logger: Logger;
@@ -588,6 +593,14 @@ export interface CompletionResult {
     model: string;
     provider: string;
     usage?: { input_tokens: number; output_tokens: number };
+    /** True when the model stopped because it hit the max-output-token cap
+     *  (Anthropic stop_reason `max_tokens` / OpenAI finish_reason `length`)
+     *  rather than finishing naturally. The output is very likely cut off —
+     *  for structured-JSON callers (ai.review, ensemble synthesis) that means
+     *  a parse failure, so callers surface this instead of silently
+     *  attributing it to a "bad model". Undefined for CLI providers, which
+     *  don't report a stop reason. */
+    truncated?: boolean;
 }
 
 /**
@@ -728,6 +741,9 @@ async function runAnthropicCompletion(
         {
             model: request.model,
             max_tokens: request.maxTokens ?? 4096,
+            // Only send temperature when the caller set one — otherwise let
+            // the model keep its own default.
+            ...(request.temperature !== undefined ? { temperature: request.temperature } : {}),
             system: request.systemPrompt,
             messages: [{ role: 'user', content: request.userMessage }],
         },
@@ -738,6 +754,14 @@ async function runAnthropicCompletion(
         .filter((block) => block.type === 'text')
         .map((block) => (block.type === 'text' ? block.text : ''))
         .join('\n');
+
+    const truncated = response.stop_reason === 'max_tokens';
+    if (truncated) {
+        request.logger.warn(
+            { provider: provider.name, model: response.model, maxTokens: request.maxTokens ?? 4096 },
+            'AI completion hit the max_tokens cap — output is likely truncated; raise max_tokens on the node',
+        );
+    }
 
     request.logger.info(
         {
@@ -757,6 +781,7 @@ async function runAnthropicCompletion(
             input_tokens: response.usage.input_tokens,
             output_tokens: response.usage.output_tokens,
         },
+        truncated,
     };
 }
 
@@ -788,6 +813,8 @@ async function runOpenAICompletion(
         body: JSON.stringify({
             model: request.model,
             max_tokens: request.maxTokens ?? 4096,
+            // Only send temperature when set — otherwise the provider default.
+            ...(request.temperature !== undefined ? { temperature: request.temperature } : {}),
             messages: [
                 { role: 'system', content: request.systemPrompt },
                 { role: 'user', content: request.userMessage },
@@ -805,7 +832,7 @@ async function runOpenAICompletion(
 
     const data = (await response.json()) as {
         model?: string;
-        choices: Array<{ message: { content: string } }>;
+        choices: Array<{ message: { content: string }; finish_reason?: string }>;
         usage?: { prompt_tokens?: number; completion_tokens?: number };
     };
 
@@ -816,6 +843,14 @@ async function runOpenAICompletion(
               output_tokens: data.usage.completion_tokens ?? 0,
           }
         : undefined;
+
+    const truncated = data.choices?.[0]?.finish_reason === 'length';
+    if (truncated) {
+        request.logger.warn(
+            { provider: provider.name, model: data.model ?? request.model, maxTokens: request.maxTokens ?? 4096 },
+            'AI completion hit the max_tokens cap — output is likely truncated; raise max_tokens on the node',
+        );
+    }
 
     request.logger.info(
         {
@@ -832,6 +867,7 @@ async function runOpenAICompletion(
         model: data.model ?? request.model,
         provider: provider.name,
         usage,
+        truncated,
     };
 }
 

@@ -328,6 +328,8 @@ const aiReviewNode = actionNode({
           helpText: 'Override the provider\'s default model. Leave blank to use the provider default.' },
         { name: 'max_diff_chars', label: 'Max Diff Chars', role: 'input', config: true, control: 'number', type: 'number' },
         { name: 'max_tokens', label: 'Max Tokens', role: 'input', config: true, control: 'number', type: 'number' },
+        { name: 'temperature', label: 'Temperature', role: 'input', config: true, control: 'number', type: 'number',
+          helpText: 'Sampling temperature for API providers (e.g. 0.0–1.0). Leave blank for the provider default. Higher = more variation — set it (e.g. 0.7) when running the SAME provider on multiple ensemble legs so each produces a genuinely different review.' },
         { name: 'parse_repair_retries', label: 'Parse Repair Retries', role: 'input', config: true, control: 'number', type: 'number', default: 1 },
         { name: 'timeout', label: 'Node Timeout (seconds)', role: 'input', config: true, control: 'number', type: 'number', default: 600,
           helpText: 'Cap on a single ai.review call. Counts against the workflow\'s queue.timeout — if the workflow cap is lower, that fires first. Set to 0 to disable the node-level cap and let only the workflow cap apply.' },

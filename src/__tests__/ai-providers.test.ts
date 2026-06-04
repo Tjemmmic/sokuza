@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import pino from 'pino';
 import {
     loadAIProviders,
@@ -9,6 +9,7 @@ import {
     spawnCli,
     commandExistsOnPath,
     listImplicitProviders,
+    runCompletionWithFallback,
 } from '../core/ai-providers.js';
 
 const TEST_LOGGER = pino({ level: 'silent' });
@@ -482,5 +483,47 @@ describe('spawnCli — abort signal propagation', () => {
             providerName: 'test-cli',
         });
         expect(stdout).toBe('hello');
+    });
+});
+
+describe('completion: temperature + truncation (openai-compatible backend)', () => {
+    const makeReg = () => loadAIProviders({
+        providers: {
+            test: { kind: 'openai-compatible-api', base_url: 'https://x.test/v1', api_key: 'k', default_model: 'm' },
+        },
+    });
+
+    afterEach(() => { vi.restoreAllMocks(); });
+
+    function mockFetch(responseBody: unknown, captured: { body?: any }) {
+        return vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
+            captured.body = JSON.parse((init as RequestInit).body as string);
+            return new Response(JSON.stringify(responseBody), {
+                status: 200, headers: { 'content-type': 'application/json' },
+            });
+        });
+    }
+
+    it('omits temperature when unset and sends it when set', async () => {
+        const captured: { body?: any } = {};
+        mockFetch({ model: 'm', choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }] }, captured);
+
+        await runCompletionWithFallback(makeReg(), 'test', { systemPrompt: 's', userMessage: 'u', logger: TEST_LOGGER });
+        expect('temperature' in captured.body).toBe(false);
+
+        await runCompletionWithFallback(makeReg(), 'test', { systemPrompt: 's', userMessage: 'u', temperature: 0.7, logger: TEST_LOGGER });
+        expect(captured.body.temperature).toBe(0.7);
+    });
+
+    it('flags truncated when finish_reason is "length"', async () => {
+        mockFetch({ model: 'm', choices: [{ message: { content: 'partial…' }, finish_reason: 'length' }] }, {});
+        const r = await runCompletionWithFallback(makeReg(), 'test', { systemPrompt: 's', userMessage: 'u', logger: TEST_LOGGER });
+        expect(r.truncated).toBe(true);
+    });
+
+    it('truncated is false on a normal stop', async () => {
+        mockFetch({ model: 'm', choices: [{ message: { content: 'done' }, finish_reason: 'stop' }] }, {});
+        const r = await runCompletionWithFallback(makeReg(), 'test', { systemPrompt: 's', userMessage: 'u', logger: TEST_LOGGER });
+        expect(r.truncated).toBe(false);
     });
 });
