@@ -25,7 +25,7 @@
 
 import Anthropic from '@anthropic-ai/sdk';
 import { spawn } from 'node:child_process';
-import { statSync } from 'node:fs';
+import { statSync, accessSync, constants } from 'node:fs';
 import { join } from 'node:path';
 import type { Logger } from 'pino';
 import { abortErrorFromSignal } from './abort-error.js';
@@ -338,6 +338,9 @@ const AUTODETECT_CLI_PROVIDERS: ReadonlyArray<{ name: string; command: string; a
 // unlike a permanent cache, which would need a restart.
 const cmdExistsCache = new Map<string, { result: boolean; checkedAt: number }>();
 const CMD_EXISTS_TTL_MS = 30_000;
+// In practice this only ever holds a handful of provider command names, but
+// bound it so a pathological caller can't grow it without limit.
+const CMD_EXISTS_CACHE_MAX = 256;
 
 export function commandExistsOnPath(command: string): boolean {
     if (!command) return false;
@@ -345,15 +348,31 @@ export function commandExistsOnPath(command: string): boolean {
     const cached = cmdExistsCache.get(command);
     if (cached && now - cached.checkedAt < CMD_EXISTS_TTL_MS) return cached.result;
     const result = scanPathForCommand(command);
+    // Cheap bound: the entries are TTL'd anyway, so on overflow just clear
+    // and let it repopulate rather than maintaining an LRU.
+    if (cmdExistsCache.size >= CMD_EXISTS_CACHE_MAX) cmdExistsCache.clear();
     cmdExistsCache.set(command, { result, checkedAt: now });
     return result;
+}
+
+/** A regular file that is also executable on POSIX (so a non-executable
+ *  file sitting on PATH isn't reported as an installed CLI). On Windows,
+ *  executability is encoded in the extension (PATHEXT), so isFile suffices. */
+function isExecutableFile(path: string): boolean {
+    try {
+        if (!statSync(path).isFile()) return false;
+        if (process.platform !== 'win32') accessSync(path, constants.X_OK);
+        return true;
+    } catch {
+        return false;
+    }
 }
 
 function scanPathForCommand(command: string): boolean {
     const isWin = process.platform === 'win32';
     // An explicit path was given — check it directly.
     if (command.includes('/') || (isWin && command.includes('\\'))) {
-        try { return statSync(command).isFile(); } catch { return false; }
+        return isExecutableFile(command);
     }
     const exts = isWin ? (process.env.PATHEXT ?? '.EXE;.CMD;.BAT;.COM').split(';') : [''];
     const dirs = (process.env.PATH ?? '').split(isWin ? ';' : ':');
@@ -361,9 +380,7 @@ function scanPathForCommand(command: string): boolean {
         const dir = rawDir.trim();
         if (!dir) continue; // skip empty and whitespace-only PATH entries
         for (const ext of exts) {
-            try {
-                if (statSync(join(dir, command + ext)).isFile()) return true;
-            } catch { /* try next */ }
+            if (isExecutableFile(join(dir, command + ext))) return true;
         }
     }
     return false;
