@@ -25,7 +25,8 @@
 
 import Anthropic from '@anthropic-ai/sdk';
 import { spawn } from 'node:child_process';
-import { statSync, accessSync, constants } from 'node:fs';
+import { statSync, accessSync, constants, mkdirSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { Logger } from 'pino';
 import { abortErrorFromSignal } from './abort-error.js';
@@ -115,11 +116,14 @@ const OPENAI_FALLBACK_MODELS = [
 // Best-effort suggestion lists for the Gemini / Codex CLIs. The model
 // field is free-text, so these only seed the datalist — leave the field
 // blank to use whichever model the CLI defaults to.
+// Current Gemini 3.x first (verified resolvable via the CLI), then 2.5.
+// Note: there is no `gemini-3.x-flash` / `gemini-3.5-flash` — the 3.x
+// Flash tier is the `-lite` id below.
 const GEMINI_MODELS = [
-    'gemini-2.5-pro',
+    'gemini-3.1-flash-lite',
+    'gemini-3-pro-preview',
     'gemini-2.5-flash',
     'gemini-2.5-flash-lite',
-    'gemini-2.0-flash',
 ];
 
 const CODEX_MODELS = [
@@ -831,6 +835,29 @@ async function runOpenAICompletion(
     };
 }
 
+/**
+ * An empty, throwaway directory used as the cwd for CLI completions that
+ * have no workdir of their own. The CLI providers (gemini, codex, …) are
+ * agentic and we pass directory-trust bypass flags; running them in an
+ * isolated empty dir — instead of inheriting the daemon's cwd (which may
+ * be a real project / repo) — means a prompt-injected model that tries a
+ * file/shell tool finds nothing sensitive and has nowhere to write. We're
+ * using these providers purely for inference, so they need no real cwd.
+ * Best-effort: if the dir can't be created we fall back to no cwd.
+ */
+let _cliSandboxDir: string | undefined;
+function cliSandboxDir(): string | undefined {
+    if (_cliSandboxDir) return _cliSandboxDir;
+    try {
+        const dir = join(homedir(), '.sokuza', 'cli-sandbox');
+        mkdirSync(dir, { recursive: true });
+        _cliSandboxDir = dir;
+        return dir;
+    } catch {
+        return undefined;
+    }
+}
+
 async function runCliCompletion(
     provider: AIProvider,
     request: CompletionRequest & { model: string },
@@ -853,7 +880,9 @@ async function runCliCompletion(
         command: provider.command!,
         args: invocation.args,
         env: provider.env,
-        cwd: request.workdir,
+        // Inference-only: run in an isolated empty sandbox unless a real
+        // workdir (e.g. a PR clone) was wired in.
+        cwd: request.workdir || cliSandboxDir(),
         stdin: invocation.stdin,
         logger: request.logger,
         providerName: provider.name,
@@ -1112,9 +1141,14 @@ function buildOpencodeArgs(input: CliArgsInput): string[] {
  * - No `--system-prompt` flag and no separate agent mode — the caller
  *   folds the system prompt into the user message, and the prompt rides as
  *   the value of `-p` (appended in `buildCliInvocation`).
+ * - `--skip-trust`: newer Gemini CLIs refuse to run in a directory they
+ *   haven't "trusted" (a headless-safety gate) and exit non-zero. We run
+ *   non-interactively in the daemon's cwd (or a clone we made), so trust
+ *   it for the session — otherwise reviews fail with "not running in a
+ *   trusted directory".
  */
 function buildGeminiArgs(input: CliArgsInput): string[] {
-    const args = ['-o', 'text'];
+    const args = ['-o', 'text', '--skip-trust'];
     if (input.model) args.push('-m', input.model);
     return args;
 }
@@ -1124,14 +1158,24 @@ function buildGeminiArgs(input: CliArgsInput): string[] {
  *
  * - `exec --json` → a JSONL event stream re-assembled by `extractCliText`.
  * - `-m <model>` only when set.
+ * - `--skip-git-repo-check`: newer Codex CLIs refuse `exec` outside a
+ *   trusted git repo ("Not inside a trusted directory and
+ *   --skip-git-repo-check was not specified") and exit non-zero. We run
+ *   non-interactively for a completion, so skip that gate.
  * - Agent mode adds `--dangerously-bypass-approvals-and-sandbox` so tool
  *   use isn't blocked on approval prompts Codex can't render without a TTY
  *   (mirrors opencode's `--dangerously-skip-permissions`).
  */
 function buildCodexArgs(input: CliArgsInput): string[] {
-    const args = ['exec', '--json'];
+    const args = ['exec', '--json', '--skip-git-repo-check'];
     if (input.model) args.push('-m', input.model);
-    if (input.mode === 'agent') args.push('--dangerously-bypass-approvals-and-sandbox');
+    if (input.mode === 'agent') {
+        args.push('--dangerously-bypass-approvals-and-sandbox');
+    } else {
+        // Completion is inference-only: restrict any command the model
+        // issues to a read-only sandbox (no writes, no network).
+        args.push('--sandbox', 'read-only');
+    }
     return args;
 }
 
