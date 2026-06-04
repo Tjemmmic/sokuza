@@ -6,6 +6,7 @@ import yaml from 'js-yaml';
 import type { SokuzaConfig, EventPayload, WebhookDelivery, WorkflowRunRecord } from '../core/types.js';
 import type { WorkflowQueue } from '../core/queue.js';
 import type { ConfigStore } from '../core/config-store.js';
+import { ARGS_STYLES } from '../core/args-styles.js';
 import type { LogStore } from '../core/log-store.js';
 import { VERSION } from '../version.js';
 import { serviceStatus, installService, uninstallService, restartService, isServiceInstalled } from '../cli/service.js';
@@ -392,13 +393,18 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
     server.post('/api/workflows/:name/toggle', async (request, reply) => {
         const { name } = request.params as { name: string };
         const body = (request.body ?? {}) as { enabled?: unknown };
+        // Only an explicit boolean sets the state; anything else (missing,
+        // or a non-boolean like the string "true") flips the current state.
+        // `name` is used purely as an equality lookup below — never as a
+        // filesystem path — so no path-traversal surface.
+        const explicitEnabled = body.enabled === true ? true : body.enabled === false ? false : null;
 
         const result = await deps.configStore.updateRaw((config) => {
             const workflows = ((config.workflows as unknown[]) ?? []) as Record<string, unknown>[];
             const wf = workflows.find((w) => w.name === name);
             if (!wf) return { found: false as const, enabled: false };
-            const next = typeof body.enabled === 'boolean'
-                ? body.enabled
+            const next = explicitEnabled !== null
+                ? explicitEnabled
                 : wf.enabled === false; // currently disabled → enable, else disable
             // Keep the YAML clean: an enabled workflow is the default, so
             // drop the field rather than writing `enabled: true`.
@@ -1214,12 +1220,8 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
                 ? body.command.trim()
                 : 'claude';
             const argsStyle = body.args_style;
-            // Keep in sync with ARGS_STYLES in core/ai-providers.ts — kept
-            // local so the API server doesn't statically import the AI
-            // module (it's loaded dynamically everywhere else here).
-            const validStyles = ['claude-code', 'opencode', 'gemini', 'codex'];
-            if (typeof argsStyle !== 'string' || !validStyles.includes(argsStyle)) {
-                return new Error(`args_style must be one of: ${validStyles.join(', ')}`);
+            if (typeof argsStyle !== 'string' || !(ARGS_STYLES as readonly string[]).includes(argsStyle)) {
+                return new Error(`args_style must be one of: ${ARGS_STYLES.join(', ')}`);
             }
             entry.args_style = argsStyle;
             if (body.env && typeof body.env === 'object' && !Array.isArray(body.env)) {

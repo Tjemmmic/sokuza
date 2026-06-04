@@ -29,6 +29,7 @@ import { statSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Logger } from 'pino';
 import { abortErrorFromSignal } from './abort-error.js';
+import { ARGS_STYLES, type ArgsStyle } from './args-styles.js';
 
 /**
  * Quick non-blocking check that a CLI binary is on PATH.
@@ -272,10 +273,12 @@ export type ProviderKind = 'anthropic-api' | 'openai-compatible-api' | 'cli';
  * How CLI args are laid out for a given binary. Each style is a distinct
  * function in `buildCliArgs()` — add a new value here when adding a CLI.
  */
-export type ArgsStyle = 'claude-code' | 'opencode' | 'gemini' | 'codex';
-
-/** Every valid `args_style`. Single source of truth for validation. */
-export const ARGS_STYLES: readonly ArgsStyle[] = ['claude-code', 'opencode', 'gemini', 'codex'];
+// `ArgsStyle` / `ARGS_STYLES` now live in the dependency-free `args-styles`
+// module (so the API server can validate against them without importing
+// this Anthropic-SDK-loading module). Re-exported here for back-compat
+// with existing `from './ai-providers.js'` imports.
+export { ARGS_STYLES };
+export type { ArgsStyle };
 
 export interface AIProvider {
     name: string;
@@ -329,8 +332,24 @@ const AUTODETECT_CLI_PROVIDERS: ReadonlyArray<{ name: string; command: string; a
  * (which spawns `cmd --version`), this just scans `PATH` for an executable
  * file, so it's safe to call from the synchronous `loadAIProviders`.
  */
+// Short-TTL cache so `listImplicitProviders` (called per
+// `GET /api/ai/providers`) doesn't re-stat the whole PATH on every
+// request, while still picking up a newly-installed CLI within the TTL —
+// unlike a permanent cache, which would need a restart.
+const cmdExistsCache = new Map<string, { result: boolean; checkedAt: number }>();
+const CMD_EXISTS_TTL_MS = 30_000;
+
 export function commandExistsOnPath(command: string): boolean {
     if (!command) return false;
+    const now = Date.now();
+    const cached = cmdExistsCache.get(command);
+    if (cached && now - cached.checkedAt < CMD_EXISTS_TTL_MS) return cached.result;
+    const result = scanPathForCommand(command);
+    cmdExistsCache.set(command, { result, checkedAt: now });
+    return result;
+}
+
+function scanPathForCommand(command: string): boolean {
     const isWin = process.platform === 'win32';
     // An explicit path was given — check it directly.
     if (command.includes('/') || (isWin && command.includes('\\'))) {

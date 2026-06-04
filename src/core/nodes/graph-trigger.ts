@@ -25,6 +25,9 @@ const TRIGGER_TYPE_TO_SOURCE: Record<string, string> = {
     'trigger.manual': 'manual',
 };
 
+// Reverse map. Assumes the source strings in TRIGGER_TYPE_TO_SOURCE are
+// unique (they are — one node type per source); if a future entry reused a
+// source, the inversion would silently keep the last one.
 const SOURCE_TO_TRIGGER_TYPE: Record<string, string> = Object.fromEntries(
     Object.entries(TRIGGER_TYPE_TO_SOURCE).map(([type, src]) => [src, type]),
 );

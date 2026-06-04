@@ -300,4 +300,64 @@ graph:
         // Presets cleaned → no orphans in the palette.
         expect(await presetStore.list()).toEqual([]);
     });
+
+    // ─── POST /api/workflows/:name/toggle ───────────────────────────────
+
+    const readWf = async (name: string): Promise<Record<string, unknown> | undefined> => {
+        const raw = yaml.load(await configStore.readRaw()) as Record<string, unknown>;
+        return ((raw.workflows as Record<string, unknown>[]) ?? []).find((w) => w.name === name);
+    };
+
+    async function createWf(name: string): Promise<void> {
+        await server.inject({
+            method: 'POST',
+            url: '/api/workflows',
+            payload: { name, trigger: { source: 'manual', event: 'manual' }, graph: { nodes: [{ id: 'n1' }], edges: [] } },
+        });
+    }
+
+    it('toggle with no body flips enabled→disabled then disabled→enabled', async () => {
+        await createWf('flip-me');
+
+        const off = await server.inject({ method: 'POST', url: '/api/workflows/flip-me/toggle' });
+        expect(off.statusCode).toBe(200);
+        expect(JSON.parse(off.payload).enabled).toBe(false);
+        expect((await readWf('flip-me'))?.enabled).toBe(false); // persisted
+
+        const on = await server.inject({ method: 'POST', url: '/api/workflows/flip-me/toggle' });
+        expect(JSON.parse(on.payload).enabled).toBe(true);
+        // Re-enabled → the `enabled` field is dropped (enabled is the default).
+        expect((await readWf('flip-me'))?.enabled).toBeUndefined();
+    });
+
+    it('toggle with explicit { enabled } sets the state directly', async () => {
+        await createWf('set-me');
+
+        const disable = await server.inject({
+            method: 'POST', url: '/api/workflows/set-me/toggle', payload: { enabled: false },
+        });
+        expect(JSON.parse(disable.payload).enabled).toBe(false);
+        expect((await readWf('set-me'))?.enabled).toBe(false);
+
+        const enable = await server.inject({
+            method: 'POST', url: '/api/workflows/set-me/toggle', payload: { enabled: true },
+        });
+        expect(JSON.parse(enable.payload).enabled).toBe(true);
+        expect((await readWf('set-me'))?.enabled).toBeUndefined();
+    });
+
+    it('a non-boolean enabled value flips rather than coercing to a truthy set', async () => {
+        await createWf('coerce-me'); // starts enabled (no field)
+        const res = await server.inject({
+            method: 'POST', url: '/api/workflows/coerce-me/toggle', payload: { enabled: 'true' },
+        });
+        // "true" is not a boolean → flip (enabled default → disabled).
+        expect(JSON.parse(res.payload).enabled).toBe(false);
+        expect((await readWf('coerce-me'))?.enabled).toBe(false);
+    });
+
+    it('toggle on a missing workflow → 404', async () => {
+        const res = await server.inject({ method: 'POST', url: '/api/workflows/nope/toggle' });
+        expect(res.statusCode).toBe(404);
+    });
 });
