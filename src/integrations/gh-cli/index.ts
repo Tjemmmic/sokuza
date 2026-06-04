@@ -77,14 +77,20 @@ const DEFAULT_INTERVAL = 60;
  *   integrations:
  *     gh-cli:
  *       prs:
- *         owners: [my-org]        # all PRs in these orgs/users  → --owner
- *         authors: [alice, bob]   # PRs by these authors         → --author
- *         repos: [my-org/api]     # specific repos               → --repo
- *         involves: [@me]         # PRs you're involved in       → --involves
+ *         owners: [my-org]        # PRs in this org/user    → --owner
+ *         authors: [alice]        # PRs by this author      → --author
+ *         repos: [my-org/api]     # this repo               → --repo
+ *         involves: ["@me"]       # PRs you're involved in  → --involves
  *         search: 'draft:false'   # extra raw qualifiers (positional)
  * Then a workflow's `exclude.author: <you>` carves your own PRs back out.
  * Each gh result still flows through matchesTrigger per workflow, so one
  * poll fans out to every matching workflow (no extra `gh` calls).
+ *
+ * Multi-value note: `gh search prs` does NOT OR a repeated selector flag —
+ * the LAST value wins (verified: `--author a --author b` returns only b's).
+ * So prefer one value per selector for the common case (a single org/user is
+ * all most setups need), and use the raw `search` field for genuine OR
+ * queries (e.g. `search: 'org:a org:b'`, which GitHub's search engine ORs).
  */
 export function buildPrSearchArgs(raw: unknown): string[] {
     if (!raw || typeof raw !== 'object') return ['--author', '@me'];
@@ -192,7 +198,12 @@ export class GhCliIntegration implements Integration {
             'search', 'prs',
             ...selectorArgs,
             '--state', 'open',
-            '--json', 'number,title,url,state,isDraft,updatedAt,labels,repository',
+            // `author` is required: when the search is widened past @me (org
+            // watching), the emitted payload's pull_request.user.login comes
+            // from here, and that's what trigger `exclude.author` matches on.
+            // Without it the author is only known via the per-PR enrichment
+            // call and falls back to the poller's own username.
+            '--json', 'number,title,url,state,isDraft,updatedAt,labels,repository,author',
             '--limit', '50',
         ]);
     }

@@ -6,9 +6,10 @@ vi.mock('./exec.js', () => ({
 }));
 
 import { GhCliIntegration, buildPrSearchArgs } from './index.js';
-import { getGhAuthStatus } from './exec.js';
+import { getGhAuthStatus, ghJson } from './exec.js';
 
 const mockedGetGhAuthStatus = vi.mocked(getGhAuthStatus);
+const mockedGhJson = vi.mocked(ghJson);
 
 describe('GhCliIntegration', () => {
     let integration: GhCliIntegration;
@@ -93,6 +94,30 @@ describe('GhCliIntegration', () => {
         it('puts raw search qualifiers first as the positional query', () => {
             expect(buildPrSearchArgs({ owners: ['my-org'], search: 'draft:false' }))
                 .toEqual(['draft:false', '--owner', 'my-org']);
+        });
+    });
+
+    describe('author propagation (drives exclude.author on widened searches)', () => {
+        it('searchPrs requests the author field', async () => {
+            mockedGhJson.mockResolvedValue([]);
+            await GhCliIntegration.searchPrs(['--owner', 'my-org']);
+            const callArgs = mockedGhJson.mock.calls[0][0] as string[];
+            expect(callArgs).toContain('--owner');
+            const jsonFields = callArgs[callArgs.indexOf('--json') + 1];
+            expect(jsonFields).toContain('author');
+        });
+
+        it('maps the PR author into payload.pull_request.user.login', async () => {
+            const events: Array<{ payload: { pull_request: { user: { login: string } } } }> = [];
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            (integration as any).onEvent = async (e: any) => { events.push(e); };
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            await (integration as any).emitPrEvent('pull_request.opened', 'my-org/api', {
+                number: 7, title: 't', state: 'OPEN', isDraft: false, url: 'u',
+                author: { login: 'alice' }, headRefName: 'feat', baseRefName: 'main', labels: [],
+            });
+            expect(events).toHaveLength(1);
+            expect(events[0].payload.pull_request.user.login).toBe('alice');
         });
     });
 });

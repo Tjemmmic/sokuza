@@ -97,9 +97,10 @@ graph:
           ===== Reviewer B2 =====
           {{nodes.review_b2.markdown}}
 
-          Merge them: drop duplicates, resolve disagreements using the diff
-          below as the tie-breaker, keep the most severe correct take on each
-          issue, and discard anything not supported by the diff.
+          Merge them: drop duplicates, resolve disagreements using the PR
+          diff (provided to you as context) as the tie-breaker, keep the most
+          severe correct take on each issue, and discard anything the diff
+          does not support.
 
           Respond with a SINGLE JSON object and nothing else — first
           character `{`, last `}`:
