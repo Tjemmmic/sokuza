@@ -241,6 +241,8 @@ const libraryItems = window.libraryItems = [
 
     // ── Advanced Code Quality (Skills-inspired) ──
     { id: 'pr-inspector', name: 'PR Inspector', description: 'Senior-level PR review with P1/P2/P3 severity prioritization, AI slop detection, full-context analysis, and mandatory approve/reject decision.', category: 'code-quality', icon: '🔎', tags: ['ai', 'review', 'pr', 'structured', 'severity'], template: 'pr-inspector', requiredIntegrations: ['github'], difficulty: 'easy', status: 'available', popular: true, defaultTrigger: { source: ['github', 'gh-cli'], event: ['pull_request.opened'] } },
+    { id: 'ensemble-pr-review', name: 'Ensemble PR Review', description: 'Reviews a PR with several AI providers in parallel, then a final pass synthesizes their findings into one combined review. More robust; each leg is optional (on_error: continue).', category: 'code-quality', icon: '🧑‍⚖️', tags: ['ai', 'review', 'pr', 'multi-provider', 'ensemble', 'synthesis'], template: 'ensemble-pr-review', requiredIntegrations: ['github'], difficulty: 'medium', status: 'available', popular: true, defaultTrigger: { source: ['github'], event: ['pull_request.opened'] } },
+    { id: 'ensemble-pr-review-manual', name: 'Ensemble PR Review (Manual)', description: 'On-demand multi-provider PR review: pick a PR, run several AIs in parallel, synthesize one combined review.', category: 'code-quality', icon: '🧑‍⚖️', tags: ['ai', 'review', 'pr', 'multi-provider', 'ensemble', 'manual'], template: 'ensemble-pr-review-manual', requiredIntegrations: ['github'], difficulty: 'medium', status: 'available', popular: false, defaultTrigger: { source: ['manual'], event: ['manual'] } },
     { id: 'deep-audit', name: 'Deep Audit', description: 'Staff-engineer-level codebase audit across correctness, architecture, and standards — auto-detects project type and scores code X/10.', category: 'code-quality', icon: '🔬', tags: ['audit', 'quality', 'scoring', 'architecture'], template: 'deep-audit', requiredIntegrations: ['github'], difficulty: 'medium', status: 'available', popular: true, defaultTrigger: { source: ['manual'], event: ['manual'] } },
     { id: 'quality-loop', name: 'Quality Loop', description: 'Iterative improvement engine: audit → fix → test → re-rate across 5 dimensions — repeats until target score met (default 9/10).', category: 'code-quality', icon: '🔄', tags: ['quality', 'iterative', 'improvement', 'scoring'], template: 'quality-loop', requiredIntegrations: ['github'], difficulty: 'advanced', status: 'available', popular: true, defaultTrigger: { source: ['manual'], event: ['manual'] } },
     { id: 'ship-check', name: 'Ship Check', description: 'Pre-merge verification: runs tests, scans for debug artifacts and secrets, checks build — posts pass/fail table with SHIP IT or HOLD verdict.', category: 'code-quality', icon: '✅', tags: ['verification', 'pre-merge', 'checklist'], template: 'ship-check', requiredIntegrations: ['github'], difficulty: 'easy', status: 'available', popular: true, defaultTrigger: { source: ['manual'], event: ['manual'] } },
@@ -1257,6 +1259,7 @@ async function renderWorkflows(el) {
                 <td style="text-align:right">
                     <div class="btn-group" style="justify-content:flex-end">
                         <button class="btn ${hasInputs ? 'btn-primary' : 'btn-ghost'} btn-sm" onclick="openRunModal('${esc(wf.name)}')" title="Run workflow manually">${hasInputs ? '▶ Run' : '▶'}</button>
+                        <button class="btn btn-ghost btn-sm" onclick="toggleWorkflow('${esc(wf.name)}', ${wf.enabled === false})" title="${wf.enabled === false ? 'Enable — resume processing events' : 'Pause — stop processing events'}">${wf.enabled === false ? '▶ Enable' : '⏸ Pause'}</button>
                         <button class="btn btn-ghost btn-sm" onclick="openWorkflowEditor('${esc(wf.name)}')">Edit</button>
                         <button class="btn btn-ghost btn-sm" onclick="duplicateWorkflow('${esc(wf.name)}')">Duplicate</button>
                         <button class="btn btn-danger-outline btn-sm" onclick="deleteWorkflow('${esc(wf.name)}')">Delete</button>
@@ -2205,6 +2208,16 @@ window.saveWorkflowFromEditor = async function (existingName) {
     } catch (err) {
         toast('Failed to save workflow', 'error');
     }
+};
+
+window.toggleWorkflow = async function (name, enable) {
+    try {
+        const r = await api.post(`/api/workflows/${encodeURIComponent(name)}/toggle`, { enabled: enable });
+        toast(`${name} ${r.enabled ? 'enabled' : 'paused'}`);
+    } catch (err) {
+        toast(`Toggle failed: ${err.message}`, 'error');
+    }
+    navigate('workflows');
 };
 
 window.deleteWorkflow = async function (name) {
@@ -6034,8 +6047,14 @@ window.systemServiceRestart = async function (btn) {
 
 window.systemCheckUpdate = async function () {
     try {
-        await api.post('/api/system/update/check', {});
-        toast('Update check complete');
+        const r = await api.post('/api/system/update/check', {});
+        if (r && r.checkOk === false) {
+            toast(`Update check failed: ${r.checkError || 'could not reach npm registry'}`, 'error');
+        } else if (r && r.updateAvailable) {
+            toast(`Update available: ${r.latest}`, 'success');
+        } else {
+            toast(`Up to date${r && r.latest ? ` (latest: ${r.latest})` : ''}`);
+        }
     } catch (err) {
         toast(`Check failed: ${err.message}`, 'error');
     }

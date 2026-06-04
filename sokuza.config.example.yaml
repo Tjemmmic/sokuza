@@ -50,6 +50,26 @@ ai:
       args_style: opencode
       default_model: glm-4.6
 
+    # Gemini CLI — headless `gemini -p` completion. Leave default_model
+    # blank to use the CLI's own default.
+    gemini:
+      kind: cli
+      command: gemini
+      args_style: gemini
+      # default_model: gemini-2.5-flash
+
+    # Codex CLI — headless `codex exec --json`. Auth via the Codex CLI.
+    codex:
+      kind: cli
+      command: codex
+      args_style: codex
+      # default_model: gpt-5-codex
+
+  # NOTE: gemini, codex, opencode (and the built-in claude-code) are also
+  # AUTO-DETECTED — if the binary is on your PATH they show up as providers
+  # in the dashboard with no config entry at all. Declare them explicitly
+  # only when you want to pin a model, env, or a non-PATH command path.
+
 # ─── Integrations ────────────────────────────────────────────────────────────
 # Enable the integrations you need. Each one auto-registers its actions.
 

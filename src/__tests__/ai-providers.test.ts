@@ -7,6 +7,8 @@ import {
     buildCliInvocation,
     extractCliText,
     spawnCli,
+    commandExistsOnPath,
+    listImplicitProviders,
 } from '../core/ai-providers.js';
 
 const TEST_LOGGER = pino({ level: 'silent' });
@@ -249,6 +251,42 @@ describe('buildCliInvocation', () => {
         expect(inv.stdin).toBeNull();
         expect(inv.args[inv.args.length - 1]).toBe('user prompt here');
     });
+
+    it('gemini: prompt rides after -p, text output, stdin null', () => {
+        const inv = buildCliInvocation(
+            'gemini',
+            { mode: 'completion', model: 'gemini-2.5-pro', systemPrompt: 'sys' },
+            'the prompt',
+        );
+        expect(inv.stdin).toBeNull();
+        expect(inv.args).toEqual(['-o', 'text', '-m', 'gemini-2.5-pro', '-p', 'the prompt']);
+    });
+
+    it('gemini: omits -m when no model is given (CLI default)', () => {
+        const inv = buildCliInvocation(
+            'gemini',
+            { mode: 'completion', model: '', systemPrompt: 'sys' },
+            'p',
+        );
+        expect(inv.args).toEqual(['-o', 'text', '-p', 'p']);
+    });
+
+    it('codex: exec --json with positional prompt, stdin null', () => {
+        const inv = buildCliInvocation(
+            'codex',
+            { mode: 'completion', model: 'gpt-5', systemPrompt: 'sys' },
+            'the prompt',
+        );
+        expect(inv.stdin).toBeNull();
+        expect(inv.args).toEqual(['exec', '--json', '-m', 'gpt-5', 'the prompt']);
+    });
+
+    it('codex: agent mode adds the bypass flag', () => {
+        const args = buildCliArgs('codex', {
+            mode: 'agent', model: 'gpt-5', outputFormat: 'json', allowedTools: [],
+        });
+        expect(args).toContain('--dangerously-bypass-approvals-and-sandbox');
+    });
 });
 
 describe('extractCliText', () => {
@@ -314,6 +352,61 @@ describe('extractCliText', () => {
         // the diagnostic.
         const jsonl = '{"type":"error","error":{"name":"UnknownError"}}';
         expect(extractCliText('opencode', jsonl)).toBe('[opencode-error] UnknownError');
+    });
+
+    it('gemini: returns trimmed raw text (like claude-code)', () => {
+        expect(extractCliText('gemini', '  {"ok":true}\n\n')).toBe('{"ok":true}');
+    });
+
+    it('codex: concatenates text events from the JSONL stream', () => {
+        const jsonl = [
+            '{"type":"thread.started","thread_id":"t1"}',
+            '{"type":"turn.started"}',
+            '{"type":"text","text":"hello "}',
+            '{"type":"text","text":"world"}',
+            '{"type":"turn.completed"}',
+        ].join('\n');
+        expect(extractCliText('codex', jsonl)).toBe('hello world');
+    });
+
+    it('codex: reads an assistant message from item.completed', () => {
+        const jsonl = '{"type":"item.completed","item":{"type":"assistant_message","text":"answer"}}';
+        expect(extractCliText('codex', jsonl)).toBe('answer');
+    });
+
+    it('codex: surfaces turn.failed errors with a sentinel when no text', () => {
+        const jsonl = '{"type":"turn.failed","error":{"message":"401 Unauthorized"}}';
+        expect(extractCliText('codex', jsonl)).toBe('[codex-error] 401 Unauthorized');
+    });
+});
+
+describe('CLI provider auto-detection', () => {
+    it('commandExistsOnPath finds a real binary and rejects a fake one', () => {
+        expect(commandExistsOnPath('node')).toBe(true);
+        expect(commandExistsOnPath('definitely-not-a-real-binary-xyz123')).toBe(false);
+    });
+
+    it('listImplicitProviders always includes the always-on defaults', () => {
+        const names = listImplicitProviders().map((p) => p.name);
+        expect(names).toContain('claude-code');
+        expect(names).toContain('anthropic');
+    });
+
+    it('accepts gemini/codex args_style in config', () => {
+        const reg = loadAIProviders({
+            providers: {
+                g: { kind: 'cli', command: 'gemini', args_style: 'gemini' },
+                c: { kind: 'cli', command: 'codex', args_style: 'codex' },
+            },
+        });
+        expect(reg.providers.get('g')?.argsStyle).toBe('gemini');
+        expect(reg.providers.get('c')?.argsStyle).toBe('codex');
+    });
+
+    it('rejects an unknown args_style', () => {
+        expect(() => loadAIProviders({
+            providers: { x: { kind: 'cli', command: 'foo', args_style: 'bogus' } },
+        })).toThrow(/args_style must be one of/);
     });
 });
 

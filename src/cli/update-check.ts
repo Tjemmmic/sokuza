@@ -7,7 +7,7 @@ import { VERSION } from '../version.js';
 const CACHE_PATH = join(homedir(), '.sokuza', 'update-check.json');
 const CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const REGISTRY_URL = 'https://registry.npmjs.org/sokuza/latest';
-const FETCH_TIMEOUT_MS = 3000;
+const FETCH_TIMEOUT_MS = 5000;
 
 export interface Cache {
     checkedAt: number;
@@ -36,27 +36,47 @@ export interface RefreshOptions {
     force?: boolean;
 }
 
+export interface RefreshResult {
+    /** True when the cache holds a usable `latest` (freshly fetched or still-fresh). */
+    ok: boolean;
+    latest?: string;
+    /** Human-readable reason the check failed — surfaced by the dashboard button. */
+    error?: string;
+}
+
 /**
  * Fetch the latest published version from the npm registry and write it to
  * the cache file used by `maybeNotifyUpdate`. No-op when the cache is still
  * fresh unless `force: true` is passed (used by the dashboard's explicit
- * "Check for updates" button). Safe to fire-and-forget: the caller doesn't
- * need the result, only the side effect for future invocations.
+ * "Check for updates" button).
+ *
+ * Returns a result so the dashboard can tell the user whether the check
+ * actually succeeded. Fire-and-forget callers (the `start` process) can
+ * ignore the return value — it never throws.
  */
-export async function refreshUpdateCache(opts: RefreshOptions = {}): Promise<void> {
+export async function refreshUpdateCache(opts: RefreshOptions = {}): Promise<RefreshResult> {
     try {
         if (!opts.force) {
             const cache = await readCache();
-            if (cache && Date.now() - cache.checkedAt < CHECK_INTERVAL_MS) return;
+            if (cache && Date.now() - cache.checkedAt < CHECK_INTERVAL_MS) {
+                return { ok: true, latest: cache.latest };
+            }
         }
 
+        // No `accept: application/vnd.npm.install-v1+json` header: that
+        // abbreviated-metadata media type is for the *packument*
+        // (`/sokuza`); on the `/sokuza/latest` version endpoint npm returns
+        // an empty body for it, which is why the cache used to get stuck on
+        // a stale version. The default JSON for `/latest` is the version
+        // manifest with a `version` field.
         const res = await fetch(REGISTRY_URL, {
-            headers: { accept: 'application/vnd.npm.install-v1+json' },
             signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
         });
-        if (!res.ok) return;
+        if (!res.ok) return { ok: false, error: `npm registry returned HTTP ${res.status}` };
         const body = (await res.json()) as { version?: unknown };
-        if (typeof body.version !== 'string' || body.version.length === 0) return;
+        if (typeof body.version !== 'string' || body.version.length === 0) {
+            return { ok: false, error: 'npm registry response had no version field' };
+        }
 
         await mkdir(dirname(CACHE_PATH), { recursive: true });
         await writeFile(
@@ -64,8 +84,9 @@ export async function refreshUpdateCache(opts: RefreshOptions = {}): Promise<voi
             JSON.stringify({ checkedAt: Date.now(), latest: body.version }),
             'utf-8',
         );
-    } catch {
-        // best-effort — next invocation will try again
+        return { ok: true, latest: body.version };
+    } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : String(err) };
     }
 }
 

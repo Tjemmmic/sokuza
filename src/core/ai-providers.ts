@@ -25,6 +25,8 @@
 
 import Anthropic from '@anthropic-ai/sdk';
 import { spawn } from 'node:child_process';
+import { statSync } from 'node:fs';
+import { join } from 'node:path';
 import type { Logger } from 'pino';
 import { abortErrorFromSignal } from './abort-error.js';
 
@@ -109,6 +111,23 @@ const OPENAI_FALLBACK_MODELS = [
     'gpt-4-turbo',
 ];
 
+// Best-effort suggestion lists for the Gemini / Codex CLIs. The model
+// field is free-text, so these only seed the datalist — leave the field
+// blank to use whichever model the CLI defaults to.
+const GEMINI_MODELS = [
+    'gemini-2.5-pro',
+    'gemini-2.5-flash',
+    'gemini-2.5-flash-lite',
+    'gemini-2.0-flash',
+];
+
+const CODEX_MODELS = [
+    'gpt-5-codex',
+    'gpt-5',
+    'o4-mini',
+    'o3',
+];
+
 function isZaiEndpoint(url: string | undefined): boolean {
     return !!url && /(?:^|\.)z\.ai(?:$|\/|:)/.test(url);
 }
@@ -153,6 +172,20 @@ export async function listModelSuggestions(
             return {
                 models: zaiRedirect ? ZAI_GLM_MODELS : CLAUDE_CLI_MODELS,
                 source: 'hardcoded',
+            };
+        }
+        if (config.command === 'gemini') {
+            return {
+                models: GEMINI_MODELS,
+                source: 'hardcoded',
+                note: 'Best-effort list — leave blank for the CLI default, or type any Gemini model.',
+            };
+        }
+        if (config.command === 'codex') {
+            return {
+                models: CODEX_MODELS,
+                source: 'hardcoded',
+                note: 'Best-effort list — leave blank for the CLI default, or type any model your Codex CLI supports.',
             };
         }
         return { models: [], source: 'none' };
@@ -239,7 +272,10 @@ export type ProviderKind = 'anthropic-api' | 'openai-compatible-api' | 'cli';
  * How CLI args are laid out for a given binary. Each style is a distinct
  * function in `buildCliArgs()` — add a new value here when adding a CLI.
  */
-export type ArgsStyle = 'claude-code' | 'opencode';
+export type ArgsStyle = 'claude-code' | 'opencode' | 'gemini' | 'codex';
+
+/** Every valid `args_style`. Single source of truth for validation. */
+export const ARGS_STYLES: readonly ArgsStyle[] = ['claude-code', 'opencode', 'gemini', 'codex'];
 
 export interface AIProvider {
     name: string;
@@ -271,6 +307,67 @@ const LEGACY_ALIASES: Record<string, string> = {
     // 'claude-code' is also a default registry key, no alias needed
 };
 
+// ─── Auto-detected CLI providers ────────────────────────────────────────────
+
+/**
+ * Known CLI providers that should "just show up" when their binary is on
+ * PATH, with no config required. Detected synchronously at registry-load
+ * time (and surfaced in the dashboard provider list). A user-declared
+ * provider with the same name always wins.
+ *
+ * `claude-code` and `anthropic` are registered unconditionally elsewhere
+ * (they're the historical defaults), so they're not repeated here.
+ */
+const AUTODETECT_CLI_PROVIDERS: ReadonlyArray<{ name: string; command: string; argsStyle: ArgsStyle }> = [
+    { name: 'gemini', command: 'gemini', argsStyle: 'gemini' },
+    { name: 'codex', command: 'codex', argsStyle: 'codex' },
+    { name: 'opencode', command: 'opencode', argsStyle: 'opencode' },
+];
+
+/**
+ * Synchronous "is this command on PATH" check. Unlike `isCliInstalled`
+ * (which spawns `cmd --version`), this just scans `PATH` for an executable
+ * file, so it's safe to call from the synchronous `loadAIProviders`.
+ */
+export function commandExistsOnPath(command: string): boolean {
+    if (!command) return false;
+    const isWin = process.platform === 'win32';
+    // An explicit path was given — check it directly.
+    if (command.includes('/') || (isWin && command.includes('\\'))) {
+        try { return statSync(command).isFile(); } catch { return false; }
+    }
+    const exts = isWin ? (process.env.PATHEXT ?? '.EXE;.CMD;.BAT;.COM').split(';') : [''];
+    const dirs = (process.env.PATH ?? '').split(isWin ? ';' : ':');
+    for (const dir of dirs) {
+        if (!dir) continue;
+        for (const ext of exts) {
+            try {
+                if (statSync(join(dir, command + ext)).isFile()) return true;
+            } catch { /* try next */ }
+        }
+    }
+    return false;
+}
+
+/**
+ * Built-in + auto-detected providers that should appear in the dashboard
+ * even without an explicit `ai.providers` config entry: the two always-on
+ * defaults plus any known CLI found on PATH. The dashboard merges these
+ * with config-declared providers (config wins on name collision).
+ */
+export function listImplicitProviders(): Array<{ name: string; entry: Record<string, unknown> }> {
+    const out: Array<{ name: string; entry: Record<string, unknown> }> = [
+        { name: 'claude-code', entry: { kind: 'cli', command: 'claude', args_style: 'claude-code', default_model: 'sonnet' } },
+        { name: 'anthropic', entry: { kind: 'anthropic-api', default_model: 'claude-sonnet-4-6' } },
+    ];
+    for (const p of AUTODETECT_CLI_PROVIDERS) {
+        if (commandExistsOnPath(p.command)) {
+            out.push({ name: p.name, entry: { kind: 'cli', command: p.command, args_style: p.argsStyle } });
+        }
+    }
+    return out;
+}
+
 // ─── Registry loading ───────────────────────────────────────────────────────
 
 /**
@@ -299,6 +396,22 @@ export function loadAIProviders(
         apiKey: process.env.ANTHROPIC_API_KEY,
         defaultModel: 'claude-sonnet-4-6',
     });
+
+    // ─── Auto-register known CLIs found on PATH ─────────────────────────
+    // So `gemini`, `codex`, `opencode` "just work" as providers when
+    // installed, without a config entry. User-declared providers (below)
+    // override these by name.
+    for (const known of AUTODETECT_CLI_PROVIDERS) {
+        if (providers.has(known.name)) continue;
+        if (commandExistsOnPath(known.command)) {
+            providers.set(known.name, {
+                name: known.name,
+                kind: 'cli',
+                command: known.command,
+                argsStyle: known.argsStyle,
+            });
+        }
+    }
 
     // ─── Merge user-declared providers ──────────────────────────────────
     const userProviders = (raw?.providers ?? {}) as Record<string, unknown>;
@@ -370,9 +483,9 @@ function parseProvider(name: string, raw: Record<string, unknown>): AIProvider {
     if (kind === 'cli') {
         provider.command = (raw.command as string | undefined) ?? 'claude';
         provider.argsStyle = (raw.args_style as ArgsStyle | undefined) ?? 'claude-code';
-        if (provider.argsStyle !== 'claude-code' && provider.argsStyle !== 'opencode') {
+        if (!ARGS_STYLES.includes(provider.argsStyle)) {
             throw new Error(
-                `ai.providers.${name}.args_style must be "claude-code" or "opencode"`,
+                `ai.providers.${name}.args_style must be one of: ${ARGS_STYLES.join(', ')}`,
             );
         }
         if (raw.env && typeof raw.env === 'object') {
@@ -440,12 +553,23 @@ export interface CompletionResult {
  * Run a one-shot text completion against the given provider.
  * Dispatches on `provider.kind` to the appropriate backend.
  */
+/**
+ * CLI styles whose binary selects a sensible default model when `-m` is
+ * omitted (gemini, codex). For these we don't require an explicit model —
+ * a blank model just lets the CLI pick. claude-code / opencode always need
+ * an explicit model (`--model` / `-m` is mandatory).
+ */
+function cliStyleCanDefaultModel(provider: AIProvider): boolean {
+    return provider.kind === 'cli'
+        && (provider.argsStyle === 'gemini' || provider.argsStyle === 'codex');
+}
+
 export async function runCompletion(
     provider: AIProvider,
     request: CompletionRequest,
 ): Promise<CompletionResult> {
     const model = request.model || provider.defaultModel;
-    if (!model) {
+    if (!model && !cliStyleCanDefaultModel(provider)) {
         throw new Error(
             `AI provider "${provider.name}" has no model (pass params.model or set default_model)`,
         );
@@ -453,11 +577,11 @@ export async function runCompletion(
 
     switch (provider.kind) {
         case 'anthropic-api':
-            return runAnthropicCompletion(provider, { ...request, model });
+            return runAnthropicCompletion(provider, { ...request, model: model! });
         case 'openai-compatible-api':
-            return runOpenAICompletion(provider, { ...request, model });
+            return runOpenAICompletion(provider, { ...request, model: model! });
         case 'cli':
-            return runCliCompletion(provider, { ...request, model });
+            return runCliCompletion(provider, { ...request, model: model ?? '' });
     }
 }
 
@@ -670,11 +794,13 @@ async function runCliCompletion(
     provider: AIProvider,
     request: CompletionRequest & { model: string },
 ): Promise<CompletionResult> {
-    const fullPrompt = provider.argsStyle === 'opencode'
-        // Opencode has no --system-prompt flag; embed instructions in the
-        // user message so review-template prompts still take effect.
-        ? `System instructions:\n${request.systemPrompt}\n\n---\n\n${request.userMessage}`
-        : request.userMessage;
+    const fullPrompt = provider.argsStyle === 'claude-code'
+        // Claude Code takes the system prompt via `--system-prompt`. Every
+        // other CLI (opencode, gemini, codex) has no such flag, so we fold
+        // the instructions into the user message so review-template prompts
+        // still take effect.
+        ? request.userMessage
+        : `System instructions:\n${request.systemPrompt}\n\n---\n\n${request.userMessage}`;
 
     const invocation = buildCliInvocation(provider.argsStyle!, {
         mode: 'completion',
@@ -750,8 +876,8 @@ export async function runAgent(
         );
     }
 
-    const model = request.model || provider.defaultModel;
-    if (!model) {
+    const model = request.model || provider.defaultModel || '';
+    if (!model && !cliStyleCanDefaultModel(provider)) {
         throw new Error(
             `AI provider "${provider.name}" has no model (pass params.model or set default_model)`,
         );
@@ -857,6 +983,18 @@ export function buildCliInvocation(
             args.push(prompt);
             return { args, stdin: null };
         }
+        case 'gemini': {
+            // Gemini CLI headless mode: the prompt is the value of `-p`.
+            const args = buildGeminiArgs(input);
+            args.push('-p', prompt);
+            return { args, stdin: null };
+        }
+        case 'codex': {
+            // Codex `exec` takes the message as a positional argument.
+            const args = buildCodexArgs(input);
+            args.push(prompt);
+            return { args, stdin: null };
+        }
     }
 }
 
@@ -872,6 +1010,10 @@ export function buildCliArgs(style: ArgsStyle, input: CliArgsInput): string[] {
             return buildClaudeCodeArgs(input);
         case 'opencode':
             return buildOpencodeArgs(input);
+        case 'gemini':
+            return buildGeminiArgs(input);
+        case 'codex':
+            return buildCodexArgs(input);
     }
 }
 
@@ -920,6 +1062,39 @@ function buildOpencodeArgs(input: CliArgsInput): string[] {
 }
 
 /**
+ * Gemini CLI headless completion.
+ *
+ * - `-o text` → the model's answer verbatim on stdout (the "256-color"
+ *   hint and other chatter go to stderr, which we don't capture).
+ * - `-m <model>` only when a model is set; otherwise the CLI uses its own
+ *   default (auto-detected providers ship with no `default_model`).
+ * - No `--system-prompt` flag and no separate agent mode — the caller
+ *   folds the system prompt into the user message, and the prompt rides as
+ *   the value of `-p` (appended in `buildCliInvocation`).
+ */
+function buildGeminiArgs(input: CliArgsInput): string[] {
+    const args = ['-o', 'text'];
+    if (input.model) args.push('-m', input.model);
+    return args;
+}
+
+/**
+ * Codex `exec` headless completion.
+ *
+ * - `exec --json` → a JSONL event stream re-assembled by `extractCliText`.
+ * - `-m <model>` only when set.
+ * - Agent mode adds `--dangerously-bypass-approvals-and-sandbox` so tool
+ *   use isn't blocked on approval prompts Codex can't render without a TTY
+ *   (mirrors opencode's `--dangerously-skip-permissions`).
+ */
+function buildCodexArgs(input: CliArgsInput): string[] {
+    const args = ['exec', '--json'];
+    if (input.model) args.push('-m', input.model);
+    if (input.mode === 'agent') args.push('--dangerously-bypass-approvals-and-sandbox');
+    return args;
+}
+
+/**
  * Turn raw CLI stdout into the model's plain-text response.
  *
  * - Claude Code's `--output-format text` already gives us the answer
@@ -937,8 +1112,13 @@ function buildOpencodeArgs(input: CliArgsInput): string[] {
  * so the user sees what actually went wrong.
  */
 export function extractCliText(style: ArgsStyle, raw: string): string {
-    if (style === 'claude-code') {
+    // Plain-text styles: Claude Code's `--output-format text` and Gemini's
+    // `-o text` both print the answer verbatim on stdout.
+    if (style === 'claude-code' || style === 'gemini') {
         return raw.trim();
+    }
+    if (style === 'codex') {
+        return extractCodexText(raw);
     }
     // opencode
     const textParts: string[] = [];
@@ -975,6 +1155,46 @@ export function extractCliText(style: ArgsStyle, raw: string): string {
         // a CLI-surfaced error rather than free-form model text.
         return `[opencode-error] ${errorMessages.join('; ')}`;
     }
+    return '';
+}
+
+/**
+ * Codex `exec --json` event stream → model text. Codex emits JSONL:
+ * `thread.started`, `turn.started`, `text` (the assistant's text, carried
+ * directly on `.text`), `item.completed` (whose `item.text` holds an
+ * assistant message), `error` (`.message`), and `turn.failed`
+ * (`.error.message`). The reply is the concatenation of the text events;
+ * if there's no text but errors exist, surface them with a sentinel so the
+ * empty-output guard recognises a CLI-surfaced failure.
+ */
+function extractCodexText(raw: string): string {
+    const textParts: string[] = [];
+    const errorMessages: string[] = [];
+    for (const line of raw.split('\n')) {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith('{')) continue;
+        try {
+            const evt = JSON.parse(trimmed) as Record<string, unknown>;
+            if (evt.type === 'text' && typeof evt.text === 'string') {
+                textParts.push(evt.text);
+            } else if (evt.type === 'item.completed') {
+                const item = evt.item as { type?: unknown; text?: unknown } | undefined;
+                if (item && typeof item.text === 'string'
+                    && (item.type === 'assistant_message' || item.type === 'agent_message')) {
+                    textParts.push(item.text);
+                }
+            } else if (evt.type === 'error' && typeof evt.message === 'string') {
+                errorMessages.push(evt.message);
+            } else if (evt.type === 'turn.failed') {
+                const err = evt.error as { message?: unknown } | undefined;
+                if (err && typeof err.message === 'string') errorMessages.push(err.message);
+            }
+        } catch {
+            // Not JSON — ignore.
+        }
+    }
+    if (textParts.length > 0) return textParts.join('').trim();
+    if (errorMessages.length > 0) return `[codex-error] ${errorMessages.join('; ')}`;
     return '';
 }
 

@@ -15,6 +15,20 @@ under a new `## [X.Y.Z] - YYYY-MM-DD` heading, bump `version` in
 `package.json`, commit, push to main. The release workflow tags +
 publishes automatically.
 
+## [0.3.0] - 2026-06-03
+
+### Added
+
+- **Gemini CLI and Codex CLI providers.** New `args_style: gemini` and `args_style: codex` for `kind: cli` providers. Gemini runs headless via `gemini -p <prompt> -o text` (plain-text output); Codex via `codex exec --json` (JSONL event stream, re-assembled like opencode, including `[codex-error]` surfacing). The system prompt is folded into the user message for both (neither has a `--system-prompt` flag), and `-m` is omitted when no model is set so the CLI picks its own default.
+- **CLI providers auto-detect on PATH.** `gemini`, `codex`, and `opencode` now "just show up" as providers in the dashboard when their binary is installed — no config entry required (joining the always-on `claude-code` / `anthropic`). Declare them explicitly only to pin a model, env, or non-PATH command. Surfaced via `listImplicitProviders()`; the `/api/ai/providers` endpoint merges them in with the `cli_installed` badge. Best-effort model suggestion lists added for Gemini/Codex (the field stays free-text).
+- **Ensemble PR review (multi-provider + synthesis).** New library templates `ensemble-pr-review` (auto) and `ensemble-pr-review-manual` plus recipe-picker entries: the diff is reviewed by several providers **in parallel**, then a final `ai.review` pass synthesizes their findings into one combined review that's posted. Each leg is `on_error: continue`, so an unavailable/failing provider drops out and the synthesis proceeds with whatever came back. Wall-clock ≈ a single review thanks to the parallel fan-out.
+- **Quick enable/disable for workflows.** A Pause/Enable button on each row of the Workflows tab toggles a workflow without opening the editor, via the new `POST /api/workflows/:name/toggle` endpoint (persists to config + reloads). An enabled workflow stays clean in YAML (the `enabled` field is dropped rather than written as `true`).
+
+### Fixed
+
+- **Visual graph editor showed the wrong trigger.** A workflow whose top-level `trigger:` is `source: gh-cli` + `author: …` but whose graph trigger node was a stale `trigger.github` (no author) matched correctly at runtime but rendered wrong in the editor (and its YAML panel). `GET /api/workflows/:name/details` now projects the effective merged trigger back into the graph trigger node (`syncTriggerNodeFromWorkflow`): the node's `type` follows the source and its filter config (events/authors/branches/labels/repos + excludes) mirrors the trigger. Read-path only — nothing persists unless you save.
+- **"Check for updates" was stuck on a stale version.** The npm-registry fetch sent `accept: application/vnd.npm.install-v1+json` against `/sokuza/latest` — that abbreviated-metadata type is for the *packument* (`/sokuza`), so npm returned an empty body and the cached "latest" never updated (showing e.g. `0.1.4`). Dropped the header (plain `/latest` returns the version manifest), bumped the timeout to 5s, and the check now returns a real success/failure that the dashboard surfaces ("Update available: X" / "Update check failed: …") instead of silently appearing to do nothing.
+
 ## [0.2.1] - 2026-06-03
 
 ### Fixed

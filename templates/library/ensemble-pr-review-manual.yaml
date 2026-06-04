@@ -1,0 +1,144 @@
+# Ensemble PR Review — Manual (multi-provider + synthesis, on-demand)
+#
+# Same as ensemble-pr-review, but triggered manually: pick a PR from the
+# dashboard and run several AI providers over its diff in parallel, then a
+# final pass synthesizes one combined review that gets posted. The manual
+# PR-picker object is decomposed by data.pr-fields into scalars.
+#
+# Customize the `provider:` on each `review_*` node to providers you have
+# configured. Each leg is `on_error: continue`, so an unavailable provider
+# drops out and the synthesis proceeds with whatever came back.
+#
+# Exercises: trigger.manual, data.pr-fields, github.fetch-diff,
+# ai.review (parallel fan-out + synthesis), github.comment.
+
+description: On-demand multi-provider PR review with a synthesized combined result
+icon: 🧑‍⚖️
+
+trigger:
+  source: manual
+
+inputs:
+  - name: pr
+    label: Pull Request
+    type: github-pr
+    required: true
+
+graph:
+  nodes:
+    - id: trigger
+      type: trigger.manual
+      position: { x: 60, y: 260 }
+      config:
+        inputs:
+          - name: pr
+            label: Pull Request
+            type: github-pr
+            required: true
+    - id: pr_fields
+      type: data.pr-fields
+      position: { x: 320, y: 260 }
+      config: {}
+    - id: fetch_diff
+      type: github.fetch-diff
+      position: { x: 580, y: 260 }
+      config: {}
+    - id: review_a
+      type: ai.review
+      position: { x: 840, y: 80 }
+      config:
+        provider: claude-code
+        timeout: 0
+      on_error: continue
+    - id: review_b
+      type: ai.review
+      position: { x: 840, y: 260 }
+      config:
+        provider: gemini
+        timeout: 0
+      on_error: continue
+    - id: review_c
+      type: ai.review
+      position: { x: 840, y: 440 }
+      config:
+        provider: anthropic
+        timeout: 0
+      on_error: continue
+    - id: synth
+      type: ai.review
+      position: { x: 1140, y: 260 }
+      config:
+        timeout: 0
+        prompt: |
+          You are the lead reviewer consolidating several INDEPENDENT code
+          reviews of the SAME pull request into ONE definitive review.
+
+          Independent reviews follow (any may be empty if that reviewer was
+          unavailable — ignore empty ones):
+
+          ===== Reviewer A =====
+          {{nodes.review_a.markdown}}
+
+          ===== Reviewer B =====
+          {{nodes.review_b.markdown}}
+
+          ===== Reviewer C =====
+          {{nodes.review_c.markdown}}
+
+          Merge them: drop duplicates, resolve disagreements using the diff
+          below as the tie-breaker, keep the most severe correct take on
+          each issue, and discard anything not supported by the diff.
+
+          Respond with a SINGLE JSON object and nothing else — first
+          character `{`, last `}`:
+
+          {
+            "summary": "1-3 sentence overview and your overall take.",
+            "issues": [
+              { "priority": "P1 | P2 | P3", "title": "Specific one-line title.",
+                "file": "path/to/file.ts:L42-L50",
+                "problem": "What is wrong and why it matters.",
+                "fix": "Concrete fix suggestion." }
+            ],
+            "decision": "APPROVE | CHANGES_REQUESTED",
+            "justification": "Short paragraph explaining the decision."
+          }
+
+          Decide CHANGES_REQUESTED if any P1 or 3+ P2s; otherwise APPROVE.
+          An empty issues array with APPROVE is valid. Output the JSON now.
+    - id: post
+      type: github.comment
+      position: { x: 1460, y: 260 }
+      config:
+        body: |
+          ## 🤖 AI Code Review (ensemble)
+
+          {{nodes.synth.markdown}}
+
+          ---
+          _Synthesized by Sokuza AI from multiple independent reviewers_
+  edges:
+    - from: { node: trigger, port: pr }
+      to: { node: pr_fields, port: pr }
+    - from: { node: pr_fields, port: number }
+      to: { node: fetch_diff, port: pr_number }
+    - from: { node: pr_fields, port: repo }
+      to: { node: fetch_diff, port: repo }
+    - from: { node: fetch_diff, port: diff }
+      to: { node: review_a, port: diff }
+    - from: { node: fetch_diff, port: diff }
+      to: { node: review_b, port: diff }
+    - from: { node: fetch_diff, port: diff }
+      to: { node: review_c, port: diff }
+    - from: { node: fetch_diff, port: diff }
+      to: { node: synth, port: diff }
+    - from: { node: pr_fields, port: number }
+      to: { node: synth, port: pr_number }
+    - from: { node: pr_fields, port: repo }
+      to: { node: synth, port: repo }
+    - from: { node: pr_fields, port: number }
+      to: { node: post, port: pr_number }
+    - from: { node: pr_fields, port: repo }
+      to: { node: post, port: repo }
+    - from: { node: synth, port: markdown }
+      to: { node: post, port: __seq }

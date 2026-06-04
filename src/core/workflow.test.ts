@@ -814,6 +814,45 @@ describe('matchesTrigger', () => {
     });
 });
 
+// ─── syncTriggerNodeFromWorkflow (editor display fix) ───────────────────────
+
+describe('syncTriggerNodeFromWorkflow', () => {
+    it('projects the merged trigger (source + author) back into the graph node', async () => {
+        const { syncTriggerNodeFromWorkflow } = await import('./nodes/graph-trigger.js');
+        // The visual-editor bug: graph node is a stale `trigger.github`
+        // with no author, but the YAML trigger says gh-cli + author.
+        const wf: WorkflowDefinition = {
+            name: 'auto-pr-review',
+            trigger: {
+                source: 'gh-cli',
+                event: ['pull_request.opened', 'pull_request.synchronize'],
+                author: 'Tjemmmic',
+            },
+            graph: {
+                nodes: [
+                    { id: 'trigger', type: 'trigger.github', config: { events: ['pull_request.opened'] } },
+                    { id: 'fetch', type: 'github.fetch-diff', config: {} },
+                ],
+                edges: [],
+            },
+        } as WorkflowDefinition;
+
+        const out = syncTriggerNodeFromWorkflow(wf);
+        const node = out.graph!.nodes.find((n) => n.id === 'trigger')!;
+        expect(node.type).toBe('trigger.gh-cli');
+        expect(node.config!.events).toEqual(['pull_request.opened', 'pull_request.synchronize']);
+        expect(node.config!.authors).toEqual(['Tjemmmic']);
+        // Non-trigger nodes are untouched.
+        expect(out.graph!.nodes.find((n) => n.id === 'fetch')!.type).toBe('github.fetch-diff');
+    });
+
+    it('is a no-op for non-graph (legacy steps) workflows', async () => {
+        const { syncTriggerNodeFromWorkflow } = await import('./nodes/graph-trigger.js');
+        const wf = { name: 'x', trigger: { source: 'github' }, steps: [] } as unknown as WorkflowDefinition;
+        expect(syncTriggerNodeFromWorkflow(wf)).toBe(wf);
+    });
+});
+
 // ─── interpolateParams ──────────────────────────────────────────────────────
 
 describe('interpolateParams', () => {
