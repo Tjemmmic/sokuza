@@ -623,7 +623,7 @@ async function renderDashboard(el) {
                             <div style="font-size:12px;font-weight:600;color:var(--text-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(item.name)}</div>
                             <div style="font-size:10px;color:var(--text-muted)">${isManual ? 'Manual' : 'Auto: ' + esc(ensureArray(item.defaultTrigger?.event).join(', '))}</div>
                         </div>
-                        ${wfName && isManual ? `<button class="btn btn-primary btn-sm" style="padding:4px 8px;font-size:11px" onclick="event.stopPropagation();openRunModal('${esc(wfName)}')">▶</button>` : ''}
+                        ${wfName && isManual ? `<button class="btn btn-primary btn-sm" style="padding:4px 8px;font-size:11px" onclick="event.stopPropagation();openRunModal('${escJs(wfName)}')">▶</button>` : ''}
                     </div>`;
                 }).join('')}
             </div>
@@ -713,11 +713,11 @@ async function renderMyPrs(el) {
                         <div class="btn-group" style="flex-wrap:wrap">
                             ${deckPrItems.map(di => {
                                 const wfName = getInstalledWorkflowName(di.id);
-                                return wfName ? `<button class="btn btn-primary btn-sm" onclick="runWorkflowForPr('${esc(wfName)}', '${esc(owner)}', '${esc(repo)}', ${pr.number})" title="${esc(di.description)}">${di.icon} ${esc(di.name)}</button>` : '';
+                                return wfName ? `<button class="btn btn-primary btn-sm" onclick="runWorkflowForPr('${escJs(wfName)}', '${escJs(owner)}', '${escJs(repo)}', ${pr.number})" title="${esc(di.description)}">${di.icon} ${esc(di.name)}</button>` : '';
                             }).join('')}
-                            ${reviewWf ? `<button class="btn btn-primary btn-sm" onclick="runWorkflowForPr('${esc(reviewWf.name)}', '${esc(owner)}', '${esc(repo)}', ${pr.number})" title="Run AI code review on this PR">🔍 Review</button>` : ''}
-                            ${respondWf ? `<button class="btn btn-ghost btn-sm" onclick="runWorkflowForPr('${esc(respondWf.name)}', '${esc(owner)}', '${esc(repo)}', ${pr.number})" title="Respond to review comments">💬 Respond</button>` : ''}
-                            <button class="btn btn-ghost btn-sm" onclick="openRunModalForPr('${esc(owner)}', '${esc(repo)}', ${pr.number})" title="Run any workflow against this PR">▶ Run Workflow</button>
+                            ${reviewWf ? `<button class="btn btn-primary btn-sm" onclick="runWorkflowForPr('${escJs(reviewWf.name)}', '${escJs(owner)}', '${escJs(repo)}', ${pr.number})" title="Run AI code review on this PR">🔍 Review</button>` : ''}
+                            ${respondWf ? `<button class="btn btn-ghost btn-sm" onclick="runWorkflowForPr('${escJs(respondWf.name)}', '${escJs(owner)}', '${escJs(repo)}', ${pr.number})" title="Respond to review comments">💬 Respond</button>` : ''}
+                            <button class="btn btn-ghost btn-sm" onclick="openRunModalForPr('${escJs(owner)}', '${escJs(repo)}', ${pr.number})" title="Run any workflow against this PR">▶ Run Workflow</button>
                             <a href="${esc(pr.url)}" target="_blank" class="btn btn-ghost btn-sm" title="Open on GitHub">↗ GitHub</a>
                         </div>
                     </div>`;
@@ -802,7 +802,7 @@ window.openRunModalForPr = function (owner, repo, prNumber) {
         </div>
         <div style="display:flex;justify-content:flex-end;gap:8px">
             <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
-            <button class="btn btn-primary" onclick="runSelectedPrWorkflow('${esc(owner)}', '${esc(repo)}', ${prNumber})">▶ Run</button>
+            <button class="btn btn-primary" onclick="runSelectedPrWorkflow('${escJs(owner)}', '${escJs(repo)}', ${prNumber})">▶ Run</button>
         </div>
     `);
 };
@@ -877,7 +877,7 @@ async function renderIssues(el) {
             <button class="btn btn-sm ${issueRepoFilter === 'all' ? 'btn-primary' : 'btn-ghost'}" onclick="setIssueRepoFilter('all')">All (${issues.length})</button>
             ${repos.map(r => {
                 const count = issues.filter(i => i.repository?.nameWithOwner === r).length;
-                return `<button class="btn btn-sm ${issueRepoFilter === r ? 'btn-primary' : 'btn-ghost'}" onclick="setIssueRepoFilter('${esc(r)}')">${esc(r.split('/')[1] || r)} (${count})</button>`;
+                return `<button class="btn btn-sm ${issueRepoFilter === r ? 'btn-primary' : 'btn-ghost'}" onclick="setIssueRepoFilter('${escJs(r)}')">${esc(r.split('/')[1] || r)} (${count})</button>`;
             }).join('')}
         </div>` : ''}
 
@@ -925,12 +925,12 @@ async function renderIssues(el) {
                         ${labels ? `<div style="margin-bottom:12px">${labels}</div>` : ''}
 
                         <div class="btn-group" style="flex-wrap:wrap">
-                            ${issueActions.map(a => `<button class="btn btn-primary btn-sm" onclick="runIssueAction('${esc(a.id)}', '${esc(owner)}', '${esc(repo)}', ${issue.number})" title="${esc(a.description || a.name)}">${a.icon ? esc(a.icon) + ' ' : ''}${esc(a.name)}</button>`).join('')}
+                            ${issueActions.map(a => `<button class="btn btn-primary btn-sm" onclick="runIssueAction('${escJs(a.id)}', '${escJs(owner)}', '${escJs(repo)}', ${issue.number})" title="${esc(a.description || a.name)}">${a.icon ? esc(a.icon) + ' ' : ''}${esc(a.name)}</button>`).join('')}
                             ${getDeckIssueItems().map(di => {
                                 const wfName = getInstalledWorkflowName(di.id);
-                                return wfName ? `<button class="btn btn-primary btn-sm" onclick="runIssueWorkflow('${esc(wfName)}', '${esc(owner)}', '${esc(repo)}', ${issue.number})" title="${esc(di.description)}">${di.icon} ${esc(di.name)}</button>` : '';
+                                return wfName ? `<button class="btn btn-primary btn-sm" onclick="runIssueWorkflow('${escJs(wfName)}', '${escJs(owner)}', '${escJs(repo)}', ${issue.number})" title="${esc(di.description)}">${di.icon} ${esc(di.name)}</button>` : '';
                             }).join('')}
-                            <button class="btn btn-ghost btn-sm" onclick="openIssueWorkflowModal('${esc(owner)}', '${esc(repo)}', ${issue.number})" title="Run any workflow against this issue">▶ Run Workflow</button>
+                            <button class="btn btn-ghost btn-sm" onclick="openIssueWorkflowModal('${escJs(owner)}', '${escJs(repo)}', ${issue.number})" title="Run any workflow against this issue">▶ Run Workflow</button>
                             <a href="${esc(issue.url)}" target="_blank" class="btn btn-ghost btn-sm" title="Open on GitHub">↗ GitHub</a>
                         </div>
                     </div>`;
@@ -1065,7 +1065,7 @@ window.openIssueWorkflowModal = function (owner, repo, issueNumber) {
         </div>
         <div style="display:flex;justify-content:flex-end;gap:8px">
             <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
-            <button class="btn btn-primary" onclick="runSelectedIssueWorkflow('${esc(owner)}', '${esc(repo)}', ${issueNumber})">▶ Run</button>
+            <button class="btn btn-primary" onclick="runSelectedIssueWorkflow('${escJs(owner)}', '${escJs(repo)}', ${issueNumber})">▶ Run</button>
         </div>
     `);
 };
@@ -1119,8 +1119,8 @@ window.openIssueActionEditor = async function (editId) {
                         <div style="font-size:11px;color:var(--text-muted)">${esc(a.description || '')} ${a.workflow ? `→ ${esc(a.workflow)}` : ''}</div>
                     </div>
                     <div class="btn-group">
-                        <button class="btn btn-ghost btn-sm" onclick="closeModal();openIssueActionEditor('${esc(a.id)}')">Edit</button>
-                        <button class="btn btn-danger-outline btn-sm" onclick="deleteIssueAction('${esc(a.id)}')">Delete</button>
+                        <button class="btn btn-ghost btn-sm" onclick="closeModal();openIssueActionEditor('${escJs(a.id)}')">Edit</button>
+                        <button class="btn btn-danger-outline btn-sm" onclick="deleteIssueAction('${escJs(a.id)}')">Delete</button>
                     </div>
                 </div>
             `).join('') : '<div style="font-size:13px;color:var(--text-muted);padding:12px 0">No actions configured. Add one below.</div>'}
@@ -1157,7 +1157,7 @@ window.openIssueActionEditor = async function (editId) {
         </div>
     `, `
         <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
-        <button class="btn btn-primary" onclick="saveIssueAction('${esc(editId ?? '')}')">${editing ? 'Update' : 'Add'} Action</button>
+        <button class="btn btn-primary" onclick="saveIssueAction('${escJs(editId ?? '')}')">${editing ? 'Update' : 'Add'} Action</button>
     `);
 };
 
@@ -1250,7 +1250,7 @@ async function renderWorkflows(el) {
                 const hasInputs = wf.inputs?.length > 0;
                 const sources = Array.isArray(wf.trigger?.source) ? wf.trigger.source : [wf.trigger?.source || 'github'];
                 return `<tr>
-                <td><strong style="cursor:pointer;color:var(--accent-hover)" onclick="openWorkflowEditor('${esc(wf.name)}')">${esc(wf.name)}</strong>${hasInputs ? '<br><span style="font-size:10px;color:var(--text-muted)">🎮 has inputs — run from dashboard</span>' : ''}</td>
+                <td><strong style="cursor:pointer;color:var(--accent-hover)" onclick="openWorkflowEditor('${escJs(wf.name)}')">${esc(wf.name)}</strong>${hasInputs ? '<br><span style="font-size:10px;color:var(--text-muted)">🎮 has inputs — run from dashboard</span>' : ''}</td>
                 <td>${sourceBadge(sources[0])}${sources.length > 1 ? `<span style="font-size:10px;color:var(--text-muted)"> +${sources.length - 1}</span>` : ''}</td>
                 <td><code style="font-size:12px;color:var(--text-secondary)">${esc((() => { const evts = Array.isArray(wf.trigger?.event) ? wf.trigger.event : [wf.trigger?.event].filter(Boolean); return evts.map(e => eventLabelMap[e] || e).join(', '); })())}</code>${wf.trigger?.repo ? `<br><span style="font-size:11px;color:var(--text-muted)">${esc(Array.isArray(wf.trigger.repo) ? wf.trigger.repo.join(', ') : wf.trigger.repo)}</span>` : ''}</td>
                 <td>${wf.template ? `<span class="badge badge-action">${esc(wf.template)}</span>` : '<span style="font-size:12px;color:var(--text-muted)">custom</span>'}${wf.enabled === false ? ' <span class="badge" style="background:rgba(239,68,68,0.15);color:#ef4444;border:1px solid rgba(239,68,68,0.3);font-size:10px">disabled</span>' : ''}</td>
@@ -1258,11 +1258,11 @@ async function renderWorkflows(el) {
                 <td>${renderHistory(wf.name)}</td>
                 <td style="text-align:right">
                     <div class="btn-group" style="justify-content:flex-end">
-                        <button class="btn ${hasInputs ? 'btn-primary' : 'btn-ghost'} btn-sm" onclick="openRunModal('${esc(wf.name)}')" title="Run workflow manually">${hasInputs ? '▶ Run' : '▶'}</button>
-                        <button class="btn btn-ghost btn-sm" onclick="toggleWorkflow('${esc(wf.name)}', ${wf.enabled === false})" title="${wf.enabled === false ? 'Enable — resume processing events' : 'Pause — stop processing events'}">${wf.enabled === false ? '▶ Enable' : '⏸ Pause'}</button>
-                        <button class="btn btn-ghost btn-sm" onclick="openWorkflowEditor('${esc(wf.name)}')">Edit</button>
-                        <button class="btn btn-ghost btn-sm" onclick="duplicateWorkflow('${esc(wf.name)}')">Duplicate</button>
-                        <button class="btn btn-danger-outline btn-sm" onclick="deleteWorkflow('${esc(wf.name)}')">Delete</button>
+                        <button class="btn ${hasInputs ? 'btn-primary' : 'btn-ghost'} btn-sm" onclick="openRunModal('${escJs(wf.name)}')" title="Run workflow manually">${hasInputs ? '▶ Run' : '▶'}</button>
+                        <button class="btn btn-ghost btn-sm" onclick="toggleWorkflow('${escJs(wf.name)}', ${wf.enabled === false})" title="${wf.enabled === false ? 'Enable — resume processing events' : 'Pause — stop processing events'}">${wf.enabled === false ? '▶ Enable' : '⏸ Pause'}</button>
+                        <button class="btn btn-ghost btn-sm" onclick="openWorkflowEditor('${escJs(wf.name)}')">Edit</button>
+                        <button class="btn btn-ghost btn-sm" onclick="duplicateWorkflow('${escJs(wf.name)}')">Duplicate</button>
+                        <button class="btn btn-danger-outline btn-sm" onclick="deleteWorkflow('${escJs(wf.name)}')">Delete</button>
                     </div>
                 </td>
             </tr>`}).join('')}</tbody>
@@ -1491,7 +1491,7 @@ function openFullEditor(existingName, wf) {
                             <label class="form-label">Events <span style="font-size:10px;color:var(--text-muted);font-weight:400">(match any of these events)</span></label>
                             <div id="ed-event-combobox" class="combobox-container">
                                 <div class="combobox-selected" id="ed-event-selected">
-                                    ${data.trigger.event.filter(e => e).map(e => `<span class="tag-pill">${esc(eventLabelMap[e] || e)} <button onclick="removeEventFromCombobox('${esc(e)}')">&times;</button></span>`).join('')}
+                                    ${data.trigger.event.filter(e => e).map(e => `<span class="tag-pill">${esc(eventLabelMap[e] || e)} <button onclick="removeEventFromCombobox('${escJs(e)}')">&times;</button></span>`).join('')}
                                     <input type="text" class="combobox-search" id="ed-event-search" placeholder="Search events\u2026" oninput="filterEventDropdown()" onfocus="showEventDropdown()" autocomplete="off">
                                 </div>
                                 <div class="combobox-dropdown" id="ed-event-dropdown"></div>
@@ -1501,14 +1501,14 @@ function openFullEditor(existingName, wf) {
                             <div class="form-group">
                                 <label class="form-label">Repositories <span style="font-size:10px;color:var(--text-muted);font-weight:400">(leave empty for all repos)</span></label>
                                 <div id="ed-repo-tags" class="tag-input-container">
-                                    ${data.trigger.repo.filter(r => r).map(r => `<span class="tag-pill">${esc(r)} <button onclick="removeTagItem('repo','${esc(r)}')">&times;</button></span>`).join('')}
+                                    ${data.trigger.repo.filter(r => r).map(r => `<span class="tag-pill">${esc(r)} <button onclick="removeTagItem('repo','${escJs(r)}')">&times;</button></span>`).join('')}
                                     <input type="text" class="tag-input" id="ed-repo-input" placeholder="org/repo" onkeydown="handleTagKeydown(event,'repo')">
                                 </div>
                             </div>
                             <div class="form-group">
                                 <label class="form-label">Branches <span style="font-size:10px;color:var(--text-muted);font-weight:400">(leave empty for all branches)</span></label>
                                 <div id="ed-branch-tags" class="tag-input-container">
-                                    ${data.trigger.branch.filter(b => b).map(b => `<span class="tag-pill">${esc(b)} <button onclick="removeTagItem('branch','${esc(b)}')">&times;</button></span>`).join('')}
+                                    ${data.trigger.branch.filter(b => b).map(b => `<span class="tag-pill">${esc(b)} <button onclick="removeTagItem('branch','${escJs(b)}')">&times;</button></span>`).join('')}
                                     <input type="text" class="tag-input" id="ed-branch-input" placeholder="main" onkeydown="handleTagKeydown(event,'branch')">
                                 </div>
                             </div>
@@ -1516,14 +1516,14 @@ function openFullEditor(existingName, wf) {
                         <div class="form-group" style="margin-bottom:0" id="ed-author-group">
                             <label class="form-label">Authors <span style="font-size:10px;color:var(--text-muted);font-weight:400">(leave empty for all authors)</span></label>
                             <div id="ed-author-tags" class="tag-input-container">
-                                ${data.trigger.author.filter(a => a).map(a => `<span class="tag-pill">${esc(a)} <button onclick="removeTagItem('author','${esc(a)}')">&times;</button></span>`).join('')}
+                                ${data.trigger.author.filter(a => a).map(a => `<span class="tag-pill">${esc(a)} <button onclick="removeTagItem('author','${escJs(a)}')">&times;</button></span>`).join('')}
                                 <input type="text" class="tag-input" id="ed-author-input" placeholder="username" onkeydown="handleTagKeydown(event,'author')">
                             </div>
                         </div>
                         <div class="form-group" style="margin-top:12px" id="ed-labels-group">
                             <label class="form-label">Labels <span style="font-size:10px;color:var(--text-muted);font-weight:400">(match PRs/issues with any of these labels)</span></label>
                             <div id="ed-labels-tags" class="tag-input-container">
-                                ${data.trigger.labels.map(l => `<span class="tag-pill">${esc(l)} <button onclick="removeLabel('${esc(l)}')">&times;</button></span>`).join('')}
+                                ${data.trigger.labels.map(l => `<span class="tag-pill">${esc(l)} <button onclick="removeLabel('${escJs(l)}')">&times;</button></span>`).join('')}
                                 <input type="text" class="tag-input" id="ed-label-input" placeholder="Type label and press Enter" onkeydown="handleLabelKeydown(event)">
                             </div>
                         </div>
@@ -1580,7 +1580,7 @@ function openFullEditor(existingName, wf) {
         </div>
     `, `
         <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
-        <button class="btn btn-primary" onclick="saveWorkflowFromEditor('${esc(existingName ?? '')}')">${isEdit ? 'Update' : 'Create'} Workflow</button>
+        <button class="btn btn-primary" onclick="saveWorkflowFromEditor('${escJs(existingName ?? '')}')">${isEdit ? 'Update' : 'Create'} Workflow</button>
     `);
 
     window._editorSteps = data.steps;
@@ -1658,7 +1658,7 @@ function renderTagField(field) {
     if (!container) return;
     const items = window[cfg.stateKey] || [];
     container.innerHTML = items.map(v =>
-        `<span class="tag-pill">${esc(v)} <button onclick="removeTagItem('${field}','${esc(v)}')">&times;</button></span>`
+        `<span class="tag-pill">${esc(v)} <button onclick="removeTagItem('${field}','${escJs(v)}')">&times;</button></span>`
     ).join('') + `<input type="text" class="tag-input" id="${cfg.inputId}" placeholder="${field === 'event' ? 'pull_request.opened' : field === 'repo' ? 'org/repo' : field === 'branch' ? 'main' : 'username'}" onkeydown="handleTagKeydown(event,'${field}')">`;
 }
 
@@ -1697,7 +1697,7 @@ window.filterEventDropdown = function () {
 
         html += `<div class="combobox-group-label">${esc(source)}</div>`;
         for (const evt of filtered) {
-            html += `<div class="combobox-option" onclick="selectEventFromCombobox('${esc(evt.value)}')">
+            html += `<div class="combobox-option" onclick="selectEventFromCombobox('${escJs(evt.value)}')">
                 <span class="combobox-option-label">${esc(evt.label)}</span>
                 <span class="combobox-option-desc">${esc(evt.desc)}</span>
                 <code class="combobox-option-code">${esc(evt.value)}</code>
@@ -1736,7 +1736,7 @@ function renderEventPills() {
     if (!container) return;
     const events = window._editorEvents || [];
     container.innerHTML = events.map(e =>
-        `<span class="tag-pill">${esc(eventLabelMap[e] || e)} <button onclick="removeEventFromCombobox('${esc(e)}')">&times;</button></span>`
+        `<span class="tag-pill">${esc(eventLabelMap[e] || e)} <button onclick="removeEventFromCombobox('${escJs(e)}')">&times;</button></span>`
     ).join('') + `<input type="text" class="combobox-search" id="ed-event-search" placeholder="Search events\u2026" oninput="filterEventDropdown()" onfocus="showEventDropdown()" autocomplete="off">`;
 }
 
@@ -1775,7 +1775,7 @@ function renderLabels() {
     if (!container) return;
     const labels = window._editorLabels || [];
     const input = '<input type="text" class="tag-input" id="ed-label-input" placeholder="Type label and press Enter" onkeydown="handleLabelKeydown(event)">';
-    container.innerHTML = labels.map(l => `<span class="tag-pill">${esc(l)} <button onclick="removeLabel('${esc(l)}')">&times;</button></span>`).join('') + input;
+    container.innerHTML = labels.map(l => `<span class="tag-pill">${esc(l)} <button onclick="removeLabel('${escJs(l)}')">&times;</button></span>`).join('') + input;
 }
 
 // ─── Filters management ─────────────────────────────────────────────────────
@@ -1827,9 +1827,9 @@ function renderFiltersList() {
     }
     container.innerHTML = entries.map(([k, v]) => `
         <div class="form-kv" style="margin-bottom:6px">
-            <input type="text" class="form-input" value="${esc(k)}" placeholder="payload.path.to.field" style="flex:1" onchange="updateFilterKey('${esc(k)}',this.value)">
-            <input type="text" class="form-input" value="${esc(v)}" placeholder="expected value" style="flex:1" oninput="updateFilterVal('${esc(k)}',this.value);updateYamlPreview()">
-            <button class="btn btn-danger-outline btn-sm btn-icon" onclick="removeFilter('${esc(k)}')" title="Remove" style="align-self:center">&times;</button>
+            <input type="text" class="form-input" value="${esc(k)}" placeholder="payload.path.to.field" style="flex:1" onchange="updateFilterKey('${escJs(k)}',this.value)">
+            <input type="text" class="form-input" value="${esc(v)}" placeholder="expected value" style="flex:1" oninput="updateFilterVal('${escJs(k)}',this.value);updateYamlPreview()">
+            <button class="btn btn-danger-outline btn-sm btn-icon" onclick="removeFilter('${escJs(k)}')" title="Remove" style="align-self:center">&times;</button>
         </div>
     `).join('');
 }
@@ -2118,9 +2118,9 @@ function renderParams(stepIdx, params) {
         return `<div class="form-kv">
             <input type="text" class="form-input" value="${esc(k)}" placeholder="key" style="max-width:140px" onchange="updateParamKey(${stepIdx},${pi},this.value)">
             ${isMultiline
-                ? `<textarea class="form-textarea" placeholder="value" onchange="updateParamVal(${stepIdx},'${esc(k)}',this.value)" oninput="updateYamlPreview()">${esc(val)}</textarea>`
-                : `<input type="text" class="form-input" value="${esc(val)}" placeholder="value" onchange="updateParamVal(${stepIdx},'${esc(k)}',this.value)" oninput="updateYamlPreview()">`}
-            <button class="btn btn-danger-outline btn-sm btn-icon" onclick="removeParam(${stepIdx},'${esc(k)}')" title="Remove" style="align-self:center">×</button>
+                ? `<textarea class="form-textarea" placeholder="value" onchange="updateParamVal(${stepIdx},'${escJs(k)}',this.value)" oninput="updateYamlPreview()">${esc(val)}</textarea>`
+                : `<input type="text" class="form-input" value="${esc(val)}" placeholder="value" onchange="updateParamVal(${stepIdx},'${escJs(k)}',this.value)" oninput="updateYamlPreview()">`}
+            <button class="btn btn-danger-outline btn-sm btn-icon" onclick="removeParam(${stepIdx},'${escJs(k)}')" title="Remove" style="align-self:center">×</button>
         </div>`;
     }).join('');
 }
@@ -3478,8 +3478,8 @@ async function renderLibrary(el) {
                     </div>`).join('')}
                 </div>
                 <div class="library-card-footer" style="margin-top:auto;padding-top:12px;border-top:1px solid var(--border-color);display:flex;justify-content:flex-end;gap:6px">
-                    <button class="btn btn-ghost btn-sm" onclick="openTemplateBuilder('${esc(t.name)}')">✏️ Edit</button>
-                    <button class="btn btn-ghost btn-sm" style="color:#ef4444" onclick="deleteCustomTemplate('${esc(t.name)}')">🗑 Delete</button>
+                    <button class="btn btn-ghost btn-sm" onclick="openTemplateBuilder('${escJs(t.name)}')">✏️ Edit</button>
+                    <button class="btn btn-ghost btn-sm" style="color:#ef4444" onclick="deleteCustomTemplate('${escJs(t.name)}')">🗑 Delete</button>
                 </div>
             </div>
         `).join('')
@@ -3942,9 +3942,9 @@ function renderProviderCard(p, cliStatus) {
             ${p.api_key_masked ? `<div>Key: <code style="font-size:11px">${esc(p.api_key_masked)}</code></div>` : ''}
         </div>
         <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:4px">
-            <button class="btn btn-ghost btn-sm" onclick="openAiProviderEdit('${esc(p.name)}')">Edit</button>
-            <button class="btn btn-ghost btn-sm" onclick="testOneProvider('${esc(p.name)}')">Test</button>
-            ${p.is_builtin ? '' : `<button class="btn btn-ghost btn-sm" style="color:#ef4444" onclick="deleteAiProvider('${esc(p.name)}')">Delete</button>`}
+            <button class="btn btn-ghost btn-sm" onclick="openAiProviderEdit('${escJs(p.name)}')">Edit</button>
+            <button class="btn btn-ghost btn-sm" onclick="testOneProvider('${escJs(p.name)}')">Test</button>
+            ${p.is_builtin ? '' : `<button class="btn btn-ghost btn-sm" style="color:#ef4444" onclick="deleteAiProvider('${escJs(p.name)}')">Delete</button>`}
         </div>
     </div>`;
 }
@@ -4569,7 +4569,7 @@ async function renderEvents(el) {
                 <div class="panel" style="margin-bottom:16px">
                     <div class="panel-header"><span class="panel-title">By Source</span></div>
                     <div class="panel-body">
-                        ${sourceEntries.length > 0 ? sourceEntries.map(([s, c]) => `<div class="stat-row" style="cursor:pointer" onclick="eventFilter.source='${esc(s)}';rerenderEventList()"><span class="stat-row-label">${sourceBadge(s)}</span><span class="stat-row-value">${c}</span></div>`).join('') : '<div style="font-size:12px;color:var(--text-muted)">No data</div>'}
+                        ${sourceEntries.length > 0 ? sourceEntries.map(([s, c]) => `<div class="stat-row" style="cursor:pointer" onclick="eventFilter.source='${escJs(s)}';rerenderEventList()"><span class="stat-row-label">${sourceBadge(s)}</span><span class="stat-row-value">${c}</span></div>`).join('') : '<div style="font-size:12px;color:var(--text-muted)">No data</div>'}
                     </div>
                 </div>
                 <div class="panel" style="margin-bottom:16px">
@@ -4700,7 +4700,7 @@ function renderEventCard(e, idx) {
     const isExpanded = expandedEvents.has(eventId);
     const payload = JSON.stringify(e, null, 2);
 
-    return `<div class="event-entry" onclick="toggleEventPayload('${esc(eventId)}')">
+    return `<div class="event-entry" onclick="toggleEventPayload('${escJs(eventId)}')">
         <span class="event-time">${fmtDateTime(e.timestamp)}</span>
         ${sourceBadge(src)}
         <div class="event-body">
@@ -4884,6 +4884,19 @@ function esc(s) {
     return (s ?? '').toString().replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/'/g, '&#39;');
 }
 
+// Escape a value for safe interpolation inside a single-quoted JS string
+// that itself lives in an HTML attribute, e.g. onclick="fn('${escJs(x)}')".
+// HTML-entity escaping (esc) is NOT sufficient there: the browser decodes
+// &#39; back to ' BEFORE running the handler, letting the value break out
+// of the string and inject code. We JS-unicode-escape the characters that
+// are dangerous in either layer (quotes, backslash, angle brackets,
+// ampersand, line terminators), so the output is inert as both an HTML
+// attribute value and a JS string. No-op for values with no special chars.
+function escJs(s) {
+    return (s ?? '').toString().replace(/[\\'"`<>&\r\n\u2028\u2029]/g,
+        (c) => '\\u' + c.charCodeAt(0).toString(16).padStart(4, '0'));
+}
+
 // Escape a value for a single-quoted JS string that itself sits inside a
 // double-quoted HTML attribute, e.g. onclick="fn('${jsEsc(x)}')". esc() is
 // wrong here: it encodes ' as &#39;, which the HTML parser decodes back to '
@@ -5014,9 +5027,9 @@ async function loadQueueData(el) {
                 <td style="font-size:11px;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:${j.error ? '#ef4444' : 'var(--text-muted)'}">${j.error ? esc(j.error) : '—'}</td>
                 <td style="text-align:right">
                     <div class="btn-group" style="justify-content:flex-end">
-                        ${j.status === 'queued' || j.status === 'running' ? `<button class="btn btn-danger-outline btn-sm" onclick="cancelQueueJob('${esc(j.id)}')">Cancel</button>` : ''}
-                        ${j.status === 'failed' ? `<button class="btn btn-ghost btn-sm" onclick="retryQueueJob('${esc(j.id)}')">Retry</button>` : ''}
-                        ${j.status === 'completed' ? `<button class="btn btn-ghost btn-sm" onclick="rerunWorkflow('${esc(j.id)}')">Rerun</button>` : ''}
+                        ${j.status === 'queued' || j.status === 'running' ? `<button class="btn btn-danger-outline btn-sm" onclick="cancelQueueJob('${escJs(j.id)}')">Cancel</button>` : ''}
+                        ${j.status === 'failed' ? `<button class="btn btn-ghost btn-sm" onclick="retryQueueJob('${escJs(j.id)}')">Retry</button>` : ''}
+                        ${j.status === 'completed' ? `<button class="btn btn-ghost btn-sm" onclick="rerunWorkflow('${escJs(j.id)}')">Rerun</button>` : ''}
                     </div>
                 </td>
             </tr>`).join('')}</tbody>
@@ -5201,7 +5214,7 @@ async function loadAutoFixAddressRuns() {
 }
 
 function renderAddressRunRow(r) {
-    const repoCell = r.pr?.repo ? `<a onclick="event.stopPropagation();openPrTimeline('${esc(r.pr.repo)}',${r.pr.prNumber})" style="cursor:pointer;color:var(--accent-hover)">${esc(r.pr.repo)} <span style="color:var(--text-muted)">#${r.pr.prNumber}</span></a>` : '—';
+    const repoCell = r.pr?.repo ? `<a onclick="event.stopPropagation();openPrTimeline('${escJs(r.pr.repo)}',${r.pr.prNumber})" style="cursor:pointer;color:var(--accent-hover)">${esc(r.pr.repo)} <span style="color:var(--text-muted)">#${r.pr.prNumber}</span></a>` : '—';
     const cost = estimateCostFromUsage(r.provider, r.model, r.usage);
     const costCell = cost == null
         ? `<span style="color:var(--text-muted)">—</span>`
@@ -5228,7 +5241,7 @@ function renderAddressRunRow(r) {
     else { outcome = 'ok'; outcomeColor = '#22c55e'; }
 
     return `
-        <tr style="cursor:pointer" onclick="openAddressRunDetail('${esc(r.id)}')">
+        <tr style="cursor:pointer" onclick="openAddressRunDetail('${escJs(r.id)}')">
             <td style="font-family:var(--mono);font-size:12px;color:var(--text-muted);white-space:nowrap">${esc(fmtDateTime(r.createdAt))}</td>
             <td style="font-size:12px;white-space:nowrap">${repoCell}</td>
             <td>${modeBadge}</td>
@@ -5285,7 +5298,7 @@ function renderPrTimelineBody(data) {
             const issueCount = e.record.output?.issueCount ?? 0;
             const dotColor = decision === 'APPROVE' ? '#22c55e' : decision === 'CHANGES_REQUESTED' ? '#f59e0b' : '#6b7280';
             parts.push(`
-                <div style="display:flex;gap:10px;padding:10px;border-left:3px solid ${dotColor};background:var(--bg-secondary,#161614);border-radius:4px;cursor:pointer" onclick="closeModal();currentPage='ai-reviews';renderPage();setTimeout(()=>openAiReviewDetail('${esc(e.record.id)}'),300)">
+                <div style="display:flex;gap:10px;padding:10px;border-left:3px solid ${dotColor};background:var(--bg-secondary,#161614);border-radius:4px;cursor:pointer" onclick="closeModal();currentPage='ai-reviews';renderPage();setTimeout(()=>openAiReviewDetail('${escJs(e.record.id)}'),300)">
                     <div style="flex:1">
                         <div style="font-weight:600;font-size:12px">📋 AI Review · <code style="color:${dotColor}">${esc(decision)}</code> · ${issueCount} issue${issueCount === 1 ? '' : 's'}${costSpan}</div>
                         <div style="font-family:var(--mono);font-size:11px;color:var(--text-muted)">${esc(e.record.id)} · ${esc(fmtDateTime(e.record.createdAt))}</div>
@@ -5300,7 +5313,7 @@ function renderPrTimelineBody(data) {
             const rj = r.issues?.rejected ?? 0;
             const df = r.issues?.deferred ?? 0;
             parts.push(`
-                <div style="display:flex;gap:10px;padding:10px;border-left:3px solid ${dotColor};background:var(--bg-secondary,#161614);border-radius:4px;cursor:pointer" onclick="closeModal();setTimeout(()=>openAddressRunDetail('${esc(r.id)}'),300)">
+                <div style="display:flex;gap:10px;padding:10px;border-left:3px solid ${dotColor};background:var(--bg-secondary,#161614);border-radius:4px;cursor:pointer" onclick="closeModal();setTimeout(()=>openAddressRunDetail('${escJs(r.id)}'),300)">
                     <div style="flex:1">
                         <div style="font-weight:600;font-size:12px">🔧 Address (${esc(r.mode)}) · iter ${r.iteration}/${r.iterationCap} · ${a}✓ · ${rj}✗ · ${df}⏸ · <code>${esc(outcome)}</code>${costSpan}</div>
                         <div style="font-family:var(--mono);font-size:11px;color:var(--text-muted)">${esc(r.id)} · ${esc(fmtDateTime(r.createdAt))}</div>
@@ -5441,8 +5454,8 @@ function renderWorkdirRow(w) {
         ? `<span title="Locked by pid ${w.lockHolder?.pid}" class="badge" style="background:#f59e0b22;color:#f59e0b">locked</span>`
         : `<span class="badge" style="background:#22c55e22;color:#22c55e">idle</span>`;
     const evictBtn = w.locked
-        ? `<button class="btn btn-sm btn-ghost" onclick="evictWorkdir('${esc(w.owner)}','${esc(w.repo)}',${w.prNumber}, true)" title="Force-evict (lock will be ignored)">Force evict</button>`
-        : `<button class="btn btn-sm btn-ghost" onclick="evictWorkdir('${esc(w.owner)}','${esc(w.repo)}',${w.prNumber}, false)">Evict</button>`;
+        ? `<button class="btn btn-sm btn-ghost" onclick="evictWorkdir('${escJs(w.owner)}','${escJs(w.repo)}',${w.prNumber}, true)" title="Force-evict (lock will be ignored)">Force evict</button>`
+        : `<button class="btn btn-sm btn-ghost" onclick="evictWorkdir('${escJs(w.owner)}','${escJs(w.repo)}',${w.prNumber}, false)">Evict</button>`;
     return `
         <tr>
             <td style="font-size:12px"><code>${esc(w.owner)}/${esc(w.repo)}</code></td>
@@ -5657,7 +5670,7 @@ function renderAiReviewRow(r) {
     else if (r.label?.verdict === 'bad') labelCell = '<span title="Marked bad" style="color:#ef4444;font-size:14px">✗</span>';
 
     return `
-        <tr style="cursor:pointer" onclick="openAiReviewDetail('${esc(r.id)}')">
+        <tr style="cursor:pointer" onclick="openAiReviewDetail('${escJs(r.id)}')">
             <td style="font-family:var(--mono);font-size:12px;color:var(--text-muted);white-space:nowrap">${esc(fmtDateTime(r.createdAt))}</td>
             <td>${r.workflowName ? `<span class="badge badge-action">${esc(r.workflowName)}</span>` : '<span style="color:var(--text-muted)">—</span>'}</td>
             <td style="font-size:12px;white-space:nowrap">${prCell}</td>
@@ -5760,8 +5773,8 @@ function renderAiReviewDetailBody(r) {
                 <span style="font-size:11px;color:var(--text-muted)">runs <code>address-review</code> against ${esc(r.event.repo)} #${r.event.prNumber}</span>
             </div>
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-                <button class="btn btn-sm btn-primary" onclick="triggerAddressRun('${esc(r.event.repo)}', ${r.event.prNumber}, '${esc(r.id)}', 'suggest')">👀 Suggest fixes</button>
-                <button class="btn btn-sm btn-ghost" onclick="triggerAddressRun('${esc(r.event.repo)}', ${r.event.prNumber}, '${esc(r.id)}', 'push')" title="Push directly to the PR branch — only run this if you trust the bot to commit fixes">⚡ Push fixes</button>
+                <button class="btn btn-sm btn-primary" onclick="triggerAddressRun('${escJs(r.event.repo)}', ${r.event.prNumber}, '${escJs(r.id)}', 'suggest')">👀 Suggest fixes</button>
+                <button class="btn btn-sm btn-ghost" onclick="triggerAddressRun('${escJs(r.event.repo)}', ${r.event.prNumber}, '${escJs(r.id)}', 'push')" title="Push directly to the PR branch — only run this if you trust the bot to commit fixes">⚡ Push fixes</button>
                 <span style="color:var(--text-muted);font-size:11px">opens a new GitHub review or commit on this PR</span>
             </div>
         </div>
@@ -5773,15 +5786,15 @@ function renderAiReviewDetailBody(r) {
                 <span style="font-size:11px;color:var(--text-muted)">${r.label ? `marked ${esc(r.label.verdict)} · ${esc(fmtDateTime(r.label.labeledAt))}` : 'helps decide if truncation is dropping signal'}</span>
             </div>
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-                <button class="btn btn-sm ${r.label?.verdict === 'good' ? 'btn-primary' : 'btn-ghost'}" onclick="setAiReviewLabel('${esc(r.id)}','good')">👍 Good</button>
-                <button class="btn btn-sm ${r.label?.verdict === 'bad' ? 'btn-primary' : 'btn-ghost'}" onclick="setAiReviewLabel('${esc(r.id)}','bad')">👎 Bad</button>
-                ${r.label ? `<button class="btn btn-sm btn-ghost" onclick="clearAiReviewLabel('${esc(r.id)}')">Clear</button>` : ''}
+                <button class="btn btn-sm ${r.label?.verdict === 'good' ? 'btn-primary' : 'btn-ghost'}" onclick="setAiReviewLabel('${escJs(r.id)}','good')">👍 Good</button>
+                <button class="btn btn-sm ${r.label?.verdict === 'bad' ? 'btn-primary' : 'btn-ghost'}" onclick="setAiReviewLabel('${escJs(r.id)}','bad')">👎 Bad</button>
+                ${r.label ? `<button class="btn btn-sm btn-ghost" onclick="clearAiReviewLabel('${escJs(r.id)}')">Clear</button>` : ''}
                 <input id="ai-review-note-input" type="text" placeholder="Optional note (e.g. 'missed a real bug in dropped file')"
                        value="${esc(r.label?.note || '')}"
                        data-verdict="${esc(r.label?.verdict || '')}"
                        data-saved-note="${esc(r.label?.note || '')}"
                        style="flex:1;min-width:240px;padding:6px 10px;background:var(--bg-primary);border:1px solid var(--border);color:var(--text-primary);font-size:12px;border-radius:4px"
-                       onkeydown="if(event.key==='Enter'){saveAiReviewNote('${esc(r.id)}')}" onblur="saveAiReviewNote('${esc(r.id)}')" />
+                       onkeydown="if(event.key==='Enter'){saveAiReviewNote('${escJs(r.id)}')}" onblur="saveAiReviewNote('${escJs(r.id)}')" />
             </div>
         </div>
     `;
@@ -6288,7 +6301,7 @@ function renderChatSessionCard(session) {
     const scopeBadge = chatScopeBadge(session.scope);
     const updated = new Date(session.updatedAt).toLocaleString();
     return `
-        <div class="card" style="flex-direction:column;align-items:stretch;gap:8px;cursor:pointer" onclick="openChatSession('${esc(session.id)}')">
+        <div class="card" style="flex-direction:column;align-items:stretch;gap:8px;cursor:pointer" onclick="openChatSession('${escJs(session.id)}')">
             <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
                 ${scopeBadge}
                 <strong style="font-size:14px;flex:1">${esc(session.title)}</strong>
@@ -6298,7 +6311,7 @@ function renderChatSessionCard(session) {
                 <div style="margin-top:2px">Updated: ${esc(updated)}</div>
             </div>
             <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:4px">
-                <button class="btn btn-ghost btn-sm" onclick="event.stopPropagation(); deleteChatSession('${esc(session.id)}')" style="color:#ef4444">Delete</button>
+                <button class="btn btn-ghost btn-sm" onclick="event.stopPropagation(); deleteChatSession('${escJs(session.id)}')" style="color:#ef4444">Delete</button>
             </div>
         </div>`;
 }
@@ -6726,7 +6739,7 @@ function renderChatRepoDropdown() {
         const badge = r.source === 'config' ? '<code class="combobox-option-code">configured</code>' :
             r.private ? '<code class="combobox-option-code">private</code>' : '';
         const desc = r.description ? esc(r.description) : '';
-        return `<div class="combobox-option" onclick="selectChatRepoFromPicker('${esc(r.full_name)}')">
+        return `<div class="combobox-option" onclick="selectChatRepoFromPicker('${escJs(r.full_name)}')">
             <span class="combobox-option-label">${esc(r.full_name)}</span>
             <span class="combobox-option-desc">${desc}</span>
             ${badge}
@@ -6748,7 +6761,7 @@ function renderChatRepoDropdown() {
     // Allow free-form owner/repo entry when query looks like one and isn't already listed.
     if (query && /^[\w.-]+\/[\w.-]+$/.test(query) && !repos.some((r) => r.full_name.toLowerCase() === query)) {
         sections.unshift(`<div class="combobox-group-label">Use as typed</div>
-            <div class="combobox-option" onclick="selectChatRepoFromPicker('${esc(query)}')">
+            <div class="combobox-option" onclick="selectChatRepoFromPicker('${escJs(query)}')">
                 <span class="combobox-option-label">${esc(query)}</span>
                 <span class="combobox-option-desc">Use this repository as entered</span>
             </div>`);
@@ -6828,7 +6841,7 @@ function renderChatBranchDropdown() {
     let html = '';
     if (filtered.length) {
         html += filtered.slice(0, 100).map((b) => `
-            <div class="combobox-option" onclick="selectChatBranchFromPicker('${esc(b.name)}')">
+            <div class="combobox-option" onclick="selectChatBranchFromPicker('${escJs(b.name)}')">
                 <span class="combobox-option-label">${esc(b.name)}</span>
                 <span class="combobox-option-desc">${b.protected ? 'protected' : ''}</span>
                 ${b.sha ? `<code class="combobox-option-code">${esc(b.sha)}</code>` : ''}
@@ -6836,7 +6849,7 @@ function renderChatBranchDropdown() {
     }
     if (query && !branches.some((b) => b.name.toLowerCase() === query)) {
         html = `<div class="combobox-group-label">Use as typed</div>
-            <div class="combobox-option" onclick="selectChatBranchFromPicker('${esc(query)}')">
+            <div class="combobox-option" onclick="selectChatBranchFromPicker('${escJs(query)}')">
                 <span class="combobox-option-label">${esc(query)}</span>
                 <span class="combobox-option-desc">Use this ref as entered</span>
             </div>` + html;
@@ -6929,7 +6942,7 @@ function renderChatPrOption(pr, repo) {
             ? '<code class="combobox-option-code" style="background:rgba(234,179,8,0.2);color:#eab308">draft</code>'
             : '<code class="combobox-option-code" style="background:rgba(34,197,94,0.15);color:#22c55e">open</code>';
     const sub = `${pr.author ? '@' + pr.author : ''}${pr.head?.ref ? ` · ${pr.head.ref}` : ''}`;
-    return `<div class="combobox-option" onclick="selectChatPrFromPicker('${esc(repo)}', ${Number(pr.number)})">
+    return `<div class="combobox-option" onclick="selectChatPrFromPicker('${escJs(repo)}', ${Number(pr.number)})">
         <span class="combobox-option-label">#${Number(pr.number)} ${esc(pr.title || '')}</span>
         <span class="combobox-option-desc">${esc(sub)}</span>
         ${stateBadge}
@@ -7112,7 +7125,7 @@ async function renderChatThread(el, session) {
         </div>
         <div style="display:flex;gap:8px;align-items:flex-end">
             <textarea id="chat-input" class="form-input" rows="3" style="flex:1;resize:vertical" placeholder="Ask anything about this ${session.scope.kind}… (Ctrl+Enter to send)"></textarea>
-            <button class="btn btn-primary" id="chat-send-btn" onclick="sendChatMessage('${esc(session.id)}')">Send</button>
+            <button class="btn btn-primary" id="chat-send-btn" onclick="sendChatMessage('${escJs(session.id)}')">Send</button>
         </div>
     `;
 
