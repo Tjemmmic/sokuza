@@ -25,9 +25,16 @@ const TRIGGER_TYPE_TO_SOURCE: Record<string, string> = {
     'trigger.manual': 'manual',
 };
 
+// Reverse map. Assumes the source strings in TRIGGER_TYPE_TO_SOURCE are
+// unique (they are — one node type per source); if a future entry reused a
+// source, the inversion would silently keep the last one.
+const SOURCE_TO_TRIGGER_TYPE: Record<string, string> = Object.fromEntries(
+    Object.entries(TRIGGER_TYPE_TO_SOURCE).map(([type, src]) => [src, type]),
+);
+
 /** Find the (first) trigger node in the graph, if any. */
 export function findTriggerNode(graph: NodeGraph): GraphNode | undefined {
-    return graph.nodes.find((n) => n.type.startsWith('trigger.'));
+    return graph.nodes.find((n) => typeof n.type === 'string' && n.type.startsWith('trigger.'));
 }
 
 /**
@@ -124,4 +131,68 @@ export function normalizeGraphWorkflow(wf: WorkflowDefinition): WorkflowDefiniti
         event: yamlEventList.length > 0 ? yamlEventList : derived.event,
     };
     return { ...wf, trigger: merged, steps: wf.steps ?? [] };
+}
+
+/**
+ * Project the workflow's *effective* trigger (the merged `trigger:` block
+ * the engine actually matches on) back into the graph's trigger node, so
+ * the visual editor renders the truth.
+ *
+ * The bug this fixes: a workflow whose top-level `trigger:` says
+ * `source: gh-cli, author: Tjemmmic` but whose graph trigger node is a
+ * stale `trigger.github` with no author filter matches correctly at
+ * runtime (the engine reads the merged `trigger:` via
+ * `normalizeGraphWorkflow`) but renders wrong in the editor, which shows
+ * the raw node. This rewrites the trigger node's `type` (from the source)
+ * and filter config (events/repos/branches/authors/labels + excludes) to
+ * mirror the merged trigger. Non-trigger config keys are preserved.
+ *
+ * Read-path only (the dashboard editor's load) — it never persists on its
+ * own, so it can't corrupt stored config; the corrected node is only
+ * written if the user then saves. Idempotent and a no-op for non-graph
+ * workflows or ones with no resolvable trigger.
+ */
+export function syncTriggerNodeFromWorkflow(wf: WorkflowDefinition): WorkflowDefinition {
+    try {
+        return syncTriggerNodeUnsafe(wf);
+    } catch {
+        // Display-only enhancement — never break the editor load over a
+        // malformed graph (e.g. a node missing its `type`, or a bad trigger
+        // config that `extractTriggerFromGraph` rejects).
+        return wf;
+    }
+}
+
+function syncTriggerNodeUnsafe(wf: WorkflowDefinition): WorkflowDefinition {
+    if (!isGraphWorkflow(wf)) return wf;
+    const graph = wf.graph!;
+    const triggerNode = findTriggerNode(graph);
+    if (!triggerNode) return wf;
+
+    const merged = normalizeGraphWorkflow(wf).trigger;
+    if (!merged) return wf;
+
+    const source = Array.isArray(merged.source) ? merged.source[0] : merged.source;
+    const newType = (source && SOURCE_TO_TRIGGER_TYPE[source]) || triggerNode.type;
+
+    const cfg: Record<string, unknown> = { ...(triggerNode.config ?? {}) };
+    const setList = (key: string, val: unknown): void => {
+        const list = toArray(val).filter((v) => typeof v === 'string' && v.length > 0);
+        if (list.length > 0) cfg[key] = list;
+        else delete cfg[key];
+    };
+    setList('events', merged.event);
+    setList('repos', merged.repo);
+    setList('branches', merged.branch);
+    setList('authors', merged.author);
+    setList('labels', merged.labels);
+    setList('exclude_repos', merged.exclude?.repo);
+    setList('exclude_branches', merged.exclude?.branch);
+    setList('exclude_authors', merged.exclude?.author);
+    setList('exclude_labels', merged.exclude?.labels);
+
+    const nodes = graph.nodes.map((n) =>
+        n.id === triggerNode.id ? { ...n, type: newType, config: cfg } : n,
+    );
+    return { ...wf, graph: { ...graph, nodes } };
 }

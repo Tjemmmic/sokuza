@@ -6,6 +6,7 @@ import yaml from 'js-yaml';
 import type { SokuzaConfig, EventPayload, WebhookDelivery, WorkflowRunRecord } from '../core/types.js';
 import type { WorkflowQueue } from '../core/queue.js';
 import type { ConfigStore } from '../core/config-store.js';
+import { ARGS_STYLES } from '../core/args-styles.js';
 import type { LogStore } from '../core/log-store.js';
 import { VERSION } from '../version.js';
 import { serviceStatus, installService, uninstallService, restartService, isServiceInstalled } from '../cli/service.js';
@@ -385,6 +386,43 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
         return { ok: true, workflow: result.workflow };
     });
 
+    // Quick enable/disable from the Workflows tab without opening the
+    // editor. Body `{ enabled: bool }` sets it explicitly; an empty body
+    // flips the current state (default is enabled, so a workflow with no
+    // `enabled` field toggles to disabled).
+    server.post('/api/workflows/:name/toggle', async (request, reply) => {
+        const { name } = request.params as { name: string };
+        const body = (request.body ?? {}) as { enabled?: unknown };
+        // Only an explicit boolean sets the state; anything else (missing,
+        // or a non-boolean like the string "true") flips the current state.
+        // `name` is used purely as an equality lookup below — never as a
+        // filesystem path — so no path-traversal surface.
+        const explicitEnabled = body.enabled === true ? true : body.enabled === false ? false : null;
+
+        const result = await deps.configStore.updateRaw((config) => {
+            const workflows = ((config.workflows as unknown[]) ?? []) as Record<string, unknown>[];
+            const wf = workflows.find((w) => w.name === name);
+            if (!wf) return { found: false as const, enabled: false };
+            const next = explicitEnabled !== null
+                ? explicitEnabled
+                : wf.enabled === false; // currently disabled → enable, else disable
+            // Keep the YAML clean: an enabled workflow is the default, so
+            // drop the field rather than writing `enabled: true`.
+            if (next) delete wf.enabled;
+            else wf.enabled = false;
+            config.workflows = workflows;
+            return { found: true as const, enabled: next };
+        });
+
+        if (!result.found) {
+            return reply.status(404).send({ error: `Workflow "${name}" not found` });
+        }
+
+        await deps.reloadConfig();
+        logger.info({ workflow: name, enabled: result.enabled }, 'Workflow toggled via dashboard');
+        return { ok: true, enabled: result.enabled };
+    });
+
     server.delete('/api/workflows/:name', async (request, reply) => {
         const { name } = request.params as { name: string };
 
@@ -466,7 +504,13 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
         if (!workflow) {
             return reply.status(404).send({ error: `Workflow "${name}" not found` });
         }
-        return { workflow };
+        // Project the effective (merged) trigger back into the graph's
+        // trigger node so the visual editor shows the truth — e.g. a
+        // `source: gh-cli` + `author:` workflow whose graph node is a stale
+        // `trigger.github` with no author. Read-path only; never persisted
+        // unless the user saves.
+        const { syncTriggerNodeFromWorkflow } = await import('../core/nodes/graph-trigger.js');
+        return { workflow: syncTriggerNodeFromWorkflow(workflow) };
     });
 
     // ─── Run History ────────────────────────────────────────────────────
@@ -986,8 +1030,12 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
     });
 
     server.post('/api/system/update/check', async () => {
-        await refreshUpdateCache({ force: true });
-        return buildUpdateSnapshot(await readUpdateCache());
+        const result = await refreshUpdateCache({ force: true });
+        return {
+            ...buildUpdateSnapshot(await readUpdateCache()),
+            checkOk: result.ok,
+            checkError: result.error ?? null,
+        };
     });
 
     server.post('/api/system/update', async (_request, reply) => {
@@ -1111,6 +1159,7 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
     async function maskProviderEntry(
         name: string,
         entry: Record<string, unknown>,
+        isBuiltin = BUILTIN_PROVIDERS.has(name),
     ): Promise<Record<string, unknown>> {
         const { maskSecret, isCliInstalled } = await import('../core/ai-providers.js');
         const apiKey = entry.api_key as string | undefined;
@@ -1135,7 +1184,7 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
             api_key_masked: maskSecret(apiKey),
             key_status: keyStatus,
             cli_installed: cliInstalled,
-            is_builtin: BUILTIN_PROVIDERS.has(name),
+            is_builtin: isBuiltin,
         };
     }
 
@@ -1171,8 +1220,8 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
                 ? body.command.trim()
                 : 'claude';
             const argsStyle = body.args_style;
-            if (argsStyle !== 'claude-code' && argsStyle !== 'opencode') {
-                return new Error('args_style must be "claude-code" or "opencode"');
+            if (typeof argsStyle !== 'string' || !(ARGS_STYLES as readonly string[]).includes(argsStyle)) {
+                return new Error(`args_style must be one of: ${ARGS_STYLES.join(', ')}`);
             }
             entry.args_style = argsStyle;
             if (body.env && typeof body.env === 'object' && !Array.isArray(body.env)) {
@@ -1219,6 +1268,17 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
                 maskProviderEntry(name, (entry ?? {}) as Record<string, unknown>),
             ),
         );
+
+        // Surface built-in + auto-detected CLI providers (gemini, codex,
+        // opencode found on PATH, plus the always-on claude-code/anthropic)
+        // that the user hasn't explicitly configured, so they "just show
+        // up". Config-declared providers above win on name collision.
+        const { listImplicitProviders } = await import('../core/ai-providers.js');
+        const present = new Set(Object.keys(providers));
+        for (const imp of listImplicitProviders()) {
+            if (present.has(imp.name)) continue;
+            masked.push(await maskProviderEntry(imp.name, imp.entry, true));
+        }
 
         return {
             providers: masked,

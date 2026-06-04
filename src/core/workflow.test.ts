@@ -814,6 +814,87 @@ describe('matchesTrigger', () => {
     });
 });
 
+// ─── syncTriggerNodeFromWorkflow (editor display fix) ───────────────────────
+
+describe('syncTriggerNodeFromWorkflow', () => {
+    it('projects the merged trigger (source + author) back into the graph node', async () => {
+        const { syncTriggerNodeFromWorkflow } = await import('./nodes/graph-trigger.js');
+        // The visual-editor bug: graph node is a stale `trigger.github`
+        // with no author, but the YAML trigger says gh-cli + author.
+        const wf: WorkflowDefinition = {
+            name: 'auto-pr-review',
+            trigger: {
+                source: 'gh-cli',
+                event: ['pull_request.opened', 'pull_request.synchronize'],
+                author: 'Tjemmmic',
+            },
+            graph: {
+                nodes: [
+                    { id: 'trigger', type: 'trigger.github', config: { events: ['pull_request.opened'] } },
+                    { id: 'fetch', type: 'github.fetch-diff', config: {} },
+                ],
+                edges: [],
+            },
+        } as WorkflowDefinition;
+
+        const out = syncTriggerNodeFromWorkflow(wf);
+        const node = out.graph!.nodes.find((n) => n.id === 'trigger')!;
+        expect(node.type).toBe('trigger.gh-cli');
+        expect(node.config!.events).toEqual(['pull_request.opened', 'pull_request.synchronize']);
+        expect(node.config!.authors).toEqual(['Tjemmmic']);
+        // Non-trigger nodes are untouched.
+        expect(out.graph!.nodes.find((n) => n.id === 'fetch')!.type).toBe('github.fetch-diff');
+    });
+
+    it('is a no-op for non-graph (legacy steps) workflows', async () => {
+        const { syncTriggerNodeFromWorkflow } = await import('./nodes/graph-trigger.js');
+        const wf = { name: 'x', trigger: { source: 'github' }, steps: [] } as unknown as WorkflowDefinition;
+        expect(syncTriggerNodeFromWorkflow(wf)).toBe(wf);
+    });
+
+    it('is a no-op when the graph has no trigger node', async () => {
+        const { syncTriggerNodeFromWorkflow } = await import('./nodes/graph-trigger.js');
+        const wf = {
+            name: 'x',
+            trigger: { source: 'gh-cli' },
+            graph: { nodes: [{ id: 'fetch', type: 'github.fetch-diff', config: {} }], edges: [] },
+        } as unknown as WorkflowDefinition;
+        expect(syncTriggerNodeFromWorkflow(wf)).toBe(wf);
+    });
+
+    it('handles a trigger node with null/absent config without throwing', async () => {
+        const { syncTriggerNodeFromWorkflow } = await import('./nodes/graph-trigger.js');
+        const wf = {
+            name: 'x',
+            trigger: { source: 'gh-cli', author: 'me' },
+            graph: { nodes: [{ id: 'trigger', type: 'trigger.github' }], edges: [] },
+        } as unknown as WorkflowDefinition;
+        const out = syncTriggerNodeFromWorkflow(wf);
+        const node = out.graph!.nodes.find((n) => n.id === 'trigger')!;
+        expect(node.type).toBe('trigger.gh-cli');
+        expect(node.config!.authors).toEqual(['me']);
+    });
+
+    it('array source: node type follows the first source, unknown sources fall back to the node type', async () => {
+        const { syncTriggerNodeFromWorkflow } = await import('./nodes/graph-trigger.js');
+        // First source is a known one → node type follows it.
+        const known = {
+            name: 'x',
+            trigger: { source: ['gh-cli', 'github'], event: ['push'] },
+            graph: { nodes: [{ id: 'trigger', type: 'trigger.github', config: {} }], edges: [] },
+        } as unknown as WorkflowDefinition;
+        expect(syncTriggerNodeFromWorkflow(known).graph!.nodes[0].type).toBe('trigger.gh-cli');
+
+        // First source unknown → keep the existing node type (no crash).
+        const unknown = {
+            name: 'y',
+            trigger: { source: ['bogus-source'], event: ['push'] },
+            graph: { nodes: [{ id: 'trigger', type: 'trigger.github', config: {} }], edges: [] },
+        } as unknown as WorkflowDefinition;
+        expect(syncTriggerNodeFromWorkflow(unknown).graph!.nodes[0].type).toBe('trigger.github');
+    });
+});
+
 // ─── interpolateParams ──────────────────────────────────────────────────────
 
 describe('interpolateParams', () => {

@@ -1,0 +1,143 @@
+# Ensemble PR Review (multi-provider + synthesis)
+#
+# Runs the PR diff through several AI providers IN PARALLEL, then a final
+# "lead reviewer" pass merges their findings into ONE definitive review
+# that gets posted. More robust than a single model: independent reviewers
+# catch different issues, and the synthesizer dedupes + resolves
+# disagreements using the diff as the tie-breaker. Because the reviews run
+# concurrently, wall-clock is roughly one review, not the sum.
+#
+# Customize the `provider:` on each `review_*` node to providers you have
+# configured (Settings → AI Providers — claude-code, gemini, opencode,
+# codex are auto-detected when installed; add API providers as needed).
+# Each leg is `on_error: continue`, so a provider that's unavailable or
+# errors simply drops out and the synthesis proceeds with whatever came
+# back. Add or remove legs freely.
+#
+# Exercises: trigger.github, github.fetch-diff, ai.review (parallel fan-out
+# + a synthesis pass), github.comment.
+
+description: Review a PR with multiple AIs in parallel, then synthesize one combined review
+icon: 🧑‍⚖️
+
+trigger:
+  source: github
+  event: pull_request.opened
+
+graph:
+  nodes:
+    - id: trigger
+      type: trigger.github
+      position: { x: 60, y: 260 }
+      config:
+        events: [pull_request.opened]
+    - id: fetch_diff
+      type: github.fetch-diff
+      position: { x: 320, y: 260 }
+      config: {}
+    - id: review_a
+      type: ai.review
+      position: { x: 600, y: 80 }
+      config:
+        provider: claude-code
+        timeout: 0
+      on_error: continue
+    - id: review_b
+      type: ai.review
+      position: { x: 600, y: 260 }
+      config:
+        provider: gemini
+        timeout: 0
+      on_error: continue
+    - id: review_c
+      type: ai.review
+      position: { x: 600, y: 440 }
+      config:
+        provider: anthropic
+        timeout: 0
+      on_error: continue
+    - id: synth
+      type: ai.review
+      position: { x: 920, y: 260 }
+      config:
+        timeout: 0
+        # The synthesis pass. Its system prompt embeds the parallel reviews
+        # via {{nodes.review_*.markdown}} (which also makes it depend on
+        # them, so it runs last); the diff is wired in as usual so the lead
+        # reviewer can verify against the actual change. A leg that failed
+        # under on_error interpolates to an empty string and is ignored.
+        prompt: |
+          You are the lead reviewer consolidating several INDEPENDENT code
+          reviews of the SAME pull request into ONE definitive review.
+
+          Independent reviews follow (any may be empty if that reviewer was
+          unavailable — ignore empty ones):
+
+          ===== Reviewer A =====
+          {{nodes.review_a.markdown}}
+
+          ===== Reviewer B =====
+          {{nodes.review_b.markdown}}
+
+          ===== Reviewer C =====
+          {{nodes.review_c.markdown}}
+
+          Merge them: drop duplicates, resolve disagreements using the diff
+          below as the tie-breaker, keep the most severe correct take on
+          each issue, and discard anything not actually supported by the
+          diff. Don't invent issues no reviewer raised unless the diff
+          plainly shows one.
+
+          Respond with a SINGLE JSON object and nothing else — the first
+          character must be `{` and the last `}`:
+
+          {
+            "summary": "1-3 sentence overview and your overall take.",
+            "issues": [
+              { "priority": "P1 | P2 | P3", "title": "Specific one-line title.",
+                "file": "path/to/file.ts:L42-L50",
+                "problem": "What is wrong and why it matters.",
+                "fix": "Concrete fix suggestion." }
+            ],
+            "decision": "APPROVE | CHANGES_REQUESTED",
+            "justification": "Short paragraph explaining the decision."
+          }
+
+          Decide CHANGES_REQUESTED if any P1 exists or there are 3+ P2s;
+          otherwise APPROVE. An empty issues array with APPROVE is valid.
+          Output the JSON now.
+    - id: post
+      type: github.comment
+      position: { x: 1240, y: 260 }
+      config:
+        body: |
+          ## 🤖 AI Code Review (ensemble)
+
+          {{nodes.synth.markdown}}
+
+          ---
+          _Synthesized by Sokuza AI from multiple independent reviewers_
+  edges:
+    - from: { node: trigger, port: prNumber }
+      to: { node: fetch_diff, port: pr_number }
+    - from: { node: trigger, port: repo }
+      to: { node: fetch_diff, port: repo }
+    - from: { node: fetch_diff, port: diff }
+      to: { node: review_a, port: diff }
+    - from: { node: fetch_diff, port: diff }
+      to: { node: review_b, port: diff }
+    - from: { node: fetch_diff, port: diff }
+      to: { node: review_c, port: diff }
+    - from: { node: fetch_diff, port: diff }
+      to: { node: synth, port: diff }
+    - from: { node: trigger, port: prNumber }
+      to: { node: synth, port: pr_number }
+    - from: { node: trigger, port: repo }
+      to: { node: synth, port: repo }
+    - from: { node: trigger, port: prNumber }
+      to: { node: post, port: pr_number }
+    - from: { node: trigger, port: repo }
+      to: { node: post, port: repo }
+    # Sequencing — post interpolates {{nodes.synth.markdown}}.
+    - from: { node: synth, port: markdown }
+      to: { node: post, port: __seq }
