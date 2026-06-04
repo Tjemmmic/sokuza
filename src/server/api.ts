@@ -1214,6 +1214,9 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
                 ? body.command.trim()
                 : 'claude';
             const argsStyle = body.args_style;
+            // Keep in sync with ARGS_STYLES in core/ai-providers.ts — kept
+            // local so the API server doesn't statically import the AI
+            // module (it's loaded dynamically everywhere else here).
             const validStyles = ['claude-code', 'opencode', 'gemini', 'codex'];
             if (typeof argsStyle !== 'string' || !validStyles.includes(argsStyle)) {
                 return new Error(`args_style must be one of: ${validStyles.join(', ')}`);

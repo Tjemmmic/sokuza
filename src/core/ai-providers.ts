@@ -338,8 +338,9 @@ export function commandExistsOnPath(command: string): boolean {
     }
     const exts = isWin ? (process.env.PATHEXT ?? '.EXE;.CMD;.BAT;.COM').split(';') : [''];
     const dirs = (process.env.PATH ?? '').split(isWin ? ';' : ':');
-    for (const dir of dirs) {
-        if (!dir) continue;
+    for (const rawDir of dirs) {
+        const dir = rawDir.trim();
+        if (!dir) continue; // skip empty and whitespace-only PATH entries
         for (const ext of exts) {
             try {
                 if (statSync(join(dir, command + ext)).isFile()) return true;
@@ -568,7 +569,11 @@ export async function runCompletion(
     provider: AIProvider,
     request: CompletionRequest,
 ): Promise<CompletionResult> {
-    const model = request.model || provider.defaultModel;
+    // `|| ''` makes `model` a definite string. The guard below then
+    // guarantees a NON-empty model for every kind except the gemini/codex
+    // CLIs (which pick their own default when `-m` is omitted), so the
+    // branches can pass `model` straight through — no non-null assertions.
+    const model = request.model || provider.defaultModel || '';
     if (!model && !cliStyleCanDefaultModel(provider)) {
         throw new Error(
             `AI provider "${provider.name}" has no model (pass params.model or set default_model)`,
@@ -577,11 +582,11 @@ export async function runCompletion(
 
     switch (provider.kind) {
         case 'anthropic-api':
-            return runAnthropicCompletion(provider, { ...request, model: model! });
+            return runAnthropicCompletion(provider, { ...request, model });
         case 'openai-compatible-api':
-            return runOpenAICompletion(provider, { ...request, model: model! });
+            return runOpenAICompletion(provider, { ...request, model });
         case 'cli':
-            return runCliCompletion(provider, { ...request, model: model ?? '' });
+            return runCliCompletion(provider, { ...request, model });
     }
 }
 
