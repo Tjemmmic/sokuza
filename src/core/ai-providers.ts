@@ -25,7 +25,8 @@
 
 import Anthropic from '@anthropic-ai/sdk';
 import { spawn } from 'node:child_process';
-import { statSync, accessSync, constants } from 'node:fs';
+import { statSync, accessSync, constants, mkdirSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { Logger } from 'pino';
 import { abortErrorFromSignal } from './abort-error.js';
@@ -115,11 +116,14 @@ const OPENAI_FALLBACK_MODELS = [
 // Best-effort suggestion lists for the Gemini / Codex CLIs. The model
 // field is free-text, so these only seed the datalist — leave the field
 // blank to use whichever model the CLI defaults to.
+// Current Gemini 3.x first (verified resolvable via the CLI), then 2.5.
+// Note: there is no `gemini-3.x-flash` / `gemini-3.5-flash` — the 3.x
+// Flash tier is the `-lite` id below.
 const GEMINI_MODELS = [
-    'gemini-2.5-pro',
+    'gemini-3.1-flash-lite',
+    'gemini-3-pro-preview',
     'gemini-2.5-flash',
     'gemini-2.5-flash-lite',
-    'gemini-2.0-flash',
 ];
 
 const CODEX_MODELS = [
@@ -831,6 +835,29 @@ async function runOpenAICompletion(
     };
 }
 
+/**
+ * An empty, throwaway directory used as the cwd for CLI completions that
+ * have no workdir of their own. The CLI providers (gemini, codex, …) are
+ * agentic and we pass directory-trust bypass flags; running them in an
+ * isolated empty dir — instead of inheriting the daemon's cwd (which may
+ * be a real project / repo) — means a prompt-injected model that tries a
+ * file/shell tool finds nothing sensitive and has nowhere to write. We're
+ * using these providers purely for inference, so they need no real cwd.
+ * Best-effort: if the dir can't be created we fall back to no cwd.
+ */
+let _cliSandboxDir: string | undefined;
+function cliSandboxDir(): string | undefined {
+    if (_cliSandboxDir) return _cliSandboxDir;
+    try {
+        const dir = join(homedir(), '.sokuza', 'cli-sandbox');
+        mkdirSync(dir, { recursive: true });
+        _cliSandboxDir = dir;
+        return dir;
+    } catch {
+        return undefined;
+    }
+}
+
 async function runCliCompletion(
     provider: AIProvider,
     request: CompletionRequest & { model: string },
@@ -853,7 +880,9 @@ async function runCliCompletion(
         command: provider.command!,
         args: invocation.args,
         env: provider.env,
-        cwd: request.workdir,
+        // Inference-only: run in an isolated empty sandbox unless a real
+        // workdir (e.g. a PR clone) was wired in.
+        cwd: request.workdir || cliSandboxDir(),
         stdin: invocation.stdin,
         logger: request.logger,
         providerName: provider.name,
@@ -1140,7 +1169,13 @@ function buildGeminiArgs(input: CliArgsInput): string[] {
 function buildCodexArgs(input: CliArgsInput): string[] {
     const args = ['exec', '--json', '--skip-git-repo-check'];
     if (input.model) args.push('-m', input.model);
-    if (input.mode === 'agent') args.push('--dangerously-bypass-approvals-and-sandbox');
+    if (input.mode === 'agent') {
+        args.push('--dangerously-bypass-approvals-and-sandbox');
+    } else {
+        // Completion is inference-only: restrict any command the model
+        // issues to a read-only sandbox (no writes, no network).
+        args.push('--sandbox', 'read-only');
+    }
     return args;
 }
 

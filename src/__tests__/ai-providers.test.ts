@@ -283,14 +283,22 @@ describe('buildCliInvocation', () => {
             'the prompt',
         );
         expect(inv.stdin).toBeNull();
-        expect(inv.args).toEqual(['exec', '--json', '--skip-git-repo-check', '-m', 'gpt-5', 'the prompt']);
+        expect(inv.args).toEqual(['exec', '--json', '--skip-git-repo-check', '-m', 'gpt-5', '--sandbox', 'read-only', 'the prompt']);
     });
 
-    it('codex: agent mode adds the bypass flag', () => {
+    it('codex: completion is read-only sandboxed (no bypass)', () => {
+        const args = buildCliArgs('codex', { mode: 'completion', model: 'gpt-5', systemPrompt: 's' });
+        expect(args).toContain('--skip-git-repo-check');
+        expect(args.join(' ')).toContain('--sandbox read-only');
+        expect(args).not.toContain('--dangerously-bypass-approvals-and-sandbox');
+    });
+
+    it('codex: agent mode bypasses sandbox (tools intended), not read-only', () => {
         const args = buildCliArgs('codex', {
             mode: 'agent', model: 'gpt-5', outputFormat: 'json', allowedTools: [],
         });
         expect(args).toContain('--dangerously-bypass-approvals-and-sandbox');
+        expect(args).not.toContain('read-only');
     });
 });
 
