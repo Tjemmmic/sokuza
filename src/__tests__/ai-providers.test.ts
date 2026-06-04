@@ -259,7 +259,7 @@ describe('buildCliInvocation', () => {
             'the prompt',
         );
         expect(inv.stdin).toBeNull();
-        expect(inv.args).toEqual(['-o', 'text', '-m', 'gemini-2.5-pro', '-p', 'the prompt']);
+        expect(inv.args).toEqual(['-o', 'text', '--skip-trust', '-m', 'gemini-2.5-pro', '-p', 'the prompt']);
     });
 
     it('gemini: omits -m when no model is given (CLI default)', () => {
@@ -268,7 +268,12 @@ describe('buildCliInvocation', () => {
             { mode: 'completion', model: '', systemPrompt: 'sys' },
             'p',
         );
-        expect(inv.args).toEqual(['-o', 'text', '-p', 'p']);
+        expect(inv.args).toEqual(['-o', 'text', '--skip-trust', '-p', 'p']);
+    });
+
+    it('gemini: skips the directory-trust gate', () => {
+        const inv = buildCliInvocation('gemini', { mode: 'completion', model: '', systemPrompt: 's' }, 'p');
+        expect(inv.args).toContain('--skip-trust');
     });
 
     it('codex: exec --json with positional prompt, stdin null', () => {
@@ -278,7 +283,7 @@ describe('buildCliInvocation', () => {
             'the prompt',
         );
         expect(inv.stdin).toBeNull();
-        expect(inv.args).toEqual(['exec', '--json', '-m', 'gpt-5', 'the prompt']);
+        expect(inv.args).toEqual(['exec', '--json', '--skip-git-repo-check', '-m', 'gpt-5', 'the prompt']);
     });
 
     it('codex: agent mode adds the bypass flag', () => {

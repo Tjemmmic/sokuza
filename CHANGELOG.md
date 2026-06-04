@@ -15,6 +15,12 @@ under a new `## [X.Y.Z] - YYYY-MM-DD` heading, bump `version` in
 `package.json`, commit, push to main. The release workflow tags +
 publishes automatically.
 
+## [0.2.3] - 2026-06-04
+
+### Fixed
+
+- **Gemini and Codex providers now run in the daemon's (untrusted) directory.** Recent Gemini/Codex CLIs added a directory-trust safety gate that aborts a headless run outside a "trusted" workspace — so an ensemble (or any) review using them failed with `Gemini CLI is not running in a trusted directory` (exit 55) / `Not inside a trusted directory and --skip-git-repo-check was not specified` (exit 1). `buildGeminiArgs` now passes `--skip-trust` and `buildCodexArgs` passes `--skip-git-repo-check`, so both run non-interactively for a completion. (Codex still needs the Codex CLI to be authenticated separately — that's a `401` from OpenAI, not this gate.)
+
 ## [0.2.2] - 2026-06-03
 
 ### Added

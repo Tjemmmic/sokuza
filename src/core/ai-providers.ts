@@ -1112,9 +1112,14 @@ function buildOpencodeArgs(input: CliArgsInput): string[] {
  * - No `--system-prompt` flag and no separate agent mode — the caller
  *   folds the system prompt into the user message, and the prompt rides as
  *   the value of `-p` (appended in `buildCliInvocation`).
+ * - `--skip-trust`: newer Gemini CLIs refuse to run in a directory they
+ *   haven't "trusted" (a headless-safety gate) and exit non-zero. We run
+ *   non-interactively in the daemon's cwd (or a clone we made), so trust
+ *   it for the session — otherwise reviews fail with "not running in a
+ *   trusted directory".
  */
 function buildGeminiArgs(input: CliArgsInput): string[] {
-    const args = ['-o', 'text'];
+    const args = ['-o', 'text', '--skip-trust'];
     if (input.model) args.push('-m', input.model);
     return args;
 }
@@ -1124,12 +1129,16 @@ function buildGeminiArgs(input: CliArgsInput): string[] {
  *
  * - `exec --json` → a JSONL event stream re-assembled by `extractCliText`.
  * - `-m <model>` only when set.
+ * - `--skip-git-repo-check`: newer Codex CLIs refuse `exec` outside a
+ *   trusted git repo ("Not inside a trusted directory and
+ *   --skip-git-repo-check was not specified") and exit non-zero. We run
+ *   non-interactively for a completion, so skip that gate.
  * - Agent mode adds `--dangerously-bypass-approvals-and-sandbox` so tool
  *   use isn't blocked on approval prompts Codex can't render without a TTY
  *   (mirrors opencode's `--dangerously-skip-permissions`).
  */
 function buildCodexArgs(input: CliArgsInput): string[] {
-    const args = ['exec', '--json'];
+    const args = ['exec', '--json', '--skip-git-repo-check'];
     if (input.model) args.push('-m', input.model);
     if (input.mode === 'agent') args.push('--dangerously-bypass-approvals-and-sandbox');
     return args;
