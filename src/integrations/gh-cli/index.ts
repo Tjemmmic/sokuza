@@ -68,6 +68,47 @@ const SUPPORTED_EVENTS = [
 
 const DEFAULT_INTERVAL = 60;
 
+/**
+ * Build the `gh search prs` selector flags for the poller from
+ * `integrations.gh-cli.prs`. Default (unset) = the authenticated user's own
+ * PRs (`--author @me`) — fully backward-compatible.
+ *
+ * Widen it to watch other people's / an org's PRs:
+ *   integrations:
+ *     gh-cli:
+ *       prs:
+ *         owners: [my-org]        # all PRs in these orgs/users  → --owner
+ *         authors: [alice, bob]   # PRs by these authors         → --author
+ *         repos: [my-org/api]     # specific repos               → --repo
+ *         involves: [@me]         # PRs you're involved in       → --involves
+ *         search: 'draft:false'   # extra raw qualifiers (positional)
+ * Then a workflow's `exclude.author: <you>` carves your own PRs back out.
+ * Each gh result still flows through matchesTrigger per workflow, so one
+ * poll fans out to every matching workflow (no extra `gh` calls).
+ */
+export function buildPrSearchArgs(raw: unknown): string[] {
+    if (!raw || typeof raw !== 'object') return ['--author', '@me'];
+    const cfg = raw as Record<string, unknown>;
+    const args: string[] = [];
+    const pushFlag = (key: string, flag: string): void => {
+        const val = cfg[key];
+        const list = Array.isArray(val) ? val : typeof val === 'string' ? [val] : [];
+        for (const v of list) {
+            if (typeof v === 'string' && v.trim()) args.push(flag, v.trim());
+        }
+    };
+    pushFlag('authors', '--author');
+    pushFlag('owners', '--owner');
+    pushFlag('repos', '--repo');
+    pushFlag('involves', '--involves');
+    // Raw extra qualifiers ride as the positional query, before the flags.
+    const search = typeof cfg.search === 'string' ? cfg.search.trim() : '';
+    if (search) args.unshift(search);
+    // An empty `prs: {}` shouldn't become a fetch-the-whole-world query.
+    if (args.length === 0) return ['--author', '@me'];
+    return args;
+}
+
 export class GhCliIntegration implements Integration {
     readonly name = 'gh-cli';
     readonly supportedEvents = [...SUPPORTED_EVENTS];
@@ -82,6 +123,10 @@ export class GhCliIntegration implements Integration {
 
     private username = '';
     private pollInterval = DEFAULT_INTERVAL;
+    // `gh search prs` selector flags for the poll. Defaults to the
+    // authenticated user's own PRs; widen via `integrations.gh-cli.prs`
+    // (e.g. owners: [my-org]) to review OTHER people's / org PRs.
+    private prSearchArgs: string[] = ['--author', '@me'];
     private timer: ReturnType<typeof setInterval> | null = null;
     private onEvent: EventHandler | null = null;
 
@@ -104,6 +149,7 @@ export class GhCliIntegration implements Integration {
         }
         this.username = status.username ?? '';
         this.pollInterval = (config.interval as number) ?? DEFAULT_INTERVAL;
+        this.prSearchArgs = buildPrSearchArgs(config.prs);
     }
 
     registerRoutes(_server: FastifyInstance, onEvent: EventHandler): void {
@@ -132,11 +178,19 @@ export class GhCliIntegration implements Integration {
 
     // ─── Public API (used by dashboard endpoints) ───────────────────────
 
-    /** List all open PRs for the authenticated user across all repos */
+    /** List all open PRs for the authenticated user across all repos.
+     *  Used by the dashboard's "my PRs" view — always scoped to @me. */
     static async listMyPrs(): Promise<GhPullRequest[]> {
+        return GhCliIntegration.searchPrs(['--author', '@me']);
+    }
+
+    /** Run `gh search prs` with the given selector flags (e.g. `--author @me`,
+     *  `--owner my-org`). The poller passes its configured `prSearchArgs`;
+     *  per-workflow `author`/`exclude.author` filters then split the results. */
+    static async searchPrs(selectorArgs: string[]): Promise<GhPullRequest[]> {
         return ghJson<GhPullRequest[]>([
             'search', 'prs',
-            '--author', '@me',
+            ...selectorArgs,
             '--state', 'open',
             '--json', 'number,title,url,state,isDraft,updatedAt,labels,repository',
             '--limit', '50',
@@ -196,7 +250,7 @@ export class GhCliIntegration implements Integration {
         if (!this.onEvent) return;
 
         try {
-            const prs = await GhCliIntegration.listMyPrs();
+            const prs = await GhCliIntegration.searchPrs(this.prSearchArgs);
 
             for (const pr of prs) {
                 const repo = pr.repository?.nameWithOwner;

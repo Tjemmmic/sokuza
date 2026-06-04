@@ -5,7 +5,7 @@ vi.mock('./exec.js', () => ({
     ghJson: vi.fn(),
 }));
 
-import { GhCliIntegration } from './index.js';
+import { GhCliIntegration, buildPrSearchArgs } from './index.js';
 import { getGhAuthStatus } from './exec.js';
 
 const mockedGetGhAuthStatus = vi.mocked(getGhAuthStatus);
@@ -64,6 +64,35 @@ describe('GhCliIntegration', () => {
 
             await expect(integration.initialize({})).resolves.toBeUndefined();
             expect(integration.getUsername()).toBe('testuser');
+        });
+    });
+
+    describe('buildPrSearchArgs', () => {
+        it('defaults to the authenticated user (back-compat) when unset', () => {
+            expect(buildPrSearchArgs(undefined)).toEqual(['--author', '@me']);
+            expect(buildPrSearchArgs(null)).toEqual(['--author', '@me']);
+        });
+
+        it('falls back to @me for an empty object (not a fetch-everything query)', () => {
+            expect(buildPrSearchArgs({})).toEqual(['--author', '@me']);
+        });
+
+        it('widens to an org via owners (watch others\' PRs)', () => {
+            expect(buildPrSearchArgs({ owners: ['my-org'] })).toEqual(['--owner', 'my-org']);
+        });
+
+        it('maps authors / repos / involves to repeatable flags', () => {
+            expect(buildPrSearchArgs({ authors: ['alice', 'bob'], repos: ['o/r'], involves: ['@me'] }))
+                .toEqual(['--author', 'alice', '--author', 'bob', '--repo', 'o/r', '--involves', '@me']);
+        });
+
+        it('accepts a bare string and trims it', () => {
+            expect(buildPrSearchArgs({ owners: '  my-org  ' })).toEqual(['--owner', 'my-org']);
+        });
+
+        it('puts raw search qualifiers first as the positional query', () => {
+            expect(buildPrSearchArgs({ owners: ['my-org'], search: 'draft:false' }))
+                .toEqual(['draft:false', '--owner', 'my-org']);
         });
     });
 });
