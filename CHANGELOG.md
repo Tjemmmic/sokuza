@@ -15,6 +15,11 @@ under a new `## [X.Y.Z] - YYYY-MM-DD` heading, bump `version` in
 `package.json`, commit, push to main. The release workflow tags +
 publishes automatically.
 
+### Changed
+
+- **AI Providers moved to their own top-level page.** They previously shared the Integrations page, which blurred the line between event-source integrations and the models that power AI actions. Providers now live under a dedicated **AI Providers** nav entry; Integrations is purely event sources.
+- **Removed the Cron "integration" card.** Cron has no global configuration — schedules are defined per-workflow by choosing `cron` as the trigger source. The card implied a setup step that doesn't exist. The internal scheduler is unchanged; the Integrations page now notes where cron lives.
+
 ### Fixed
 
 - **gh CLI integration no longer flips to "not configured" after editing a workflow.** `gh-cli` is auto-detected at runtime (whenever the GitHub CLI is installed) and injected into the in-memory config, but it's never written to `sokuza.config.yaml`. Any workflow create/update/delete triggers `reloadConfig()`, which replaced the integrations map with the on-disk version and silently dropped the `gh-cli` entry — so the Integrations page reported it as not set up even while gh-cli workflows kept running. Auto-detected integrations are now tracked and re-seeded across reloads.

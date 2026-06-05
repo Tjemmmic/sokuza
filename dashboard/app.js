@@ -519,6 +519,7 @@ async function renderPage() {
 
             case 'library': await renderLibrary(el); break;
             case 'integrations': await renderIntegrations(el); break;
+            case 'ai-providers': await renderAiProviders(el); break;
             case 'events': await renderEvents(el); break;
             case 'queue': await renderQueue(el); break;
             case 'auto-fix': await renderAutoFix(el); break;
@@ -3865,16 +3866,8 @@ window.previewLibraryItem = async function (itemId) {
 // INTEGRATIONS
 // ═════════════════════════════════════════════════════════════════════════════
 async function renderIntegrations(el) {
-    const [intData, cfgData, aiData, cliData] = await Promise.all([
-        api.get('/api/integrations'),
-        api.get('/api/config'),
-        api.get('/api/ai/providers').catch(() => ({ providers: [], default_provider: null })),
-        api.get('/api/ai/cli-status').catch(() => ({ claude: false, opencode: false })),
-    ]);
+    const intData = await api.get('/api/integrations');
     integrations = intData.integrations || {};
-    const aiProviders = Array.isArray(aiData.providers) ? aiData.providers : [];
-    const defaultProvider = aiData.default_provider || '';
-    const cliStatus = cliData || { claude: false, opencode: false };
 
     const defs = [
         {
@@ -3911,16 +3904,12 @@ async function renderIntegrations(el) {
                 { key: 'secret', label: 'Secret (optional)', type: 'password', hint: 'HMAC validation secret' },
             ]
         },
-        {
-            key: 'cron', icon: '⏰', name: 'Cron', desc: 'Scheduled time-based triggers', endpoint: '—',
-            fields: []
-        },
     ];
 
     el.innerHTML = `
         <div class="page-header"><div class="page-header-left">
             <h1 class="page-title">Integrations</h1>
-            <p class="page-subtitle">Connect event sources to Sokuza</p>
+            <p class="page-subtitle">Connect event sources to Sokuza. Scheduled (cron) triggers are set per-workflow — pick <code>cron</code> as the trigger source. AI models live under <a href="#ai-providers" style="color:var(--accent-hover)">AI Providers</a>.</p>
         </div></div>
         <div class="card-grid card-grid-3">
             ${defs.map((d) => {
@@ -3958,31 +3947,41 @@ async function renderIntegrations(el) {
                 </div>`;
     }).join('')}
         </div>
+    `;
+}
 
-        <div style="margin-top:32px">
-            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:12px">
-                <div>
-                    <h2 style="font-size:18px;font-weight:600">AI Providers</h2>
-                    <p style="font-size:13px;color:var(--text-secondary);margin-top:4px">Pick which model powers your AI actions. Keys are stored in <code>~/.sokuza/config.yaml</code>.</p>
-                </div>
-                <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-                    ${aiProviders.length > 0 ? `
-                    <label style="font-size:12px;color:var(--text-secondary)">Default:</label>
-                    <select class="form-input" id="ai-default-select" style="width:auto;min-width:160px;padding:6px 10px;font-size:13px" onchange="setDefaultProvider(this.value)">
-                        ${aiProviders.map(p => `<option value="${esc(p.name)}" ${p.name === defaultProvider ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}
-                    </select>` : ''}
-                    <button class="btn btn-primary btn-sm" onclick="openAiProviderAdd()">+ Add Provider</button>
-                    <button class="btn btn-ghost btn-sm" onclick="openAiTestModal()">🧪 Test</button>
-                </div>
+async function renderAiProviders(el) {
+    const [aiData, cliData] = await Promise.all([
+        api.get('/api/ai/providers').catch(() => ({ providers: [], default_provider: null })),
+        api.get('/api/ai/cli-status').catch(() => ({ claude: false, opencode: false })),
+    ]);
+    const aiProviders = Array.isArray(aiData.providers) ? aiData.providers : [];
+    const defaultProvider = aiData.default_provider || '';
+    const cliStatus = cliData || { claude: false, opencode: false };
+
+    el.innerHTML = `
+        <div class="page-header">
+            <div class="page-header-left">
+                <h1 class="page-title">AI Providers</h1>
+                <p class="page-subtitle">Pick which model powers your AI actions. Keys are stored in <code>~/.sokuza/config.yaml</code>.</p>
             </div>
-            <div class="card-grid card-grid-3">
-                ${aiProviders.length > 0 ? aiProviders.map(p => renderProviderCard(p, cliStatus)).join('') : `
-                    <div class="empty-state" style="grid-column:1/-1">
-                        <div class="empty-icon">🤖</div>
-                        <p class="empty-text">No AI providers configured</p>
-                        <p style="font-size:12px;color:var(--text-muted);margin-top:6px">Click <strong>Add Provider</strong> to set one up — ZAI GLM, Anthropic, Claude Code, Opencode, or custom.</p>
-                    </div>`}
+            <div class="page-header-right" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+                ${aiProviders.length > 0 ? `
+                <label style="font-size:12px;color:var(--text-secondary)">Default:</label>
+                <select class="form-input" id="ai-default-select" style="width:auto;min-width:160px;padding:6px 10px;font-size:13px" onchange="setDefaultProvider(this.value)">
+                    ${aiProviders.map(p => `<option value="${esc(p.name)}" ${p.name === defaultProvider ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}
+                </select>` : ''}
+                <button class="btn btn-primary btn-sm" onclick="openAiProviderAdd()">+ Add Provider</button>
+                <button class="btn btn-ghost btn-sm" onclick="openAiTestModal()">🧪 Test</button>
             </div>
+        </div>
+        <div class="card-grid card-grid-3">
+            ${aiProviders.length > 0 ? aiProviders.map(p => renderProviderCard(p, cliStatus)).join('') : `
+                <div class="empty-state" style="grid-column:1/-1">
+                    <div class="empty-icon">🤖</div>
+                    <p class="empty-text">No AI providers configured</p>
+                    <p style="font-size:12px;color:var(--text-muted);margin-top:6px">Click <strong>Add Provider</strong> to set one up — ZAI GLM, Anthropic, Claude Code, Opencode, or custom.</p>
+                </div>`}
         </div>
     `;
 }
@@ -4087,7 +4086,7 @@ window.setDefaultProvider = async function (name) {
     try {
         await api.post('/api/ai/default', { provider: name });
         toast(`Default provider set to "${name}"`);
-        if (currentPage === 'integrations') await renderIntegrations(document.getElementById('content'));
+        if (currentPage === 'ai-providers') await renderAiProviders(document.getElementById('content'));
     } catch (err) {
         toast('Failed to set default: ' + (err.message || 'Unknown error'), 'error');
     }
@@ -4098,7 +4097,7 @@ window.deleteAiProvider = async function (name) {
     try {
         await api.del('/api/ai/providers/' + encodeURIComponent(name));
         toast(`Provider "${name}" deleted`);
-        if (currentPage === 'integrations') await renderIntegrations(document.getElementById('content'));
+        if (currentPage === 'ai-providers') await renderAiProviders(document.getElementById('content'));
     } catch (err) {
         toast('Failed to delete: ' + (err.message || 'Unknown error'), 'error');
     }
@@ -4384,7 +4383,7 @@ window.submitAiProvider = async function (isEdit) {
             toast(`Provider "${name}" added`);
         }
         closeModal();
-        if (currentPage === 'integrations') await renderIntegrations(document.getElementById('content'));
+        if (currentPage === 'ai-providers') await renderAiProviders(document.getElementById('content'));
     } catch (err) {
         toast('Failed to save: ' + (err.message || 'Unknown error'), 'error');
     }
@@ -7481,7 +7480,7 @@ $$('.nav-link').forEach((link) => link.addEventListener('click', (e) => { e.prev
 window.navigate = navigate;
 
 // Hash routing: restore page from URL hash
-const validPages = ['dashboard', 'my-prs', 'issues', 'workflows', 'chat', 'library', 'integrations', 'events', 'queue', 'logs', 'system', 'settings'];
+const validPages = ['dashboard', 'my-prs', 'issues', 'workflows', 'chat', 'library', 'integrations', 'ai-providers', 'events', 'queue', 'logs', 'system', 'settings'];
 const hashPage = window.location.hash.replace('#', '');
 if (validPages.includes(hashPage)) currentPage = hashPage;
 window.addEventListener('hashchange', () => {
