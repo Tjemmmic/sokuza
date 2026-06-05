@@ -94,10 +94,13 @@ export function matchesTrigger(
 
         // Author is resolved across BOTH the PR and issue payload shapes
         // (see AUTHOR_PATHS) so `author:` works for issue.* events too, not
-        // only pull_request.* — a silent no-op before. Single values are
-        // handled by resolveShorthands (which emits the same OR-path).
+        // only pull_request.*. Checked for ANY count (>= 1): graph workflows
+        // set `trigger.author` directly via extractTriggerFromGraph — they
+        // never go through resolveShorthands — so a single-value author must
+        // be enforced here too, else a one-author graph workflow would match
+        // every author. (Same reasoning as labels, below.)
         const includeAuthors = toArray(trigger.author);
-        if (includeAuthors.length > 1 && !matchesAnyAuthor(event, includeAuthors)) {
+        if (includeAuthors.length >= 1 && !matchesAnyAuthor(event, includeAuthors)) {
             return false;
         }
 
@@ -165,6 +168,10 @@ function matchesAnyShorthand(event: EventPayload, path: string, values: string[]
     const caseInsensitive = CASE_INSENSITIVE_PATHS.has(path);
     const actualNormalized = caseInsensitive ? actual.toLowerCase() : actual;
     return values.some((v) => {
+        // Guard non-string config (e.g. `author: [123]`) — same protection
+        // eventLabelsContainAny has; without it .toLowerCase()/.includes()
+        // would throw and break matching for the whole workflow.
+        if (typeof v !== 'string') return false;
         const expected = caseInsensitive ? v.toLowerCase() : v;
         if (expected.includes('*')) return globMatch(expected, actualNormalized);
         return expected === actualNormalized;

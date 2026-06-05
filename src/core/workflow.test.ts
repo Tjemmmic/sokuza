@@ -693,6 +693,29 @@ describe('matchesTrigger', () => {
             }))).toBe(true);
         });
 
+        it('enforces a single-value author set directly on the trigger (graph-workflow case)', () => {
+            // Graph workflows set trigger.author directly (no resolveShorthands
+            // filter), so a single author must still be enforced, not match all.
+            const wf = makeWorkflow({
+                trigger: { source: 'github', event: 'pull_request.opened', author: ['alice'] },
+            });
+            expect(matchesTrigger(wf, makeEvent({
+                payload: { pull_request: { user: { login: 'alice' } } },
+            }))).toBe(true);
+            expect(matchesTrigger(wf, makeEvent({
+                payload: { pull_request: { user: { login: 'bob' } } },
+            }))).toBe(false);
+        });
+
+        it('does not crash on a non-string author config (e.g. author: [123])', () => {
+            const wf = makeWorkflow({
+                trigger: { source: 'github', event: 'pull_request.opened', author: [123 as unknown as string] },
+            });
+            const ev = makeEvent({ payload: { pull_request: { user: { login: 'alice' } } } });
+            expect(() => matchesTrigger(wf, ev)).not.toThrow();
+            expect(matchesTrigger(wf, ev)).toBe(false);
+        });
+
         it('excludes by author on an issues.* event (case-insensitive)', () => {
             const wf = makeWorkflow({
                 trigger: { source: 'github', event: 'issues.opened', exclude: { author: 'Alice' } },
