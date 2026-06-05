@@ -521,6 +521,7 @@ async function renderPage() {
             case 'integrations': await renderIntegrations(el); break;
             case 'ai-providers': await renderAiProviders(el); break;
             case 'events': await renderEvents(el); break;
+            case 'event-detail': await renderEventDetail(el); break;
             case 'queue': await renderQueue(el); break;
             case 'auto-fix': await renderAutoFix(el); break;
             case 'ai-reviews': await renderAiReviews(el); break;
@@ -4670,7 +4671,7 @@ async function renderEvents(el) {
 
         <div class="filter-bar" style="margin-bottom:14px">
             <button class="btn ${eventsTab === 'events' ? 'btn-primary' : 'btn-ghost'} btn-sm" onclick="eventsTab='events';renderPage()">Events</button>
-            <button class="btn ${eventsTab === 'deliveries' ? 'btn-primary' : 'btn-ghost'} btn-sm" onclick="eventsTab='deliveries';renderPage()">Webhook Deliveries (${deliveries.length})</button>
+            <button class="btn ${eventsTab === 'deliveries' ? 'btn-primary' : 'btn-ghost'} btn-sm" onclick="eventsTab='deliveries';renderPage()" title="Outbound webhook calls made by your workflows">Outbound Webhooks (${deliveries.length})</button>
             <button class="btn ${eventsTab === 'preview' ? 'btn-primary' : 'btn-ghost'} btn-sm" onclick="eventsTab='preview';renderPage()">Preview Event</button>
         </div>
 
@@ -4824,11 +4825,49 @@ window.rerenderEventList = function () {
 
 let expandedEvents = new Set();
 
+// Pull GitHub context off an event entry: repo/owner from metadata, PR number
+// and branch from the PR payload, issue number from metadata. Used to linkify
+// events to github.com and to the related Sokuza entities.
+function eventGhContext(e) {
+    const meta = e?.event?.metadata || {};
+    const pr = e?.event?.payload?.pull_request;
+    return {
+        repo: typeof meta.repo === 'string' ? meta.repo : undefined,
+        owner: typeof meta.owner === 'string' ? meta.owner : undefined,
+        prNumber: meta.prNumber ?? pr?.number,
+        issueNumber: meta.issueNumber,
+        branch: pr?.head?.ref,
+    };
+}
+
+// Clickable github.com chips for an event's repo / owner / PR / issue / branch.
+function eventEntityChips(e) {
+    const c = eventGhContext(e);
+    const chips = [];
+    if (c.repo) chips.push(extLink(ghRepoUrl(c.repo), c.repo));
+    if (c.owner && c.owner !== c.repo) chips.push(extLink(ghOwnerUrl(c.owner), '@' + c.owner));
+    if (c.prNumber != null) chips.push(extLink(ghPrUrl(c.repo, c.prNumber), 'PR #' + c.prNumber));
+    if (c.issueNumber != null) chips.push(extLink(ghIssueUrl(c.repo, c.issueNumber), 'Issue #' + c.issueNumber));
+    if (c.branch) chips.push(extLink(ghBranchUrl(c.repo, c.branch), c.branch));
+    return chips;
+}
+
+// Matched-workflow names rendered as links that open the workflow editor.
+function eventWorkflowChips(matched) {
+    if (!matched?.length) return '<span style="color:var(--text-muted)">No workflows matched</span>';
+    return '→ ' + matched.map(w =>
+        `<a href="#" onclick="event.preventDefault();event.stopPropagation();openWorkflowEditor('${escJs(w)}')" style="color:var(--accent-hover)">${esc(w)}</a>`
+    ).join(', ');
+}
+
 function renderEventCard(e, idx) {
     const src = e.event?.source ?? 'unknown';
     const meta = e.event?.metadata || {};
-    const metaKeys = Object.entries(meta).filter(([k]) => !['deliveryId', 'hookEvent', 'eventId'].includes(k));
+    // Keys already surfaced as linkified chips or considered internal noise.
+    const shownKeys = ['deliveryId', 'hookEvent', 'eventId', 'repo', 'owner', 'repoName', 'prNumber', 'issueNumber'];
+    const metaKeys = Object.entries(meta).filter(([k]) => !shownKeys.includes(k));
     const metaStr = metaKeys.map(([k, v]) => `${k}: ${v}`).join(' · ');
+    const chips = eventEntityChips(e);
     const eventId = `${e.timestamp}-${src}-${e.event?.event}`;
     const isExpanded = expandedEvents.has(eventId);
     const payload = JSON.stringify(e, null, 2);
@@ -4838,13 +4877,99 @@ function renderEventCard(e, idx) {
         ${sourceBadge(src)}
         <div class="event-body">
             <div class="event-name">${esc(e.event?.event ?? 'unknown')}</div>
-            <div class="event-detail">${e.matchedWorkflows?.length ? `→ ${e.matchedWorkflows.map(w => esc(w)).join(', ')}` : '<span style="color:var(--text-muted)">No workflows matched</span>'}</div>
+            <div class="event-detail">${eventWorkflowChips(e.matchedWorkflows)}</div>
+            ${chips.length ? `<div class="event-detail-meta" onclick="event.stopPropagation()">${chips.join(' · ')}</div>` : ''}
             ${metaStr ? `<div class="event-detail-meta">${esc(metaStr)}</div>` : ''}
         </div>
+        <button class="btn btn-ghost btn-sm" style="font-size:10px;padding:2px 8px;align-self:center" onclick="event.stopPropagation();openEventDetail(${idx})" title="View event details">Details</button>
         ${e.matchedWorkflows?.length ? `<button class="btn btn-ghost btn-sm" style="font-size:10px;padding:2px 8px;align-self:center" onclick="event.stopPropagation();replayEvent(${idx})" title="Replay this event">🔄</button>` : ''}
         <span style="font-size:10px;color:var(--text-muted);align-self:center">${isExpanded ? '▼' : '▶'}</span>
         <div class="event-payload ${isExpanded ? 'open' : ''}" id="payload-${esc(eventId)}" onclick="event.stopPropagation()">${esc(payload)}</div>
     </div>`;
+}
+
+// ─── Event detail page ──────────────────────────────────────────────────────
+// Events are in-memory and identified only by their position in the live
+// `events` array (no stable id while persistence is deferred), so the detail
+// view is reached by index via a synthetic page rather than a deep-linkable
+// hash. Landing here cold (reload) re-fetches the list first.
+let eventDetailIndex = -1;
+
+window.openEventDetail = function (idx) {
+    eventDetailIndex = idx;
+    navigate('event-detail');
+};
+
+async function renderEventDetail(el) {
+    if (!events || events.length === 0) {
+        try {
+            const data = await api.get('/api/events');
+            events = data.events || [];
+        } catch { /* fall through to not-found */ }
+    }
+    const e = events[eventDetailIndex];
+    if (!e) {
+        el.innerHTML = `
+            <div class="page-header"><div class="page-header-left">
+                <h1 class="page-title">Event</h1>
+                <p class="page-subtitle">This event is no longer in the live log.</p>
+            </div></div>
+            <button class="btn btn-ghost btn-sm" onclick="navigate('events')">← Back to Event Log</button>`;
+        return;
+    }
+
+    const src = e.event?.source ?? 'unknown';
+    const c = eventGhContext(e);
+    const chips = eventEntityChips(e);
+    const matched = e.matchedWorkflows || [];
+
+    const row = (label, value) => `<div style="display:flex;gap:10px;padding:5px 0"><div style="min-width:120px;color:var(--text-muted);font-size:12px">${label}</div><div style="font-size:13px">${value}</div></div>`;
+
+    // Matched workflows, each with a jump to its editor and a recent-runs link.
+    const wfList = matched.length
+        ? matched.map(w => `<div style="display:flex;align-items:center;gap:8px;padding:4px 0">
+                <code style="font-size:12px">${esc(w)}</code>
+                <button class="btn btn-ghost btn-sm" style="font-size:11px;padding:1px 8px" onclick="openWorkflowEditor('${escJs(w)}')">Open →</button>
+            </div>`).join('')
+        : '<p style="color:var(--text-muted);font-size:12px">No workflows matched this event.</p>';
+
+    el.innerHTML = `
+        <div class="page-header">
+            <div class="page-header-left">
+                <h1 class="page-title">${esc(e.event?.event ?? 'event')}</h1>
+                <p class="page-subtitle">${sourceBadge(src)} · ${esc(fmtDateTime(e.timestamp))}</p>
+            </div>
+            <div style="display:flex;gap:8px">
+                ${matched.length ? `<button class="btn btn-ghost btn-sm" onclick="replayEvent(${eventDetailIndex})">🔄 Replay</button>` : ''}
+                <button class="btn btn-ghost btn-sm" onclick="navigate('events')">← Back</button>
+            </div>
+        </div>
+
+        <div class="editor-layout" style="grid-template-columns:1fr 320px">
+            <div>
+                <div class="card" style="flex-direction:column;align-items:stretch;margin-bottom:16px">
+                    <div style="display:flex;flex-direction:column;gap:2px">
+                        ${row('Source', esc(src))}
+                        ${row('Event', `<code>${esc(e.event?.event ?? '—')}</code>${e.event?.action ? ` · ${esc(e.event.action)}` : ''}`)}
+                        ${chips.length ? row('Entities', `<span onclick="event.stopPropagation()">${chips.join(' · ')}</span>`) : ''}
+                        ${c.branch ? row('Branch', esc(c.branch)) : ''}
+                        ${row('Received', esc(fmtDateTime(e.timestamp)))}
+                    </div>
+                </div>
+
+                <div class="card" style="flex-direction:column;align-items:stretch">
+                    <div style="font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:8px;text-transform:uppercase;letter-spacing:0.4px">Raw payload</div>
+                    <pre style="font-size:11px;overflow:auto;max-height:480px;margin:0">${esc(JSON.stringify(e.event?.payload ?? {}, null, 2))}</pre>
+                </div>
+            </div>
+
+            <div>
+                <div class="panel">
+                    <div class="panel-header"><span class="panel-title">Triggered Workflows</span></div>
+                    <div class="panel-body">${wfList}</div>
+                </div>
+            </div>
+        </div>`;
 }
 
 window.exportEvents = function () {
