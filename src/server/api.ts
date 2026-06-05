@@ -7,6 +7,7 @@ import type { SokuzaConfig, EventPayload, WebhookDelivery, WorkflowRunRecord } f
 import type { WorkflowQueue } from '../core/queue.js';
 import type { ConfigStore } from '../core/config-store.js';
 import { ARGS_STYLES } from '../core/args-styles.js';
+import { sanitizeProviderHeaders } from '../core/provider-headers.js';
 import type { LogStore } from '../core/log-store.js';
 import { VERSION } from '../version.js';
 import { serviceStatus, installService, uninstallService, restartService, isServiceInstalled } from '../cli/service.js';
@@ -1243,13 +1244,11 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
             if (kind === 'openai-compatible-api' && !entry.base_url) {
                 return new Error('openai-compatible-api providers require base_url');
             }
-            if (body.headers && typeof body.headers === 'object' && !Array.isArray(body.headers)) {
-                const cleanHeaders: Record<string, string> = {};
-                for (const [k, v] of Object.entries(body.headers as Record<string, unknown>)) {
-                    if (typeof v === 'string' && v.length > 0) cleanHeaders[k] = v;
-                }
-                if (Object.keys(cleanHeaders).length > 0) entry.headers = cleanHeaders;
-            }
+            // Same sanitization the config parser applies, so a header saved
+            // via the dashboard behaves identically at request time (no
+            // reserved-name shadows or injection vectors persisted).
+            const cleanHeaders = sanitizeProviderHeaders(body.headers);
+            if (cleanHeaders) entry.headers = cleanHeaders;
         }
 
         if (kind === 'cli') {
