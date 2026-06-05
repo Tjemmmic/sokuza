@@ -41,3 +41,27 @@ export function sanitizeProviderHeaders(raw: unknown): Record<string, string> | 
     }
     return Object.keys(headers).length > 0 ? headers : undefined;
 }
+
+// Header names whose value is likely a credential, so a list/GET response
+// should mask it rather than echo cleartext. Custom headers are general
+// purpose (the motivating use is a non-secret User-Agent), but nothing stops
+// a user storing e.g. an X-API-Key here.
+const SECRET_HEADER_NAME_RE = /key|token|secret|auth|credential|password/i;
+
+/**
+ * Mask the values of secret-bearing custom headers for display (e.g. the
+ * provider GET response), leaving non-sensitive ones like User-Agent readable.
+ * `mask` is injected so this module stays free of the AI-SDK-loading layer
+ * that owns the masking primitive.
+ */
+export function maskProviderHeaders(
+    headers: Record<string, string> | undefined,
+    mask: (value: string) => string,
+): Record<string, string> | undefined {
+    if (!headers) return undefined;
+    const out: Record<string, string> = {};
+    for (const [name, value] of Object.entries(headers)) {
+        out[name] = SECRET_HEADER_NAME_RE.test(name) ? mask(value) : value;
+    }
+    return out;
+}

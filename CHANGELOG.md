@@ -33,7 +33,7 @@ publishes automatically.
           User-Agent: claude-code/0.1.0
   ```
 
-  The dashboard provider API round-trips `headers` so editing a provider in the UI no longer drops the field.
+  The dashboard provider API round-trips `headers` so editing a provider in the UI no longer drops the field. Custom header names/values are sanitized (reserved-name shadows of `Authorization`/`Content-Type` and CR/LF injection vectors are dropped), and secret-bearing header values (`X-API-Key`, `X-Auth-Token`, …) are masked in the provider API response like `api_key`.
 - **Quick-pick sections in the manual PR-review picker.** The PR selector now shows two shortcut lists above the repo/PR browser: **Recently reviewed** (open PRs that recently got a *manual*, non-automatic AI review, newest first — across all repos) and **My open PRs** (authored by the authenticated `gh` user). One click selects the PR and you hit Execute — no repo picking. Backed by the new `GET /api/pr-picker/recent-reviewed` endpoint, which re-checks live PR state via `gh` so closed/merged PRs are filtered out.
 
 ## [0.2.4] - 2026-06-04

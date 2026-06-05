@@ -7,7 +7,7 @@ import type { SokuzaConfig, EventPayload, WebhookDelivery, WorkflowRunRecord } f
 import type { WorkflowQueue } from '../core/queue.js';
 import type { ConfigStore } from '../core/config-store.js';
 import { ARGS_STYLES } from '../core/args-styles.js';
-import { sanitizeProviderHeaders } from '../core/provider-headers.js';
+import { sanitizeProviderHeaders, maskProviderHeaders } from '../core/provider-headers.js';
 import type { LogStore } from '../core/log-store.js';
 import { VERSION } from '../version.js';
 import { serviceStatus, installService, uninstallService, restartService, isServiceInstalled } from '../cli/service.js';
@@ -1210,7 +1210,9 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
             command: entry.command,
             args_style: entry.args_style,
             base_url: entry.base_url,
-            headers: entry.headers,
+            // Secret-bearing custom headers (X-API-Key, …) are masked like
+            // api_key; non-sensitive ones (User-Agent) stay readable.
+            headers: maskProviderHeaders(entry.headers as Record<string, string> | undefined, maskSecret),
             env: entry.env,
             api_key_masked: maskSecret(apiKey),
             key_status: keyStatus,

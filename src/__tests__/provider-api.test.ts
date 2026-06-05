@@ -138,6 +138,19 @@ describe('provider API — custom headers', () => {
         expect(got?.headers).toBeUndefined();
     });
 
+    it('GET masks secret-bearing header values but not benign ones', async () => {
+        await createProvider({
+            ...base,
+            headers: { 'User-Agent': 'claude-code/0.1.0', 'X-API-Key': 'super-secret-value-123' },
+        });
+
+        const got = await getProvider('kimi');
+        expect(got?.headers['User-Agent']).toBe('claude-code/0.1.0');
+        // The secret value is not echoed in cleartext.
+        expect(got?.headers['X-API-Key']).not.toBe('super-secret-value-123');
+        expect(got?.headers['X-API-Key']).toBeTruthy();
+    });
+
     it('PUT preserves the api_key when the edit omits it', async () => {
         await createProvider({ ...base, headers: { 'User-Agent': 'claude-code/0.1.0' } });
 

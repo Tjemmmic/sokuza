@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { sanitizeProviderHeaders } from './provider-headers.js';
+import { sanitizeProviderHeaders, maskProviderHeaders } from './provider-headers.js';
 
 describe('sanitizeProviderHeaders', () => {
     it('keeps valid custom headers', () => {
@@ -35,5 +35,31 @@ describe('sanitizeProviderHeaders', () => {
         expect(sanitizeProviderHeaders(['a', 'b'])).toBeUndefined();
         expect(sanitizeProviderHeaders({})).toBeUndefined();
         expect(sanitizeProviderHeaders({ Authorization: 'x' })).toBeUndefined();
+    });
+});
+
+describe('maskProviderHeaders', () => {
+    const mask = () => 'MASKED';
+
+    it('masks values for secret-bearing header names, leaves others readable', () => {
+        expect(maskProviderHeaders({
+            'User-Agent': 'claude-code/0.1.0',
+            'X-API-Key': 'super-secret',
+            'X-Auth-Token': 'tok_123',
+            'X-Tenant-Secret': 'shh',
+            'X-Password': 'hunter2',
+            'X-Request-Id': 'req-42',
+        }, mask)).toEqual({
+            'User-Agent': 'claude-code/0.1.0',
+            'X-API-Key': 'MASKED',
+            'X-Auth-Token': 'MASKED',
+            'X-Tenant-Secret': 'MASKED',
+            'X-Password': 'MASKED',
+            'X-Request-Id': 'req-42',
+        });
+    });
+
+    it('returns undefined when there are no headers', () => {
+        expect(maskProviderHeaders(undefined, mask)).toBeUndefined();
     });
 });
