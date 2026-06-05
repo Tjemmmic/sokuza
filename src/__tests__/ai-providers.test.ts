@@ -10,6 +10,7 @@ import {
     commandExistsOnPath,
     listImplicitProviders,
     runCompletionWithFallback,
+    buildCompletionPrompt,
 } from '../core/ai-providers.js';
 
 const TEST_LOGGER = pino({ level: 'silent' });
@@ -559,5 +560,29 @@ describe('completion: truncation detection (anthropic-api backend)', () => {
         const r = await runCompletionWithFallback(regWithFakeClient('end_turn'), 'anth',
             { systemPrompt: 's', userMessage: 'u', logger: TEST_LOGGER });
         expect(r.truncated).toBe(false);
+    });
+});
+
+describe('buildCompletionPrompt', () => {
+    it('claude-code: just the user message (system prompt goes via --system-prompt)', () => {
+        const p = buildCompletionPrompt('claude-code', 'SYS', 'USER');
+        expect(p).toBe('USER');
+    });
+
+    it('opencode/codex: folds the system prompt in, no preamble', () => {
+        for (const style of ['opencode', 'codex'] as const) {
+            const p = buildCompletionPrompt(style, 'SYS', 'USER');
+            expect(p).toBe('System instructions:\nSYS\n\n---\n\nUSER');
+            expect(p).not.toMatch(/NO tools available/);
+        }
+    });
+
+    it('gemini: prepends the no-tools preamble so it does pure inference', () => {
+        const p = buildCompletionPrompt('gemini', 'SYS', 'USER');
+        // Preamble first, then the folded system prompt + user message.
+        expect(p).toMatch(/^CRITICAL EXECUTION CONTEXT/);
+        expect(p).toMatch(/NO tools available/);
+        expect(p).toMatch(/run_shell_command/);
+        expect(p).toContain('System instructions:\nSYS\n\n---\n\nUSER');
     });
 });

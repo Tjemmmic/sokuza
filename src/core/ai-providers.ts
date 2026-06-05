@@ -894,17 +894,53 @@ function cliSandboxDir(): string | undefined {
     }
 }
 
+// Gemini's CLI is an agent harness, not a completion endpoint: during a
+// diff-only review it tries file/shell tools (list_directory, read_file,
+// run_shell_command, …) to "explore the code". In our isolated sandbox those
+// fail, and the model thrashes on the failures — reviews go slow / hang and
+// blow the workflow timeout. Disabling the tools via settings does NOT help
+// (the model still emits tool calls and thrashes on "tool not found"), but
+// steering it in the prompt does: tell it there's no repo/filesystem/tools
+// and to answer directly. Verified to drop tool attempts to zero. This also
+// happens to be the correct security posture for completion mode.
+const GEMINI_NO_TOOLS_PREAMBLE =
+    'CRITICAL EXECUTION CONTEXT — READ FIRST:\n' +
+    'You are running NON-INTERACTIVELY with NO repository, NO filesystem, and ' +
+    'NO tools available. Do NOT attempt to call any tool (list_directory, ' +
+    'read_file, read_many_files, run_shell_command, glob, grep / ' +
+    'search_file_content, web_fetch, etc.) — there is nothing to explore and ' +
+    'every tool call will fail and waste time. The COMPLETE input is included ' +
+    'inline below. Read it and respond IMMEDIATELY with the requested answer ' +
+    'and nothing else. Do not look anything up, do not explore, do not plan.';
+
+/**
+ * Build the single prompt string for a CLI completion. Claude Code takes the
+ * system prompt via its own `--system-prompt` flag, so it only needs the user
+ * message; every other CLI (opencode, gemini, codex) has no such flag, so the
+ * instructions are folded into the message. Gemini additionally gets a
+ * no-tools preamble (see GEMINI_NO_TOOLS_PREAMBLE) so it does pure inference
+ * instead of trying to act as an agent.
+ */
+export function buildCompletionPrompt(
+    argsStyle: ArgsStyle,
+    systemPrompt: string,
+    userMessage: string,
+): string {
+    const base = argsStyle === 'claude-code'
+        ? userMessage
+        : `System instructions:\n${systemPrompt}\n\n---\n\n${userMessage}`;
+    return argsStyle === 'gemini' ? `${GEMINI_NO_TOOLS_PREAMBLE}\n\n${base}` : base;
+}
+
 async function runCliCompletion(
     provider: AIProvider,
     request: CompletionRequest & { model: string },
 ): Promise<CompletionResult> {
-    const fullPrompt = provider.argsStyle === 'claude-code'
-        // Claude Code takes the system prompt via `--system-prompt`. Every
-        // other CLI (opencode, gemini, codex) has no such flag, so we fold
-        // the instructions into the user message so review-template prompts
-        // still take effect.
-        ? request.userMessage
-        : `System instructions:\n${request.systemPrompt}\n\n---\n\n${request.userMessage}`;
+    const fullPrompt = buildCompletionPrompt(
+        provider.argsStyle!,
+        request.systemPrompt,
+        request.userMessage,
+    );
 
     const invocation = buildCliInvocation(provider.argsStyle!, {
         mode: 'completion',
