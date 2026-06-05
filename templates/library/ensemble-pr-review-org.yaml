@@ -22,7 +22,7 @@
 #      different reviews (temperature applies to API providers; CLI providers
 #      ignore it). Tune the count/providers/temperatures to taste.
 #
-# Replace `<your-github-username>` and the example providers (zai-glm, kimi)
+# Replace `YOUR_GITHUB_USERNAME` and the example providers (zai-glm, kimi)
 # with yours. Each leg is `on_error: continue`, so an unavailable provider
 # just drops out and the synthesis proceeds with whatever came back.
 
@@ -41,10 +41,10 @@ trigger:
     - pull_request.opened
     - pull_request.synchronize
   exclude:
-    # ⚠️ REPLACE <your-github-username> with your actual GitHub login before
+    # ⚠️ REPLACE YOUR_GITHUB_USERNAME with your actual GitHub login before
     # using. Left as-is, it matches no one — so the workflow would review
     # ALL org PRs including your own, defeating the "not me" purpose.
-    author: <your-github-username>
+    author: YOUR_GITHUB_USERNAME
 
 graph:
   nodes:
@@ -57,12 +57,15 @@ graph:
         # shows the exclusion. graph-trigger.ts maps `exclude_authors` →
         # `trigger.exclude.author`, so this is NOT dead config — keep both in
         # sync (replace the placeholder here too).
-        exclude_authors: <your-github-username>
+        exclude_authors: YOUR_GITHUB_USERNAME
     - id: fetch_diff
       type: github.fetch-diff
       position: { x: 320, y: 320 }
       config: {}
     # ── Four reviewers in parallel: two providers × two temperatures. ──
+    # ⚠️ REPLACE `zai-glm` and `kimi` with provider names from YOUR sokuza
+    # config (Settings → AI Providers). If a provider doesn't exist, that leg
+    # silently fails (on_error: continue) and contributes nothing to synthesis.
     - id: review_a1
       type: ai.review
       position: { x: 600, y: 60 }
@@ -162,6 +165,17 @@ graph:
       to: { node: synth, port: pr_number }
     - from: { node: trigger, port: repo }
       to: { node: synth, port: repo }
+    # synth interpolates {{nodes.review_*.markdown}}, which the runtime already
+    # turns into implicit ordering deps — these explicit __seq edges just make
+    # "synth runs after all four reviewers" self-documenting in the template.
+    - from: { node: review_a1, port: markdown }
+      to: { node: synth, port: __seq }
+    - from: { node: review_a2, port: markdown }
+      to: { node: synth, port: __seq }
+    - from: { node: review_b1, port: markdown }
+      to: { node: synth, port: __seq }
+    - from: { node: review_b2, port: markdown }
+      to: { node: synth, port: __seq }
     - from: { node: trigger, port: prNumber }
       to: { node: post, port: pr_number }
     - from: { node: trigger, port: repo }

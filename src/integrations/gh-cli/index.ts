@@ -91,18 +91,22 @@ const DEFAULT_INTERVAL = 60;
  *   - `authors` / `involves` repeated flags are LAST-WINS, not OR — GitHub
  *     can't OR these in a single query (`author:a author:b` ANDs → empty).
  * So multiple owners/repos work; for multiple authors use the raw `search`
- * field or separate workflows. `buildPrSearchArgs` emits the flags either
- * way; `GhCliIntegration.initialize` warns when a last-wins selector is
- * given more than one value so it isn't silent.
- *
- * NOTE for direct callers (this is exported mainly for tests): this function
- * does NOT warn — the runtime warning lives in `initialize`. If you call it
- * directly with multiple `authors`/`involves`, validate that yourself; only
- * the last value of those selectors takes effect.
+ * field or separate workflows. Pass a `logger` to get warned when a
+ * last-wins selector (`authors`/`involves`) is given more than one value —
+ * the warning lives here so every caller (not just `initialize`) is covered.
  */
-export function buildPrSearchArgs(raw: unknown): string[] {
+export function buildPrSearchArgs(raw: unknown, logger?: Logger): string[] {
     if (!raw || typeof raw !== 'object') return ['--author', '@me'];
     const cfg = raw as Record<string, unknown>;
+    // `gh search prs` can't OR multiple authors/involves (last value wins).
+    for (const key of ['authors', 'involves'] as const) {
+        if (Array.isArray(cfg[key]) && (cfg[key] as unknown[]).length > 1) {
+            logger?.warn(
+                { selector: key, values: cfg[key] },
+                `gh-cli: multiple \`${key}\` values can't be OR'd in one search — only the last takes effect. Use the \`search\` field or separate workflows.`,
+            );
+        }
+    }
     const args: string[] = [];
     const pushFlag = (key: string, flag: string): void => {
         const val = cfg[key];
@@ -163,18 +167,8 @@ export class GhCliIntegration implements Integration {
         }
         this.username = status.username ?? '';
         this.pollInterval = (config.interval as number) ?? DEFAULT_INTERVAL;
-        this.prSearchArgs = buildPrSearchArgs(config.prs);
-        // `gh search prs` can't OR multiple authors/involves (last value
-        // wins) — warn rather than silently search a subset.
-        const prs = (config.prs ?? {}) as Record<string, unknown>;
-        for (const key of ['authors', 'involves'] as const) {
-            if (Array.isArray(prs[key]) && (prs[key] as unknown[]).length > 1) {
-                _logger?.warn(
-                    { selector: key, values: prs[key] },
-                    `gh-cli: multiple \`${key}\` values can't be OR'd in one search — only the last takes effect. Use the \`search\` field or separate workflows.`,
-                );
-            }
-        }
+        // Warning for last-wins multi-value selectors lives in buildPrSearchArgs.
+        this.prSearchArgs = buildPrSearchArgs(config.prs, _logger);
     }
 
     registerRoutes(_server: FastifyInstance, onEvent: EventHandler): void {

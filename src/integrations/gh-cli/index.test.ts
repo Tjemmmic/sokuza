@@ -112,6 +112,17 @@ describe('GhCliIntegration', () => {
             expect(buildPrSearchArgs({ owners: ['my-org'], search: 'draft:false' }))
                 .toEqual(['draft:false', '--owner', 'my-org']);
         });
+
+        it('warns (via the passed logger) on multi-value last-wins selectors', () => {
+            const warn = vi.fn();
+            const logger = { warn } as unknown as Parameters<typeof buildPrSearchArgs>[1];
+            buildPrSearchArgs({ authors: ['alice', 'bob'] }, logger);
+            expect(warn).toHaveBeenCalledTimes(1);
+            // Single author / multi-owner (which OR fine) don't warn.
+            warn.mockClear();
+            buildPrSearchArgs({ authors: ['alice'], owners: ['a', 'b'] }, logger);
+            expect(warn).not.toHaveBeenCalled();
+        });
     });
 
     describe('author propagation (drives exclude.author on widened searches)', () => {
