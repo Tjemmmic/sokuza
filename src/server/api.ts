@@ -558,6 +558,72 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
         }
     });
 
+    // Open PRs that recently received a *manual* (non-automatic) AI review,
+    // newest review first. Powers the "Recently reviewed" quick-pick in the
+    // manual PR-review picker so a reviewer can re-fire on a PR in one click
+    // without re-selecting its repo. Closed/merged PRs are filtered out by
+    // re-checking live state via gh, so the list only ever offers actionable
+    // targets.
+    server.get('/api/pr-picker/recent-reviewed', async (request, reply) => {
+        const q = (request.query ?? {}) as { limit?: string; days?: string };
+        const limit = Math.min(Math.max(parseInt(q.limit ?? '8', 10) || 8, 1), 25);
+        const days = Math.min(Math.max(parseInt(q.days ?? '30', 10) || 30, 1), 180);
+        const since = new Date(Date.now() - days * 86_400_000).toISOString();
+        try {
+            const { listAiReviewRuns } = await import('../core/run-store.js');
+            const { GhCliIntegration } = await import('../integrations/gh-cli/index.js');
+
+            // Pull recent runs and keep the newest manual review per PR.
+            // listAiReviewRuns returns newest-first, so the first time we see a
+            // PR is its most-recent review.
+            const runs = await listAiReviewRuns({ since, limit: 500 });
+            const seen = new Set<string>();
+            const candidates: { repo: string; number: number; lastReviewedAt: string }[] = [];
+            for (const run of runs) {
+                if (run.event?.source !== 'manual') continue;
+                const repo = run.event.repo;
+                const number = run.event.prNumber;
+                if (!repo || typeof number !== 'number') continue;
+                const key = `${repo}#${number}`;
+                if (seen.has(key)) continue;
+                seen.add(key);
+                candidates.push({ repo, number, lastReviewedAt: run.createdAt });
+                // Over-fetch a little so closed-PR filtering can still fill `limit`,
+                // while bounding the number of live gh lookups below.
+                if (candidates.length >= limit * 2) break;
+            }
+
+            // Re-check live state in parallel; drop anything not open or
+            // unreadable (deleted repo, lost access).
+            const settled = await Promise.allSettled(
+                candidates.map(async (c) => ({
+                    c,
+                    pr: await GhCliIntegration.getPrDetails(c.repo, c.number),
+                })),
+            );
+            const items: Array<Record<string, unknown>> = [];
+            for (const result of settled) {
+                if (result.status !== 'fulfilled') continue;
+                const { c, pr } = result.value;
+                if (String((pr as { state?: string }).state ?? '').toLowerCase() !== 'open') continue;
+                items.push({
+                    number: c.number,
+                    repo: c.repo,
+                    title: (pr as { title?: string }).title ?? '',
+                    author: (pr as { author?: { login?: string } }).author?.login ?? '',
+                    url: (pr as { url?: string }).url ?? '',
+                    draft: Boolean((pr as { isDraft?: boolean }).isDraft),
+                    lastReviewedAt: c.lastReviewedAt,
+                });
+                if (items.length >= limit) break;
+            }
+            return { items };
+        } catch (err: any) {
+            logger.warn({ err }, 'Failed to build recent-reviewed PR list');
+            return reply.status(503).send({ error: err.message ?? 'failed', items: [] });
+        }
+    });
+
     server.get('/api/prs/:owner/:repo/:number', async (request, reply) => {
         const { owner, repo, number } = request.params as { owner: string; repo: string; number: string };
         try {

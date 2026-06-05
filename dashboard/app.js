@@ -2267,10 +2267,16 @@ function renderPickerField(inp, i, wfDetails) {
     const typeLabels = { 'github-pr': '🔀 Pull Request', 'github-issue': '🐛 Issue', 'github-branch': '🌿 Branch', 'github-repo': '📦 Repository' };
     const label = esc(inp.label || inp.name);
 
+    // For PR pickers, surface two quick-pick shortcuts above the repo/PR
+    // browser: PRs you recently reviewed (manually) and your own open PRs —
+    // so the common "review this again / review mine" paths skip repo picking.
+    const quickPick = inp.type === 'github-pr' ? `<div id="prquick-${i}" class="prquick"></div>` : '';
+
     return `<div class="form-group">
         <label class="form-label">${label} ${reqd}
             <span style="font-size:11px;color:var(--text-muted);font-weight:400;margin-left:6px">${typeLabels[inp.type] || ''}</span>
         </label>
+        ${quickPick}
         <div id="picker-${i}" class="picker-container" style="position:relative">
             <div class="picker-loading" style="display:flex;align-items:center;gap:8px;padding:10px;color:var(--text-muted);font-size:13px">
                 <div class="spinner" style="width:14px;height:14px"></div> Loading...
@@ -2452,6 +2458,9 @@ window.selectPickerItem = function (pickerIdx, itemIdx) {
     const selection = { ...item, repo: data.repo };
     window._pickerSelections[pickerIdx] = selection;
 
+    // A repo-browser pick supersedes any quick-pick choice — drop its highlight.
+    clearQuickPickHighlight(pickerIdx);
+
     // Show selected item, hide list
     const selectedEl = $(`#picker-selected-${pickerIdx}`);
     const listEl = $(`#picker-list-${pickerIdx}`);
@@ -2508,10 +2517,121 @@ window.filterPicker = function (pickerIdx, query) {
         : '<div style="padding:12px;color:var(--text-muted);font-size:12px;text-align:center">No matches</div>';
 };
 
+// ─── PR quick-pick (Recently reviewed + My open PRs) ─────────────────────────
+//
+// Renders two shortcut lists above the repo/PR browser in a github-pr picker.
+// A click writes the same selection shape the repo browser produces
+// (`{ number, title, author, repo }` in window._pickerSelections[i]) so
+// executeRun() treats both paths identically — the user just hits Execute.
+
+async function initPrQuickPick(i) {
+    const host = $(`#prquick-${i}`);
+    if (!host) return;
+    window._qpData = window._qpData || {};
+    window._qpData[i] = { recent: [], mine: [] };
+
+    host.innerHTML = `
+        ${qpSectionShell(i, 'recent', '🕑 Recently reviewed')}
+        ${qpSectionShell(i, 'mine', '🙋 My open PRs')}
+        <div class="qp-divider">or browse a repository ↓</div>`;
+
+    // Load both lists independently so one being slow/unavailable doesn't
+    // block the other.
+    loadQpList(i, 'recent', '/api/pr-picker/recent-reviewed', (d) => d.items || []);
+    loadQpList(i, 'mine', '/api/my-prs', (d) => (d.prs || []).map(normalizeMyPr));
+}
+
+function qpSectionShell(i, list, title) {
+    return `<div class="qp-section">
+        <div class="qp-head">${title}</div>
+        <div id="qp-${list}-${i}" class="qp-list">
+            <div class="qp-muted"><div class="spinner" style="width:12px;height:12px;display:inline-block;vertical-align:middle"></div> Loading…</div>
+        </div>
+    </div>`;
+}
+
+function normalizeMyPr(pr) {
+    return {
+        number: pr.number,
+        title: pr.title || '',
+        repo: pr.repository?.nameWithOwner || '',
+        author: pr.author?.login || '',
+        draft: Boolean(pr.isDraft),
+    };
+}
+
+async function loadQpList(i, list, url, extract) {
+    const el = $(`#qp-${list}-${i}`);
+    if (!el) return;
+    try {
+        const data = await api.get(url);
+        const items = (extract(data) || []).filter((it) => it && it.repo && it.number != null);
+        window._qpData[i][list] = items;
+        if (items.length === 0) {
+            el.innerHTML = `<div class="qp-muted">None</div>`;
+            return;
+        }
+        el.innerHTML = items.map((it, idx) => qpRow(i, list, idx, it)).join('');
+    } catch (err) {
+        // gh CLI missing/unauthed (503) or any failure — degrade quietly so the
+        // repo browser below stays usable.
+        el.innerHTML = `<div class="qp-muted">Unavailable</div>`;
+    }
+}
+
+function qpRow(i, list, idx, item) {
+    const draft = item.draft ? '<span class="badge badge-warning" style="font-size:9px">draft</span>' : '';
+    return `<div class="picker-item qp-item" data-qpkey="${list}:${idx}" onclick="selectQuickPickPr(${i},'${list}',${idx})">
+        <div style="display:flex;align-items:center;gap:8px;width:100%">
+            <span style="font-weight:600;color:var(--accent);min-width:42px">#${item.number}</span>
+            <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(item.title)}</span>
+            <span style="font-size:11px;color:var(--text-muted);flex-shrink:0;font-family:var(--font-mono)">${esc(item.repo)}</span>
+            ${draft}
+        </div>
+    </div>`;
+}
+
+window.selectQuickPickPr = function (i, list, idx) {
+    const item = window._qpData?.[i]?.[list]?.[idx];
+    if (!item) return;
+
+    // Reset the repo-browser's "selected" visual (without clearing the
+    // selection var, which we set next) so only one surface looks chosen.
+    const sel = $(`#picker-selected-${i}`);
+    const browseList = $(`#picker-list-${i}`);
+    const search = $(`#picker-search-${i}`);
+    if (sel) sel.style.display = 'none';
+    if (browseList) browseList.style.display = '';
+    if (search) search.style.display = '';
+
+    window._pickerSelections = window._pickerSelections || {};
+    window._pickerSelections[i] = {
+        number: item.number,
+        title: item.title,
+        author: item.author,
+        repo: item.repo,
+    };
+
+    // Highlight the chosen row within this picker's quick-pick area.
+    const host = $(`#prquick-${i}`);
+    if (host) {
+        host.querySelectorAll('.qp-item.qp-selected').forEach((e) => e.classList.remove('qp-selected'));
+        const row = host.querySelector(`.qp-item[data-qpkey="${list}:${idx}"]`);
+        if (row) row.classList.add('qp-selected');
+    }
+    toast(`Selected #${item.number} in ${item.repo} — hit Execute`);
+};
+
+function clearQuickPickHighlight(i) {
+    const host = $(`#prquick-${i}`);
+    if (host) host.querySelectorAll('.qp-item.qp-selected').forEach((e) => e.classList.remove('qp-selected'));
+}
+
 window.openRunModal = async function (name) {
     // Reset picker state
     window._pickerData = {};
     window._pickerSelections = {};
+    window._qpData = {};
 
     // Fetch workflow details to get input definitions
     let wfDetails;
@@ -2596,6 +2716,9 @@ window.openRunModal = async function (name) {
     for (let i = 0; i < inputs.length; i++) {
         if (inputs[i].type?.startsWith('github-')) {
             initPicker(inputs[i], i, wfDetails);
+        }
+        if (inputs[i].type === 'github-pr') {
+            initPrQuickPick(i);
         }
     }
 };
