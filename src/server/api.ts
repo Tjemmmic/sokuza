@@ -1375,6 +1375,19 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
             ) {
                 validated.api_key = prev.api_key;
             }
+            // Preserve existing headers when the request omits them. The UI has
+            // no headers field, so a normal provider edit sends no `headers` —
+            // without this the wholesale replace below would silently wipe a
+            // header set in config (e.g. Kimi's coding-agent User-Agent). An
+            // explicit `headers` in the body (even `{}` to clear) is honored.
+            if (
+                validated.kind === 'openai-compatible-api'
+                && !('headers' in body)
+                && prev.headers
+                && typeof prev.headers === 'object'
+            ) {
+                validated.headers = prev.headers;
+            }
             providers[name] = validated;
         });
 
