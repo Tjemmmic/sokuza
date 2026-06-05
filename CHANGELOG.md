@@ -15,6 +15,10 @@ under a new `## [X.Y.Z] - YYYY-MM-DD` heading, bump `version` in
 `package.json`, commit, push to main. The release workflow tags +
 publishes automatically.
 
+### Added
+
+- **Queue rows now show what they're for and open a run detail.** Each job displays its repo · PR/issue · branch, and clicking a row opens a detail panel with the trigger, workflow (with a jump to the editor), step actions, error, and — for PR jobs — the related AI review / address-run timeline. Backed by a new `GET /api/queue/jobs/:id` endpoint; the event context (already present on the job) is no longer stripped during serialization.
+
 ### Changed
 
 - **AI Providers moved to their own top-level page.** They previously shared the Integrations page, which blurred the line between event-source integrations and the models that power AI actions. Providers now live under a dedicated **AI Providers** nav entry; Integrations is purely event sources.

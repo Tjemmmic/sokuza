@@ -1984,6 +1984,15 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
         return { jobs: jobs.map(serializeJob) };
     });
 
+    server.get('/api/queue/jobs/:id', async (request, reply) => {
+        const queue = deps.getQueue?.();
+        if (!queue) return reply.status(503).send({ error: 'Queue not available' });
+        const { id } = request.params as { id: string };
+        const job = queue.getJob(id);
+        if (!job) return reply.status(404).send({ error: `Job "${id}" not found` });
+        return { job: serializeJobDetail(job) };
+    });
+
     server.post('/api/queue/jobs/:id/cancel', async (request, reply) => {
         const queue = deps.getQueue?.();
         if (!queue) return reply.status(503).send({ error: 'Queue not available' });
@@ -2494,6 +2503,34 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
     });
 }
 
+/**
+ * Pull the human-meaningful context off a job's triggering event: repo,
+ * owner, PR/issue number, and branch. The data already rides on the event
+ * (GitHub sets repo/owner/prNumber/issueNumber in metadata; branch lives in
+ * the PR payload) — the queue UI just needs it surfaced instead of stripped.
+ *
+ * Mirrors extractEventInfo() in src/actions but lives here to respect that
+ * helper's within-actions boundary, and adds the owner/issueNumber fields a
+ * generic job view needs.
+ */
+function jobEventContext(event: import('../core/types.js').EventPayload) {
+    const meta = (event.metadata ?? {}) as Record<string, unknown>;
+    const pr = event.payload?.pull_request as Record<string, unknown> | undefined;
+    const branch = (pr?.head as Record<string, unknown> | undefined)?.ref;
+    const ctx: {
+        repo?: string; owner?: string; repoName?: string;
+        prNumber?: number; issueNumber?: number; branch?: string;
+    } = {};
+    if (typeof meta.repo === 'string') ctx.repo = meta.repo;
+    if (typeof meta.owner === 'string') ctx.owner = meta.owner;
+    if (typeof meta.repoName === 'string') ctx.repoName = meta.repoName;
+    const prNumber = meta.prNumber ?? pr?.number;
+    if (typeof prNumber === 'number') ctx.prNumber = prNumber;
+    if (typeof meta.issueNumber === 'number') ctx.issueNumber = meta.issueNumber;
+    if (typeof branch === 'string') ctx.branch = branch;
+    return ctx;
+}
+
 function serializeJob(job: import('../core/types.js').QueueJob) {
     return {
         id: job.id,
@@ -2517,6 +2554,21 @@ function serializeJob(job: import('../core/types.js').QueueJob) {
             source: job.event.source,
             event: job.event.event,
             action: job.event.action,
+            ...jobEventContext(job.event),
         },
+    };
+}
+
+/**
+ * Full single-job view for the queue detail panel: everything serializeJob
+ * carries, plus the workflow definition, the event metadata, and the step
+ * output so a run can be inspected and traced to its related entities.
+ */
+function serializeJobDetail(job: import('../core/types.js').QueueJob) {
+    return {
+        ...serializeJob(job),
+        workflow: job.workflow,
+        eventMetadata: (job.event.metadata ?? {}) as Record<string, unknown>,
+        output: job.output ?? null,
     };
 }

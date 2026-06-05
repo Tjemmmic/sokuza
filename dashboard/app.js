@@ -5013,6 +5013,31 @@ function sourceBadge(src) {
     return `<span class="badge badge-${esc(s)}">${esc(s)}</span>`;
 }
 
+// ─── GitHub deep-link helpers ───────────────────────────────────────────────
+// Build canonical github.com URLs from the identifying bits a Sokuza event or
+// job carries (repo as "owner/name", optional PR/issue number). Return '' when
+// there isn't enough to form a valid link so callers can omit the anchor.
+function ghRepoUrl(repo) {
+    return repo && repo.includes('/') ? `https://github.com/${repo}` : '';
+}
+function ghOwnerUrl(owner) {
+    return owner ? `https://github.com/${owner}` : '';
+}
+function ghPrUrl(repo, prNumber) {
+    return ghRepoUrl(repo) && prNumber != null ? `https://github.com/${repo}/pull/${prNumber}` : '';
+}
+function ghIssueUrl(repo, issueNumber) {
+    return ghRepoUrl(repo) && issueNumber != null ? `https://github.com/${repo}/issues/${issueNumber}` : '';
+}
+function ghBranchUrl(repo, branch) {
+    return ghRepoUrl(repo) && branch ? `https://github.com/${repo}/tree/${encodeURIComponent(branch)}` : '';
+}
+// Render an external link, or just the escaped text when no URL is available.
+function extLink(url, text) {
+    const t = esc(text);
+    return url ? `<a href="${esc(url)}" target="_blank" rel="noopener" style="color:var(--accent-hover)">${t}</a>` : t;
+}
+
 function esc(s) {
     return (s ?? '').toString().replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/'/g, '&#39;');
 }
@@ -5152,13 +5177,16 @@ async function loadQueueData(el) {
 
         ${filtered.length > 0 ? `<div class="table-wrap"><table>
             <thead><tr><th>Workflow</th><th>Status</th><th>Duration</th><th>Enqueued</th><th>Error</th><th style="text-align:right">Actions</th></tr></thead>
-            <tbody>${filtered.map(j => `<tr>
-                <td><strong>${esc(j.workflowName || j.workflowSnapshot?.name || '—')}</strong></td>
+            <tbody>${filtered.map(j => `<tr style="cursor:pointer" onclick="openQueueJobDetail('${escJs(j.id)}')" title="View run details">
+                <td>
+                    <strong>${esc(j.workflowName || j.workflowSnapshot?.name || '—')}</strong>
+                    ${queueJobContextLine(j.event)}
+                </td>
                 <td>${statusBadge(j.status)}</td>
                 <td style="font-size:12px">${fmtDuration(j.startedAt, j.completedAt)}</td>
                 <td style="font-size:12px;color:var(--text-muted)">${timeAgo(j.enqueuedAt)}</td>
                 <td style="font-size:11px;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:${j.error ? '#ef4444' : 'var(--text-muted)'}">${j.error ? esc(j.error) : '—'}</td>
-                <td style="text-align:right">
+                <td style="text-align:right" onclick="event.stopPropagation()">
                     <div class="btn-group" style="justify-content:flex-end">
                         ${j.status === 'queued' || j.status === 'running' ? `<button class="btn btn-danger-outline btn-sm" onclick="cancelQueueJob('${escJs(j.id)}')">Cancel</button>` : ''}
                         ${j.status === 'failed' ? `<button class="btn btn-ghost btn-sm" onclick="retryQueueJob('${escJs(j.id)}')">Retry</button>` : ''}
@@ -5188,6 +5216,89 @@ window.retryQueueJob = async function (jobId) {
         renderPage();
     } catch (err) { toast('Retry failed: ' + err.message, 'error'); }
 };
+
+// Compact "owner/repo · #42 · branch" line shown under the workflow name in
+// the queue table. Returns '' for jobs with no GitHub context (e.g. manual
+// runs) so the row stays clean.
+function queueJobContextLine(ev) {
+    if (!ev) return '';
+    const bits = [];
+    if (ev.repo) bits.push(esc(ev.repo));
+    if (ev.prNumber != null) bits.push(`#${ev.prNumber}`);
+    else if (ev.issueNumber != null) bits.push(`#${ev.issueNumber}`);
+    if (ev.branch) bits.push(esc(ev.branch));
+    if (bits.length === 0) return '';
+    return `<div style="font-size:11px;color:var(--text-muted);margin-top:2px">${bits.join(' · ')}</div>`;
+}
+
+window.openQueueJobDetail = async function (id) {
+    openModal(`Run: ${id}`, '<div class="skeleton skeleton-card"></div>');
+    let data;
+    try {
+        data = await api.get(`/api/queue/jobs/${encodeURIComponent(id)}`);
+    } catch (err) {
+        $('#modal-body').innerHTML = `<p style="color:#ef4444">Failed to load run: ${esc(err.message)}</p>`;
+        return;
+    }
+    const job = data.job;
+    $('#modal-body').innerHTML = renderQueueJobDetailBody(job);
+
+    // Lazily pull related AI reviews / address runs for PR jobs — the same
+    // per-PR convergence timeline surfaced elsewhere. Persistence-independent:
+    // these records live in the on-disk run store, so they survive restarts.
+    const ev = job.event || {};
+    if (ev.repo && ev.repo.includes('/') && ev.prNumber != null) {
+        const [owner, repo] = ev.repo.split('/');
+        try {
+            const tl = await api.get(`/api/auto-fix/pr/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/${ev.prNumber}/timeline`);
+            const slot = $('#queue-related');
+            if (slot) slot.innerHTML = renderPrTimelineBody(tl);
+        } catch {
+            const slot = $('#queue-related');
+            if (slot) slot.innerHTML = '<p style="color:var(--text-muted);font-size:12px">No related AI activity found.</p>';
+        }
+    }
+};
+
+function renderQueueJobDetailBody(job) {
+    const ev = job.event || {};
+    const snap = job.workflowSnapshot || {};
+    const fmtDur = (start, end) => {
+        if (!start) return '—';
+        const ms = (end ? new Date(end) : new Date()) - new Date(start);
+        if (ms < 1000) return `${ms}ms`;
+        if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
+        return `${Math.floor(ms / 60000)}m ${Math.floor((ms % 60000) / 1000)}s`;
+    };
+
+    const row = (label, value) => `<div style="display:flex;gap:10px;padding:4px 0"><div style="min-width:110px;color:var(--text-muted);font-size:12px">${label}</div><div style="font-size:12px">${value}</div></div>`;
+
+    // Context links
+    const ctxLinks = [];
+    if (ev.repo) ctxLinks.push(extLink(ghRepoUrl(ev.repo), ev.repo));
+    if (ev.prNumber != null) ctxLinks.push(extLink(ghPrUrl(ev.repo, ev.prNumber), `PR #${ev.prNumber}`));
+    if (ev.issueNumber != null) ctxLinks.push(extLink(ghIssueUrl(ev.repo, ev.issueNumber), `Issue #${ev.issueNumber}`));
+    if (ev.branch) ctxLinks.push(extLink(ghBranchUrl(ev.repo, ev.branch), ev.branch));
+
+    const parts = [];
+    parts.push('<div style="display:flex;flex-direction:column;gap:2px;margin-bottom:16px">');
+    parts.push(row('Workflow', `<strong>${esc(job.workflowName)}</strong> <button class="btn btn-ghost btn-sm" style="font-size:11px;padding:1px 8px;margin-left:6px" onclick="closeModal();openWorkflowEditor('${escJs(job.workflowName)}')">Open workflow →</button>`));
+    parts.push(row('Status', `<code>${esc(job.status)}</code>${job.attempts ? ` · ${job.attempts} attempt${job.attempts === 1 ? '' : 's'}` : ''}`));
+    parts.push(row('Trigger', `${esc(ev.source || '—')} · ${esc(ev.event || '—')}${ev.action ? ` · ${esc(ev.action)}` : ''}`));
+    if (ctxLinks.length) parts.push(row('Context', ctxLinks.join(' · ')));
+    parts.push(row('Enqueued', `${esc(fmtDateTime(job.enqueuedAt))}`));
+    if (job.startedAt) parts.push(row('Duration', fmtDur(job.startedAt, job.completedAt)));
+    if (job.error) parts.push(row('Error', `<span style="color:#ef4444">${esc(job.error)}</span>`));
+    parts.push(row('Steps', `${snap.stepCount ?? 0} · ${(snap.stepActions || []).map(a => `<code style="font-size:11px">${esc(a)}</code>`).join(' ') || '—'}`));
+    parts.push('</div>');
+
+    parts.push('<h3 style="font-size:13px;font-weight:600;margin:8px 0 8px">Related AI activity</h3>');
+    parts.push(ev.repo && ev.prNumber != null
+        ? '<div id="queue-related"><div class="skeleton skeleton-card"></div></div>'
+        : '<p style="color:var(--text-muted);font-size:12px">No PR associated with this run.</p>');
+
+    return parts.join('');
+}
 
 // ═════════════════════════════════════════════════════════════════════════════
 // LOGS
