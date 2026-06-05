@@ -2593,7 +2593,7 @@ function qpRow(i, list, idx, item) {
     const draft = item.draft ? '<span class="badge badge-warning" style="font-size:9px">draft</span>' : '';
     return `<div class="picker-item qp-item" data-qpkey="${list}:${idx}">
         <div style="display:flex;align-items:center;gap:8px;width:100%">
-            <span style="font-weight:600;color:var(--accent);min-width:42px">#${item.number}</span>
+            <span style="font-weight:600;color:var(--accent);min-width:42px">#${esc(String(item.number))}</span>
             <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(item.title)}</span>
             <span style="font-size:11px;color:var(--text-muted);flex-shrink:0;font-family:var(--font-mono)">${esc(item.repo)}</span>
             ${draft}
