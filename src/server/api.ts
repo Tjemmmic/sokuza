@@ -1180,6 +1180,7 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
             command: entry.command,
             args_style: entry.args_style,
             base_url: entry.base_url,
+            headers: entry.headers,
             env: entry.env,
             api_key_masked: maskSecret(apiKey),
             key_status: keyStatus,
@@ -1212,6 +1213,13 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
             }
             if (kind === 'openai-compatible-api' && !entry.base_url) {
                 return new Error('openai-compatible-api providers require base_url');
+            }
+            if (body.headers && typeof body.headers === 'object' && !Array.isArray(body.headers)) {
+                const cleanHeaders: Record<string, string> = {};
+                for (const [k, v] of Object.entries(body.headers as Record<string, unknown>)) {
+                    if (typeof v === 'string' && v.length > 0) cleanHeaders[k] = v;
+                }
+                if (Object.keys(cleanHeaders).length > 0) entry.headers = cleanHeaders;
             }
         }
 

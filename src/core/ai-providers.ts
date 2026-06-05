@@ -290,6 +290,13 @@ export interface AIProvider {
     defaultModel?: string;
     apiKey?: string;
     baseUrl?: string;
+    /**
+     * Extra HTTP headers sent on each openai-compatible request. Used to
+     * satisfy providers that gate access on a header — e.g. Kimi For Coding
+     * (api.kimi.com/coding/v1) only serves recognized coding-agent
+     * User-Agents and 403s anything else.
+     */
+    headers?: Record<string, string>;
     command?: string;
     env?: Record<string, string>;
     argsStyle?: ArgsStyle;
@@ -518,6 +525,14 @@ function parseProvider(name: string, raw: Record<string, unknown>): AIProvider {
             throw new Error(
                 `ai.providers.${name}.base_url is required for openai-compatible-api providers`,
             );
+        }
+
+        if (raw.headers && typeof raw.headers === 'object' && !Array.isArray(raw.headers)) {
+            const headers: Record<string, string> = {};
+            for (const [key, value] of Object.entries(raw.headers as Record<string, unknown>)) {
+                if (typeof value === 'string') headers[key] = value;
+            }
+            if (Object.keys(headers).length > 0) provider.headers = headers;
         }
     }
 
@@ -807,6 +822,9 @@ async function runOpenAICompletion(
     const response = await fetch(url, {
         method: 'POST',
         headers: {
+            // Provider-supplied headers first (e.g. a coding-agent User-Agent
+            // for Kimi For Coding); Content-Type/Authorization stay authoritative.
+            ...provider.headers,
             'Content-Type': 'application/json',
             Authorization: `Bearer ${provider.apiKey}`,
         },
