@@ -7,6 +7,7 @@ import type { SokuzaConfig, EventPayload, WebhookDelivery, WorkflowRunRecord } f
 import type { WorkflowQueue } from '../core/queue.js';
 import type { ConfigStore } from '../core/config-store.js';
 import { ARGS_STYLES } from '../core/args-styles.js';
+import { sanitizeProviderHeaders, maskProviderHeaders } from '../core/provider-headers.js';
 import type { LogStore } from '../core/log-store.js';
 import { VERSION } from '../version.js';
 import { serviceStatus, installService, uninstallService, restartService, isServiceInstalled } from '../cli/service.js';
@@ -555,6 +556,35 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
                 error: 'gh CLI not available. Install and authenticate: https://cli.github.com/',
                 prs: [],
             });
+        }
+    });
+
+    // Open PRs that recently received a *manual* (non-automatic) AI review,
+    // newest review first. Powers the "Recently reviewed" quick-pick in the
+    // manual PR-review picker so a reviewer can re-fire on a PR in one click
+    // without re-selecting its repo. Closed/merged PRs are filtered out by
+    // re-checking live state via gh, so the list only ever offers actionable
+    // targets.
+    server.get('/api/pr-picker/recent-reviewed', async (request, reply) => {
+        const q = (request.query ?? {}) as { limit?: string; days?: string };
+        const limit = Math.min(Math.max(parseInt(q.limit ?? '8', 10) || 8, 1), 25);
+        const days = Math.min(Math.max(parseInt(q.days ?? '30', 10) || 30, 1), 180);
+        const since = new Date(Date.now() - days * 86_400_000).toISOString();
+        try {
+            const { listAiReviewRuns } = await import('../core/run-store.js');
+            const { GhCliIntegration } = await import('../integrations/gh-cli/index.js');
+            const { selectRecentReviewedPrs } = await import('./recent-reviewed.js');
+
+            const runs = await listAiReviewRuns({ since, limit: 500 });
+            const items = await selectRecentReviewedPrs(
+                runs,
+                (repo, prNumber) => GhCliIntegration.getPrDetails(repo, prNumber),
+                limit,
+            );
+            return { items };
+        } catch (err: any) {
+            logger.warn({ err }, 'Failed to build recent-reviewed PR list');
+            return reply.status(503).send({ error: err.message ?? 'failed', items: [] });
         }
     });
 
@@ -1180,6 +1210,12 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
             command: entry.command,
             args_style: entry.args_style,
             base_url: entry.base_url,
+            // Display-only, like api_key_masked: secret-bearing custom headers
+            // (X-API-Key, …) are masked, non-sensitive ones (User-Agent) stay
+            // readable. Exposed under a distinct name so a client round-tripping
+            // the GET payload can't PUT a mask back over the real value — the
+            // write path reads `headers`, which this field is deliberately not.
+            headers_masked: maskProviderHeaders(entry.headers as Record<string, string> | undefined, maskSecret),
             env: entry.env,
             api_key_masked: maskSecret(apiKey),
             key_status: keyStatus,
@@ -1213,6 +1249,11 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
             if (kind === 'openai-compatible-api' && !entry.base_url) {
                 return new Error('openai-compatible-api providers require base_url');
             }
+            // Same sanitization the config parser applies, so a header saved
+            // via the dashboard behaves identically at request time (no
+            // reserved-name shadows or injection vectors persisted).
+            const cleanHeaders = sanitizeProviderHeaders(body.headers);
+            if (cleanHeaders) entry.headers = cleanHeaders;
         }
 
         if (kind === 'cli') {
@@ -1337,6 +1378,19 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
                 && typeof prev.api_key === 'string'
             ) {
                 validated.api_key = prev.api_key;
+            }
+            // Preserve existing headers when the request omits them. The UI has
+            // no headers field, so a normal provider edit sends no `headers` —
+            // without this the wholesale replace below would silently wipe a
+            // header set in config (e.g. Kimi's coding-agent User-Agent). An
+            // explicit `headers` in the body (even `{}` to clear) is honored.
+            if (
+                validated.kind === 'openai-compatible-api'
+                && !('headers' in body)
+                && prev.headers
+                && typeof prev.headers === 'object'
+            ) {
+                validated.headers = prev.headers;
             }
             providers[name] = validated;
         });

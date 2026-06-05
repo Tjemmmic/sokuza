@@ -120,6 +120,83 @@ describe('loadAIProviders', () => {
             }),
         ).toThrow('args_style must be');
     });
+
+    it('parses custom headers on an openai-compatible provider', () => {
+        const reg = loadAIProviders({
+            providers: {
+                kimi: {
+                    kind: 'openai-compatible-api',
+                    base_url: 'https://api.kimi.com/coding/v1',
+                    api_key: 'k',
+                    default_model: 'kimi-k2.6',
+                    headers: { 'User-Agent': 'claude-code/0.1.0' },
+                },
+            },
+        });
+        expect(reg.providers.get('kimi')!.headers).toEqual({ 'User-Agent': 'claude-code/0.1.0' });
+    });
+
+    it('drops non-string header values and leaves headers undefined when empty', () => {
+        const reg = loadAIProviders({
+            providers: {
+                x: {
+                    kind: 'openai-compatible-api',
+                    base_url: 'https://x.test/v1',
+                    api_key: 'k',
+                    headers: { 'X-Ok': 'yes', 'X-Bad': 5 },
+                },
+                y: {
+                    kind: 'openai-compatible-api',
+                    base_url: 'https://y.test/v1',
+                    api_key: 'k',
+                    headers: { 'X-Bad': 5 },
+                },
+            },
+        });
+        expect(reg.providers.get('x')!.headers).toEqual({ 'X-Ok': 'yes' });
+        expect(reg.providers.get('y')!.headers).toBeUndefined();
+    });
+
+    it('drops reserved headers (Authorization/Content-Type) in any case', () => {
+        const reg = loadAIProviders({
+            providers: {
+                x: {
+                    kind: 'openai-compatible-api',
+                    base_url: 'https://x.test/v1',
+                    api_key: 'k',
+                    headers: {
+                        authorization: 'Bearer evil',
+                        Authorization: 'Bearer evil',
+                        'content-type': 'text/plain',
+                        'Content-Type': 'text/plain',
+                        'CONTENT-TYPE': 'text/plain',
+                        'User-Agent': 'claude-code/0.1.0',
+                    },
+                },
+            },
+        });
+        // Only the non-reserved header survives — no case variant leaks through.
+        expect(reg.providers.get('x')!.headers).toEqual({ 'User-Agent': 'claude-code/0.1.0' });
+    });
+
+    it('drops headers with invalid names or control-char values (injection guard)', () => {
+        const reg = loadAIProviders({
+            providers: {
+                x: {
+                    kind: 'openai-compatible-api',
+                    base_url: 'https://x.test/v1',
+                    api_key: 'k',
+                    headers: {
+                        'Bad Name': 'x',            // space → invalid HTTP token
+                        'X-Inject': 'a\r\nB: c',    // CRLF in value
+                        'X-Null': 'a\u0000b',       // NUL in value
+                        'X-Good': 'fine',
+                    },
+                },
+            },
+        });
+        expect(reg.providers.get('x')!.headers).toEqual({ 'X-Good': 'fine' });
+    });
 });
 
 describe('resolveProvider', () => {
@@ -533,6 +610,57 @@ describe('completion: temperature + truncation (openai-compatible backend)', () 
         await expect(
             runCompletionWithFallback(makeReg(), 'test', { systemPrompt: 's', userMessage: 'u', logger: TEST_LOGGER }),
         ).rejects.toThrow(/no choices/);
+    });
+
+    function mockFetchCapturingHeaders(captured: { headers?: any }) {
+        return vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
+            captured.headers = (init as RequestInit).headers;
+            return new Response(
+                JSON.stringify({ model: 'm', choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }] }),
+                { status: 200, headers: { 'content-type': 'application/json' } },
+            );
+        });
+    }
+
+    const regWithHeaders = (headers: Record<string, unknown>) => loadAIProviders({
+        providers: {
+            test: { kind: 'openai-compatible-api', base_url: 'https://x.test/v1', api_key: 'k', default_model: 'm', headers },
+        },
+    });
+
+    it('sends provider headers (e.g. a coding-agent User-Agent) on the request', async () => {
+        const captured: { headers?: any } = {};
+        mockFetchCapturingHeaders(captured);
+        await runCompletionWithFallback(
+            regWithHeaders({ 'User-Agent': 'claude-code/0.1.0' }), 'test',
+            { systemPrompt: 's', userMessage: 'u', logger: TEST_LOGGER },
+        );
+        expect(captured.headers['User-Agent']).toBe('claude-code/0.1.0');
+        expect(captured.headers['Authorization']).toBe('Bearer k');
+        expect(captured.headers['Content-Type']).toBe('application/json');
+    });
+
+    it('provider headers cannot override Authorization or Content-Type, in any case', async () => {
+        const captured: { headers?: any } = {};
+        mockFetchCapturingHeaders(captured);
+        await runCompletionWithFallback(
+            regWithHeaders({
+                Authorization: 'Bearer EVIL',
+                authorization: 'Bearer evil',        // lowercase variant
+                'Content-Type': 'text/plain',
+                'content-type': 'text/plain',        // lowercase variant
+                'X-Custom': '1',
+            }), 'test',
+            { systemPrompt: 's', userMessage: 'u', logger: TEST_LOGGER },
+        );
+        // Reserved headers are stripped at parse, so the request object carries
+        // exactly one authoritative value for each (no case-collision that
+        // undici would combine into "evil, Bearer k").
+        expect(captured.headers['Authorization']).toBe('Bearer k');
+        expect(captured.headers['authorization']).toBeUndefined();
+        expect(captured.headers['Content-Type']).toBe('application/json');
+        expect(captured.headers['content-type']).toBeUndefined();
+        expect(captured.headers['X-Custom']).toBe('1');
     });
 });
 

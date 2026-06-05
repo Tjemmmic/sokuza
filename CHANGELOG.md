@@ -15,6 +15,27 @@ under a new `## [X.Y.Z] - YYYY-MM-DD` heading, bump `version` in
 `package.json`, commit, push to main. The release workflow tags +
 publishes automatically.
 
+## [0.2.5] - 2026-06-05
+
+### Added
+
+- **Custom headers on `openai-compatible-api` providers.** A new optional `headers:` map is sent on every completion request (with `Content-Type`/`Authorization` kept authoritative). This unblocks providers that gate on a header — notably **Kimi For Coding** (`https://api.kimi.com/coding/v1`), which only serves recognized coding-agent `User-Agent`s and returns `403 access_terminated_error` otherwise. Example:
+
+  ```yaml
+  ai:
+    providers:
+      kimi:
+        kind: openai-compatible-api
+        base_url: https://api.kimi.com/coding/v1
+        api_key: ${KIMI_API_KEY}
+        default_model: kimi-k2.6
+        headers:
+          User-Agent: claude-code/0.1.0
+  ```
+
+  The dashboard provider API round-trips `headers` so editing a provider in the UI no longer drops the field. Custom header names/values are sanitized (reserved-name shadows of `Authorization`/`Content-Type` and CR/LF injection vectors are dropped), and secret-bearing header values (`X-API-Key`, `X-Auth-Token`, …) are masked in the provider API response like `api_key`.
+- **Quick-pick sections in the manual PR-review picker.** The PR selector now shows two shortcut lists above the repo/PR browser: **Recently reviewed** (open PRs that recently got a *manual*, non-automatic AI review, newest first — across all repos) and **My open PRs** (authored by the authenticated `gh` user). One click selects the PR and you hit Execute — no repo picking. Backed by the new `GET /api/pr-picker/recent-reviewed` endpoint, which re-checks live PR state via `gh` so closed/merged PRs are filtered out.
+
 ## [0.2.4] - 2026-06-04
 
 ### Added

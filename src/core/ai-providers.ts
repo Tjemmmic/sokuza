@@ -31,6 +31,7 @@ import { join } from 'node:path';
 import type { Logger } from 'pino';
 import { abortErrorFromSignal } from './abort-error.js';
 import { ARGS_STYLES, type ArgsStyle } from './args-styles.js';
+import { sanitizeProviderHeaders } from './provider-headers.js';
 
 /**
  * Quick non-blocking check that a CLI binary is on PATH.
@@ -290,6 +291,13 @@ export interface AIProvider {
     defaultModel?: string;
     apiKey?: string;
     baseUrl?: string;
+    /**
+     * Extra HTTP headers sent on each openai-compatible request. Used to
+     * satisfy providers that gate access on a header — e.g. Kimi For Coding
+     * (api.kimi.com/coding/v1) only serves recognized coding-agent
+     * User-Agents and 403s anything else.
+     */
+    headers?: Record<string, string>;
     command?: string;
     env?: Record<string, string>;
     argsStyle?: ArgsStyle;
@@ -519,6 +527,12 @@ function parseProvider(name: string, raw: Record<string, unknown>): AIProvider {
                 `ai.providers.${name}.base_url is required for openai-compatible-api providers`,
             );
         }
+
+        // Reserved/invalid headers are dropped (see sanitizeProviderHeaders);
+        // the same rule is applied by the dashboard provider API so both paths
+        // agree on what can ever reach a request.
+        const headers = sanitizeProviderHeaders(raw.headers);
+        if (headers) provider.headers = headers;
     }
 
     if (kind === 'cli') {
@@ -807,6 +821,9 @@ async function runOpenAICompletion(
     const response = await fetch(url, {
         method: 'POST',
         headers: {
+            // Provider-supplied headers first (e.g. a coding-agent User-Agent
+            // for Kimi For Coding); Content-Type/Authorization stay authoritative.
+            ...provider.headers,
             'Content-Type': 'application/json',
             Authorization: `Bearer ${provider.apiKey}`,
         },
