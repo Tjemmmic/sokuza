@@ -20,6 +20,15 @@ export interface RecentReviewedPr {
     lastReviewedAt: string;
 }
 
+/** The subset of a `gh pr view --json` detail object this module reads. */
+export interface PrDetail {
+    state?: string;
+    title?: string;
+    author?: { login?: string };
+    url?: string;
+    isDraft?: boolean;
+}
+
 /**
  * Pick open PRs that recently received a *manual* (non-automatic) AI review,
  * newest review first.
@@ -58,15 +67,16 @@ export async function selectRecentReviewedPrs(
     const items: RecentReviewedPr[] = [];
     for (const result of settled) {
         if (result.status !== 'fulfilled') continue;
-        const { c, pr } = result.value;
-        if (String((pr as { state?: string }).state ?? '').toLowerCase() !== 'open') continue;
+        const { c } = result.value;
+        const pr = result.value.pr as PrDetail;
+        if (String(pr.state ?? '').toLowerCase() !== 'open') continue;
         items.push({
             number: c.number,
             repo: c.repo,
-            title: (pr as { title?: string }).title ?? '',
-            author: (pr as { author?: { login?: string } }).author?.login ?? '',
-            url: (pr as { url?: string }).url ?? '',
-            draft: Boolean((pr as { isDraft?: boolean }).isDraft),
+            title: pr.title ?? '',
+            author: pr.author?.login ?? '',
+            url: pr.url ?? '',
+            draft: Boolean(pr.isDraft),
             lastReviewedAt: c.lastReviewedAt,
         });
         if (items.length >= limit) break;
