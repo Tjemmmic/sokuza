@@ -195,5 +195,29 @@ describe('GhCliIntegration', () => {
             expect(closed.map((e) => e.payload.pull_request.number)).toContain(1);
             expect(state(integration).lastPrUpdatedAt.has('org/repo#1')).toBe(false);
         });
+
+        it('closed event carries the persisted author (so exclude.author works on org polls)', async () => {
+            const events: Array<{ event: string; payload: { pull_request: { user: { login: string } } } }> = [];
+            state(integration).onEvent = async (e: never) => { events.push(e); };
+            state(integration).seeded = true;
+            state(integration).lastPrUpdatedAt.set('org/repo#1', 't1');
+            state(integration).lastPrAuthor.set('org/repo#1', 'alice'); // not the poller's own login
+            mockedGhJson.mockResolvedValueOnce([]); // short page, #1 gone
+            await state(integration).poll();
+            const closed = events.filter((e) => e.event === 'pull_request.closed');
+            expect(closed).toHaveLength(1);
+            expect(closed[0].payload.pull_request.user.login).toBe('alice');
+        });
+
+        it('calls searchPrs with the configured prSearchArgs (not listMyPrs/@me)', async () => {
+            state(integration).onEvent = async () => {};
+            state(integration).prSearchArgs = ['--owner', 'test-org'];
+            mockedGhJson.mockResolvedValueOnce([]); // searchPrs result
+            await state(integration).poll();
+            const callArgs = mockedGhJson.mock.calls[0][0] as string[];
+            expect(callArgs).toContain('--owner');
+            expect(callArgs).toContain('test-org');
+            expect(callArgs).not.toContain('@me');
+        });
     });
 });

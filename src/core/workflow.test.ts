@@ -746,6 +746,41 @@ describe('matchesTrigger', () => {
         });
     });
 
+    describe('branch filters resolve across PR and push events', () => {
+        it('matches a branch on a push event (refs/heads/ normalized)', () => {
+            const wf = makeWorkflow({
+                trigger: { source: 'github', event: 'push', branch: ['main', 'release'] },
+            });
+            expect(matchesTrigger(wf, makeEvent({
+                event: 'push', payload: { ref: 'refs/heads/main' },
+            }))).toBe(true);
+            expect(matchesTrigger(wf, makeEvent({
+                event: 'push', payload: { ref: 'refs/heads/feature' },
+            }))).toBe(false);
+        });
+
+        it('still matches a PR base ref', () => {
+            const wf = makeWorkflow({
+                trigger: { source: 'github', event: 'pull_request.opened', branch: ['main'] },
+            });
+            expect(matchesTrigger(wf, makeEvent({
+                payload: { pull_request: { base: { ref: 'main' } } },
+            }))).toBe(true);
+        });
+
+        it('excludes a branch on a push event', () => {
+            const wf = makeWorkflow({
+                trigger: { source: 'github', event: 'push', exclude: { branch: ['releases/*'] } },
+            });
+            expect(matchesTrigger(wf, makeEvent({
+                event: 'push', payload: { ref: 'refs/heads/releases/2026' },
+            }))).toBe(false);
+            expect(matchesTrigger(wf, makeEvent({
+                event: 'push', payload: { ref: 'refs/heads/main' },
+            }))).toBe(true);
+        });
+    });
+
     describe('label shorthand globs', () => {
         it('matches include labels by glob', () => {
             const wf = makeWorkflow({

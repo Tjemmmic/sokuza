@@ -162,6 +162,7 @@ export class GhCliIntegration implements Integration {
     // Track both updatedAt (cheap change signal) and headSha (commit tracking)
     private lastPrUpdatedAt = new Map<string, string>(); // "owner/repo#num" → updatedAt
     private lastPrHeadSha = new Map<string, string>(); // "owner/repo#num" → HEAD commit SHA
+    private lastPrAuthor = new Map<string, string>(); // "owner/repo#num" → author login (for the synthetic closed event)
     private lastReviewIds = new Map<string, Set<string>>(); // "owner/repo#num" → review IDs
     private lastCommentIds = new Map<string, Set<string>>(); // "owner/repo#num" → comment IDs
     private seeded = false;
@@ -298,6 +299,7 @@ export class GhCliIntegration implements Integration {
                     const enriched = await this.enrichPr(repo, pr);
                     this.lastPrUpdatedAt.set(key, pr.updatedAt);
                     this.lastPrHeadSha.set(key, enriched.headRefOid ?? '');
+                    this.lastPrAuthor.set(key, enriched.author?.login ?? pr.author?.login ?? '');
                     await this.seedActivityIds(repo, pr);
                     continue;
                 }
@@ -307,6 +309,7 @@ export class GhCliIntegration implements Integration {
                     const enriched = await this.enrichPr(repo, pr);
                     this.lastPrUpdatedAt.set(key, pr.updatedAt);
                     this.lastPrHeadSha.set(key, enriched.headRefOid ?? '');
+                    this.lastPrAuthor.set(key, enriched.author?.login ?? pr.author?.login ?? '');
                     await this.emitPrEvent('pull_request.opened', repo, enriched);
                 } else if (lastUpdated !== pr.updatedAt) {
                     // Something changed on this PR — figure out WHAT changed
@@ -337,14 +340,21 @@ export class GhCliIntegration implements Integration {
                     if (!currentKeys.has(key)) {
                         const [repo, numStr] = key.split('#');
                         if (this.seeded) {
+                            // Carry the persisted author so `exclude.author`
+                            // works for closed events on org-scoped polls —
+                            // otherwise emitPrEvent falls back to the poller's
+                            // own username and misattributes others' PRs.
+                            const login = this.lastPrAuthor.get(key);
                             await this.emitPrEvent('pull_request.closed', repo, {
                                 number: Number(numStr), title: '', url: '',
                                 state: 'closed', isDraft: false,
                                 updatedAt: new Date().toISOString(),
+                                ...(login ? { author: { login } } : {}),
                             });
                         }
                         this.lastPrUpdatedAt.delete(key);
                         this.lastPrHeadSha.delete(key);
+                        this.lastPrAuthor.delete(key);
                         this.lastCommentIds.delete(key);
                         this.lastReviewIds.delete(key);
                     }

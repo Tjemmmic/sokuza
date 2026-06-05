@@ -83,13 +83,18 @@ export function matchesTrigger(
     // Globs (e.g. `my-org/*`) are honoured here so multi-value behaves
     // the same as the single-value path which already globs via filters.
     if (event.source !== 'manual') {
-        const shorthandChecks: Array<{ values: string[]; path: string }> = [
-            { values: toArray(trigger.repo), path: 'metadata.repo' },
-            { values: toArray(trigger.branch), path: 'payload.pull_request.base.ref' },
-        ];
-        for (const { values, path } of shorthandChecks) {
-            if (values.length <= 1) continue; // Single values handled by filters above
-            if (!matchesAnyShorthand(event, path, values)) return false;
+        // repo: multi-value here; single value handled by the resolveShorthands filter.
+        const includeRepos = toArray(trigger.repo);
+        if (includeRepos.length > 1 && !matchesAnyShorthand(event, 'metadata.repo', includeRepos)) {
+            return false;
+        }
+
+        // Branch is resolved across the PR base ref AND the push ref (with
+        // `refs/heads/` stripped — see BRANCH_PATHS), for ANY count, so
+        // `branch:` works on push events too, not only pull_request.*.
+        const includeBranches = toArray(trigger.branch);
+        if (includeBranches.length >= 1 && !matchesAnyBranch(event, includeBranches)) {
+            return false;
         }
 
         // Author is resolved across BOTH the PR and issue payload shapes
@@ -118,13 +123,15 @@ export function matchesTrigger(
     // Evaluated last so a workflow can write `repo: my-org/*` plus
     // `exclude.repo: my-org/legacy-*` to carve out exceptions.
     if (trigger.exclude && event.source !== 'manual') {
-        const excludeChecks: Array<{ values: string[]; path: string }> = [
-            { values: toArray(trigger.exclude.repo), path: 'metadata.repo' },
-            { values: toArray(trigger.exclude.branch), path: 'payload.pull_request.base.ref' },
-        ];
-        for (const { values, path } of excludeChecks) {
-            if (values.length === 0) continue;
-            if (matchesAnyShorthand(event, path, values)) return false;
+        const excludeRepos = toArray(trigger.exclude.repo);
+        if (excludeRepos.length > 0 && matchesAnyShorthand(event, 'metadata.repo', excludeRepos)) {
+            return false;
+        }
+
+        // Branch exclude — same PR-or-push resolution as include.
+        const excludeBranches = toArray(trigger.exclude.branch);
+        if (excludeBranches.length > 0 && matchesAnyBranch(event, excludeBranches)) {
+            return false;
         }
 
         // Author exclude — same PR-or-issue resolution as include, so
@@ -159,6 +166,28 @@ export const AUTHOR_PATHS = [
  *  matchesAnyShorthand. */
 function matchesAnyAuthor(event: EventPayload, values: string[]): boolean {
     return AUTHOR_PATHS.some((path) => matchesAnyShorthand(event, path, values));
+}
+
+/** The branch an event targets, resolved across a PR (base ref) and a push
+ *  (`payload.ref`, which arrives as `refs/heads/<branch>` and is normalized to
+ *  the short name). Matching both is what lets `branch:` / `exclude.branch:`
+ *  work on push events, not only pull_request.*. */
+export const BRANCH_PATHS = [
+    'payload.pull_request.base.ref',
+    'payload.ref',
+];
+
+/** True if the event's branch (on any BRANCH_PATHS shape, with `refs/heads/`
+ *  stripped) matches any value — glob-aware, case-sensitive (branches are). */
+function matchesAnyBranch(event: EventPayload, values: string[]): boolean {
+    return BRANCH_PATHS.some((path) => {
+        const actual = String(resolvePath(event, path) ?? '').replace(/^refs\/heads\//, '');
+        if (!actual) return false;
+        return values.some((v) => {
+            if (typeof v !== 'string') return false;
+            return v.includes('*') ? globMatch(v, actual) : v === actual;
+        });
+    });
 }
 
 /** Match a value list against a single dot-path on the event, honoring

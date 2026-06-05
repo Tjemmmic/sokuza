@@ -97,7 +97,9 @@ function getDefaultTemplateDir(): string {
  */
 const GITHUB_SHORTHAND_MAP: Record<string, string> = {
     repo: 'metadata.repo',
-    branch: 'payload.pull_request.base.ref',
+    // `branch` is intentionally NOT here: it's matched by matchesAnyBranch in
+    // workflow.ts (across PR base ref + normalized push ref), so demoting a
+    // single value to an exact PR-only filter would break it on push events.
     // OR-path so a single-value `author:` matches the PR *or* issue payload
     // shape — same set as AUTHOR_PATHS in workflow.ts (matchesFilter splits
     // on `|`). Without the issue path, `author:` silently no-ops on issues.*.

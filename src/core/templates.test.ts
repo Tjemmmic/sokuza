@@ -61,11 +61,21 @@ describe('normalizeWorkflow — shorthand resolution', () => {
         expect(wf.trigger.filters?.['metadata.repo']).toBe('org/repo');
     });
 
-    it('resolves single branch to a filter', async () => {
+    it('keeps a single branch on the trigger (matched across PR + push, no PR-only filter)', async () => {
         const wf = await normalizeWorkflow(
-            minWorkflow({ source: 'github', event: 'push', branch: 'main' }),
+            minWorkflow({ source: 'github', event: ['pull_request.opened', 'push'], branch: 'main' }),
         );
-        expect(wf.trigger.filters?.['payload.pull_request.base.ref']).toBe('main');
+        expect(wf.trigger.branch).toBe('main');
+        // No PR-only exact filter — that would break matching on push events.
+        expect(wf.trigger.filters?.['payload.pull_request.base.ref']).toBeUndefined();
+        const base = { source: 'github', timestamp: '', metadata: {} };
+        // PR event (base ref) and push event (refs/heads/ ref) both match.
+        expect(matchesTrigger(wf, { ...base, event: 'pull_request.opened',
+            payload: { pull_request: { base: { ref: 'main' } } } } as EventPayload)).toBe(true);
+        expect(matchesTrigger(wf, { ...base, event: 'push',
+            payload: { ref: 'refs/heads/main' } } as EventPayload)).toBe(true);
+        expect(matchesTrigger(wf, { ...base, event: 'push',
+            payload: { ref: 'refs/heads/dev' } } as EventPayload)).toBe(false);
     });
 
     it('resolves single author to an OR-path filter spanning PR and issue shapes', async () => {
