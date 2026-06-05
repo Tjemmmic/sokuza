@@ -99,9 +99,19 @@ describe('GhCliIntegration', () => {
             expect(buildPrSearchArgs({ owners: ['my-org'] })).toEqual(['--owner', 'my-org']);
         });
 
-        it('maps authors / repos / involves to repeatable flags', () => {
-            expect(buildPrSearchArgs({ authors: ['alice', 'bob'], repos: ['o/r'], involves: ['@me'] }))
-                .toEqual(['--author', 'alice', '--author', 'bob', '--repo', 'o/r', '--involves', '@me']);
+        it('maps single author / repos / involves to flags', () => {
+            expect(buildPrSearchArgs({ authors: ['alice'], repos: ['o/r'], involves: ['@me'] }))
+                .toEqual(['--author', 'alice', '--repo', 'o/r', '--involves', '@me']);
+        });
+
+        it('emits only the LAST value for last-wins selectors (authors/involves)', () => {
+            // gh search prs is last-wins for --author/--involves, so the command
+            // should reflect that rather than misleadingly list both.
+            expect(buildPrSearchArgs({ authors: ['alice', 'bob'] })).toEqual(['--author', 'bob']);
+            expect(buildPrSearchArgs({ involves: ['x', 'y'] })).toEqual(['--involves', 'y']);
+            // owners/repos DO OR, so all values are kept.
+            expect(buildPrSearchArgs({ owners: ['org-a', 'org-b'] }))
+                .toEqual(['--owner', 'org-a', '--owner', 'org-b']);
         });
 
         it('accepts a bare string and trims it', () => {

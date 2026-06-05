@@ -208,6 +208,9 @@ export const aiReviewAction: ActionHandler = async (params, context) => {
     // doesn't reach the API verbatim; blank/invalid → undefined (provider
     // default). The headline use is same-provider ensemble legs: bump this
     // so two `provider: kimi` nodes don't return near-identical reviews.
+    // temperature: 0 is a VALID, meaningful value (fully deterministic), so it
+    // must always be carried via an explicit `!== undefined` check — never a
+    // truthiness check, which would silently drop it and use the model default.
     const temperature = parseOptionalNumber(params.temperature);
     if (temperature !== undefined && (temperature < 0 || temperature > 2)) {
         // Forwarded as-is; the API decides. Warn so a typo (e.g. -1, 70)

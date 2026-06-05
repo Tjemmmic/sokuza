@@ -67,6 +67,12 @@ const SUPPORTED_EVENTS = [
 ];
 
 const DEFAULT_INTERVAL = 60;
+// Max PRs fetched per poll. Closed-PR detection is skipped when a poll
+// returns a full page (results >= this), since a PR missing from a truncated
+// result set may just be off-page, not closed — emitting a false `closed`
+// (then a false `opened` when it re-enters) would spam workflows. Relevant
+// once the search is widened to a busy org.
+const PR_SEARCH_LIMIT = 100;
 
 /**
  * Build the `gh search prs` selector flags for the poller from
@@ -108,17 +114,21 @@ export function buildPrSearchArgs(raw: unknown, logger?: Logger): string[] {
         }
     }
     const args: string[] = [];
-    const pushFlag = (key: string, flag: string): void => {
+    const pushFlag = (key: string, flag: string, lastWinsOnly = false): void => {
         const val = cfg[key];
-        const list = Array.isArray(val) ? val : typeof val === 'string' ? [val] : [];
+        let list = Array.isArray(val) ? val : typeof val === 'string' ? [val] : [];
+        // gh treats repeated --author/--involves as last-wins, so emit only the
+        // last value — the warning above already surfaced the dropped ones, and
+        // emitting all would make the command misleadingly look like an OR.
+        if (lastWinsOnly && list.length > 1) list = [list[list.length - 1]];
         for (const v of list) {
             if (typeof v === 'string' && v.trim()) args.push(flag, v.trim());
         }
     };
-    pushFlag('authors', '--author');
+    pushFlag('authors', '--author', true);
     pushFlag('owners', '--owner');
     pushFlag('repos', '--repo');
-    pushFlag('involves', '--involves');
+    pushFlag('involves', '--involves', true);
     // Raw extra qualifiers ride as the positional query, before the flags.
     const search = typeof cfg.search === 'string' ? cfg.search.trim() : '';
     if (search) args.unshift(search);
@@ -217,7 +227,7 @@ export class GhCliIntegration implements Integration {
             // Without it the author is only known via the per-PR enrichment
             // call and falls back to the poller's own username.
             '--json', 'number,title,url,state,isDraft,updatedAt,labels,repository,author',
-            '--limit', '50',
+            '--limit', String(PR_SEARCH_LIMIT),
         ]);
     }
 
@@ -316,22 +326,28 @@ export class GhCliIntegration implements Integration {
                 }
             }
 
-            // Detect closed PRs
-            const currentKeys = new Set(prs.map((p) => `${p.repository?.nameWithOwner}#${p.number}`));
-            for (const [key] of this.lastPrUpdatedAt) {
-                if (!currentKeys.has(key)) {
-                    const [repo, numStr] = key.split('#');
-                    if (this.seeded) {
-                        await this.emitPrEvent('pull_request.closed', repo, {
-                            number: Number(numStr), title: '', url: '',
-                            state: 'closed', isDraft: false,
-                            updatedAt: new Date().toISOString(),
-                        });
+            // Detect closed PRs — but ONLY when this poll returned a complete
+            // result set. On a full page (>= PR_SEARCH_LIMIT) a tracked PR
+            // missing from the results may simply be off-page (busy org), not
+            // closed; emitting a false `closed` here would later fire a false
+            // `opened` when it re-enters the page.
+            if (prs.length < PR_SEARCH_LIMIT) {
+                const currentKeys = new Set(prs.map((p) => `${p.repository?.nameWithOwner}#${p.number}`));
+                for (const [key] of this.lastPrUpdatedAt) {
+                    if (!currentKeys.has(key)) {
+                        const [repo, numStr] = key.split('#');
+                        if (this.seeded) {
+                            await this.emitPrEvent('pull_request.closed', repo, {
+                                number: Number(numStr), title: '', url: '',
+                                state: 'closed', isDraft: false,
+                                updatedAt: new Date().toISOString(),
+                            });
+                        }
+                        this.lastPrUpdatedAt.delete(key);
+                        this.lastPrHeadSha.delete(key);
+                        this.lastCommentIds.delete(key);
+                        this.lastReviewIds.delete(key);
                     }
-                    this.lastPrUpdatedAt.delete(key);
-                    this.lastPrHeadSha.delete(key);
-                    this.lastCommentIds.delete(key);
-                    this.lastReviewIds.delete(key);
                 }
             }
 

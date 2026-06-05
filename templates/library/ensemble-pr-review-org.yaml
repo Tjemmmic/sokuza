@@ -69,28 +69,32 @@ graph:
     - id: review_a1
       type: ai.review
       position: { x: 600, y: 60 }
-      config: { provider: zai-glm, temperature: 0.3, timeout: 0 }
+      config: { provider: zai-glm, temperature: 0.3, timeout: 240 }
       on_error: continue
     - id: review_a2
       type: ai.review
       position: { x: 600, y: 220 }
-      config: { provider: zai-glm, temperature: 0.9, timeout: 0 }
+      config: { provider: zai-glm, temperature: 0.9, timeout: 240 }
       on_error: continue
     - id: review_b1
       type: ai.review
       position: { x: 600, y: 420 }
-      config: { provider: kimi, temperature: 0.3, timeout: 0 }
+      config: { provider: kimi, temperature: 0.3, timeout: 240 }
       on_error: continue
     - id: review_b2
       type: ai.review
       position: { x: 600, y: 580 }
-      config: { provider: kimi, temperature: 0.9, timeout: 0 }
+      config: { provider: kimi, temperature: 0.9, timeout: 240 }
       on_error: continue
     - id: synth
       type: ai.review
       position: { x: 920, y: 320 }
       config:
-        timeout: 0
+        # Finite node timeouts (not 0) so a stuck/slow provider drops out via
+        # on_error: continue instead of holding the parallel group until the
+        # workflow queue timeout. Keep the workflow's queue.timeout above the
+        # slowest review (240s) + synth (300s).
+        timeout: 300
         # Synthesis needs more headroom than a single review — it restates
         # the merged findings. Raise max_tokens so the JSON isn't truncated.
         max_tokens: 8192
