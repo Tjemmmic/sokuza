@@ -45,8 +45,8 @@ export function sanitizeProviderHeaders(raw: unknown): Record<string, string> | 
 // Header names whose value is likely a credential, so a list/GET response
 // should mask it rather than echo cleartext. Custom headers are general
 // purpose (the motivating use is a non-secret User-Agent), but nothing stops
-// a user storing e.g. an X-API-Key here.
-const SECRET_HEADER_NAME_RE = /key|token|secret|auth|credential|password/i;
+// a user storing e.g. an X-API-Key or a session cookie here.
+const SECRET_HEADER_NAME_RE = /key|token|secret|auth|credential|password|cookie|session|jwt|bearer/i;
 
 /**
  * Mask the values of secret-bearing custom headers for display (e.g. the

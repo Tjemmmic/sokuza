@@ -48,6 +48,9 @@ describe('maskProviderHeaders', () => {
             'X-Auth-Token': 'tok_123',
             'X-Tenant-Secret': 'shh',
             'X-Password': 'hunter2',
+            'Cookie': 'session=abc',
+            'X-Session-Id': 'sess_1',
+            'X-JWT': 'eyJ...',
             'X-Request-Id': 'req-42',
         }, mask)).toEqual({
             'User-Agent': 'claude-code/0.1.0',
@@ -55,6 +58,9 @@ describe('maskProviderHeaders', () => {
             'X-Auth-Token': 'MASKED',
             'X-Tenant-Secret': 'MASKED',
             'X-Password': 'MASKED',
+            'Cookie': 'MASKED',
+            'X-Session-Id': 'MASKED',
+            'X-JWT': 'MASKED',
             'X-Request-Id': 'req-42',
         });
     });
