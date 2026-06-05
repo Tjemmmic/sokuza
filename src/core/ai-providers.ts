@@ -31,6 +31,7 @@ import { join } from 'node:path';
 import type { Logger } from 'pino';
 import { abortErrorFromSignal } from './abort-error.js';
 import { ARGS_STYLES, type ArgsStyle } from './args-styles.js';
+import { sanitizeProviderHeaders } from './provider-headers.js';
 
 /**
  * Quick non-blocking check that a CLI binary is on PATH.
@@ -502,21 +503,6 @@ export function loadAIProviders(
     return { providers, defaultProvider, fallbackChain };
 }
 
-// Header names sokuza sets authoritatively on every openai-compatible
-// request; a custom provider header may not shadow them (any case).
-const RESERVED_HEADER_NAMES = new Set(['authorization', 'content-type']);
-// RFC 7230 token: the set of characters allowed in an HTTP header field name.
-const HTTP_TOKEN_RE = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
-
-/** True if a string contains an ASCII control char (CR/LF injection vectors). */
-function hasControlChar(value: string): boolean {
-    for (let i = 0; i < value.length; i++) {
-        const code = value.charCodeAt(i);
-        if (code <= 0x1f || code === 0x7f) return true;
-    }
-    return false;
-}
-
 function parseProvider(name: string, raw: Record<string, unknown>): AIProvider {
     const kind = raw.kind as ProviderKind | undefined;
     if (kind !== 'anthropic-api' && kind !== 'openai-compatible-api' && kind !== 'cli') {
@@ -542,26 +528,11 @@ function parseProvider(name: string, raw: Record<string, unknown>): AIProvider {
             );
         }
 
-        if (raw.headers && typeof raw.headers === 'object' && !Array.isArray(raw.headers)) {
-            const headers: Record<string, string> = {};
-            for (const [key, value] of Object.entries(raw.headers as Record<string, unknown>)) {
-                if (typeof value !== 'string') continue;
-                // Content-Type/Authorization are set authoritatively at request
-                // time. HTTP header names are case-insensitive, so a config
-                // header named e.g. "authorization" would otherwise reach fetch
-                // as a distinct object key and get *combined* with the real one
-                // ("evil, Bearer …"), corrupting auth — drop reserved names here
-                // (case-insensitively) so provider.headers can never carry one.
-                if (RESERVED_HEADER_NAMES.has(key.toLowerCase())) continue;
-                // Defense-in-depth against a hand-edited config: names must be
-                // valid HTTP tokens and values must be free of control chars
-                // (CR/LF header-injection vectors). Invalid headers are dropped
-                // silently, consistent with the non-string skip above.
-                if (!HTTP_TOKEN_RE.test(key) || hasControlChar(value)) continue;
-                headers[key] = value;
-            }
-            if (Object.keys(headers).length > 0) provider.headers = headers;
-        }
+        // Reserved/invalid headers are dropped (see sanitizeProviderHeaders);
+        // the same rule is applied by the dashboard provider API so both paths
+        // agree on what can ever reach a request.
+        const headers = sanitizeProviderHeaders(raw.headers);
+        if (headers) provider.headers = headers;
     }
 
     if (kind === 'cli') {
