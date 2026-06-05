@@ -97,8 +97,13 @@ function getDefaultTemplateDir(): string {
  */
 const GITHUB_SHORTHAND_MAP: Record<string, string> = {
     repo: 'metadata.repo',
-    branch: 'payload.pull_request.base.ref',
-    author: 'payload.pull_request.user.login',
+    // `branch` is intentionally NOT here: it's matched by matchesAnyBranch in
+    // workflow.ts (across PR base ref + normalized push ref), so demoting a
+    // single value to an exact PR-only filter would break it on push events.
+    // OR-path so a single-value `author:` matches the PR *or* issue payload
+    // shape — same set as AUTHOR_PATHS in workflow.ts (matchesFilter splits
+    // on `|`). Without the issue path, `author:` silently no-ops on issues.*.
+    author: 'payload.pull_request.user.login|payload.issue.user.login',
 };
 
 /**
@@ -216,12 +221,10 @@ function resolveShorthands(
         }
     }
 
-    const labels = raw.labels as string[] | undefined;
-    if (labels && Array.isArray(labels) && labels.length > 0) {
-        if (labels.length === 1) {
-            filters[`payload.pull_request.labels[].name`] = labels[0];
-        }
-    }
+    // Labels are NOT converted to a filter. The array-contains filter path
+    // does exact matching, which would silently break the documented glob
+    // case (`labels: [needs-*]`). Labels of any arity stay on `trigger.labels`
+    // and are matched by `eventLabelsContainAny` (glob + case-insensitive).
 
     return {
         source,

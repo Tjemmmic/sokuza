@@ -67,6 +67,75 @@ const SUPPORTED_EVENTS = [
 ];
 
 const DEFAULT_INTERVAL = 60;
+// Max PRs fetched per poll. Closed-PR detection is skipped when a poll
+// returns a full page (results >= this), since a PR missing from a truncated
+// result set may just be off-page, not closed — emitting a false `closed`
+// (then a false `opened` when it re-enters) would spam workflows. Relevant
+// once the search is widened to a busy org.
+const PR_SEARCH_LIMIT = 100;
+
+/**
+ * Build the `gh search prs` selector flags for the poller from
+ * `integrations.gh-cli.prs`. Default (unset) = the authenticated user's own
+ * PRs (`--author @me`) — fully backward-compatible.
+ *
+ * Widen it to watch other people's / an org's PRs:
+ *   integrations:
+ *     gh-cli:
+ *       prs:
+ *         owners: [my-org]        # PRs in this org/user    → --owner
+ *         authors: [alice]        # PRs by this author      → --author
+ *         repos: [my-org/api]     # this repo               → --repo
+ *         involves: ["@me"]       # PRs you're involved in  → --involves
+ *         search: 'draft:false'   # extra raw qualifiers (positional)
+ * Then a workflow's `exclude.author: <you>` carves your own PRs back out.
+ * Each gh result still flows through matchesTrigger per workflow, so one
+ * poll fans out to every matching workflow (no extra `gh` calls).
+ *
+ * Multi-value note (verified against `gh search prs`):
+ *   - `owners` / `repos` repeated flags OR correctly (PRs across all of them).
+ *   - `authors` / `involves` repeated flags are LAST-WINS, not OR — GitHub
+ *     can't OR these in a single query (`author:a author:b` ANDs → empty).
+ * So multiple owners/repos work; for multiple authors use the raw `search`
+ * field or separate workflows. Pass a `logger` to get warned when a
+ * last-wins selector (`authors`/`involves`) is given more than one value —
+ * the warning lives here so every caller (not just `initialize`) is covered.
+ */
+export function buildPrSearchArgs(raw: unknown, logger?: Logger): string[] {
+    if (!raw || typeof raw !== 'object') return ['--author', '@me'];
+    const cfg = raw as Record<string, unknown>;
+    // `gh search prs` can't OR multiple authors/involves (last value wins).
+    for (const key of ['authors', 'involves'] as const) {
+        if (Array.isArray(cfg[key]) && (cfg[key] as unknown[]).length > 1) {
+            logger?.warn(
+                { selector: key, values: cfg[key] },
+                `gh-cli: multiple \`${key}\` values can't be OR'd in one search — only the last takes effect. Use the \`search\` field or separate workflows.`,
+            );
+        }
+    }
+    const args: string[] = [];
+    const pushFlag = (key: string, flag: string, lastWinsOnly = false): void => {
+        const val = cfg[key];
+        let list = Array.isArray(val) ? val : typeof val === 'string' ? [val] : [];
+        // gh treats repeated --author/--involves as last-wins, so emit only the
+        // last value — the warning above already surfaced the dropped ones, and
+        // emitting all would make the command misleadingly look like an OR.
+        if (lastWinsOnly && list.length > 1) list = [list[list.length - 1]];
+        for (const v of list) {
+            if (typeof v === 'string' && v.trim()) args.push(flag, v.trim());
+        }
+    };
+    pushFlag('authors', '--author', true);
+    pushFlag('owners', '--owner');
+    pushFlag('repos', '--repo');
+    pushFlag('involves', '--involves', true);
+    // Raw extra qualifiers ride as the positional query, before the flags.
+    const search = typeof cfg.search === 'string' ? cfg.search.trim() : '';
+    if (search) args.unshift(search);
+    // An empty `prs: {}` shouldn't become a fetch-the-whole-world query.
+    if (args.length === 0) return ['--author', '@me'];
+    return args;
+}
 
 export class GhCliIntegration implements Integration {
     readonly name = 'gh-cli';
@@ -82,6 +151,10 @@ export class GhCliIntegration implements Integration {
 
     private username = '';
     private pollInterval = DEFAULT_INTERVAL;
+    // `gh search prs` selector flags for the poll. Defaults to the
+    // authenticated user's own PRs; widen via `integrations.gh-cli.prs`
+    // (e.g. owners: [my-org]) to review OTHER people's / org PRs.
+    private prSearchArgs: string[] = ['--author', '@me'];
     private timer: ReturnType<typeof setInterval> | null = null;
     private onEvent: EventHandler | null = null;
 
@@ -89,6 +162,7 @@ export class GhCliIntegration implements Integration {
     // Track both updatedAt (cheap change signal) and headSha (commit tracking)
     private lastPrUpdatedAt = new Map<string, string>(); // "owner/repo#num" → updatedAt
     private lastPrHeadSha = new Map<string, string>(); // "owner/repo#num" → HEAD commit SHA
+    private lastPrAuthor = new Map<string, string>(); // "owner/repo#num" → author login (for the synthetic closed event)
     private lastReviewIds = new Map<string, Set<string>>(); // "owner/repo#num" → review IDs
     private lastCommentIds = new Map<string, Set<string>>(); // "owner/repo#num" → comment IDs
     private seeded = false;
@@ -104,6 +178,8 @@ export class GhCliIntegration implements Integration {
         }
         this.username = status.username ?? '';
         this.pollInterval = (config.interval as number) ?? DEFAULT_INTERVAL;
+        // Warning for last-wins multi-value selectors lives in buildPrSearchArgs.
+        this.prSearchArgs = buildPrSearchArgs(config.prs, _logger);
     }
 
     registerRoutes(_server: FastifyInstance, onEvent: EventHandler): void {
@@ -132,14 +208,27 @@ export class GhCliIntegration implements Integration {
 
     // ─── Public API (used by dashboard endpoints) ───────────────────────
 
-    /** List all open PRs for the authenticated user across all repos */
+    /** List all open PRs for the authenticated user across all repos.
+     *  Used by the dashboard's "my PRs" view — always scoped to @me. */
     static async listMyPrs(): Promise<GhPullRequest[]> {
+        return GhCliIntegration.searchPrs(['--author', '@me']);
+    }
+
+    /** Run `gh search prs` with the given selector flags (e.g. `--author @me`,
+     *  `--owner my-org`). The poller passes its configured `prSearchArgs`;
+     *  per-workflow `author`/`exclude.author` filters then split the results. */
+    static async searchPrs(selectorArgs: string[]): Promise<GhPullRequest[]> {
         return ghJson<GhPullRequest[]>([
             'search', 'prs',
-            '--author', '@me',
+            ...selectorArgs,
             '--state', 'open',
-            '--json', 'number,title,url,state,isDraft,updatedAt,labels,repository',
-            '--limit', '50',
+            // `author` is required: when the search is widened past @me (org
+            // watching), the emitted payload's pull_request.user.login comes
+            // from here, and that's what trigger `exclude.author` matches on.
+            // Without it the author is only known via the per-PR enrichment
+            // call and falls back to the poller's own username.
+            '--json', 'number,title,url,state,isDraft,updatedAt,labels,repository,author',
+            '--limit', String(PR_SEARCH_LIMIT),
         ]);
     }
 
@@ -196,7 +285,7 @@ export class GhCliIntegration implements Integration {
         if (!this.onEvent) return;
 
         try {
-            const prs = await GhCliIntegration.listMyPrs();
+            const prs = await GhCliIntegration.searchPrs(this.prSearchArgs);
 
             for (const pr of prs) {
                 const repo = pr.repository?.nameWithOwner;
@@ -210,6 +299,7 @@ export class GhCliIntegration implements Integration {
                     const enriched = await this.enrichPr(repo, pr);
                     this.lastPrUpdatedAt.set(key, pr.updatedAt);
                     this.lastPrHeadSha.set(key, enriched.headRefOid ?? '');
+                    this.lastPrAuthor.set(key, enriched.author?.login ?? pr.author?.login ?? '');
                     await this.seedActivityIds(repo, pr);
                     continue;
                 }
@@ -219,6 +309,7 @@ export class GhCliIntegration implements Integration {
                     const enriched = await this.enrichPr(repo, pr);
                     this.lastPrUpdatedAt.set(key, pr.updatedAt);
                     this.lastPrHeadSha.set(key, enriched.headRefOid ?? '');
+                    this.lastPrAuthor.set(key, enriched.author?.login ?? pr.author?.login ?? '');
                     await this.emitPrEvent('pull_request.opened', repo, enriched);
                 } else if (lastUpdated !== pr.updatedAt) {
                     // Something changed on this PR — figure out WHAT changed
@@ -238,22 +329,35 @@ export class GhCliIntegration implements Integration {
                 }
             }
 
-            // Detect closed PRs
-            const currentKeys = new Set(prs.map((p) => `${p.repository?.nameWithOwner}#${p.number}`));
-            for (const [key] of this.lastPrUpdatedAt) {
-                if (!currentKeys.has(key)) {
-                    const [repo, numStr] = key.split('#');
-                    if (this.seeded) {
-                        await this.emitPrEvent('pull_request.closed', repo, {
-                            number: Number(numStr), title: '', url: '',
-                            state: 'closed', isDraft: false,
-                            updatedAt: new Date().toISOString(),
-                        });
+            // Detect closed PRs — but ONLY when this poll returned a complete
+            // result set. On a full page (>= PR_SEARCH_LIMIT) a tracked PR
+            // missing from the results may simply be off-page (busy org), not
+            // closed; emitting a false `closed` here would later fire a false
+            // `opened` when it re-enters the page.
+            if (prs.length < PR_SEARCH_LIMIT) {
+                const currentKeys = new Set(prs.map((p) => `${p.repository?.nameWithOwner}#${p.number}`));
+                for (const [key] of this.lastPrUpdatedAt) {
+                    if (!currentKeys.has(key)) {
+                        const [repo, numStr] = key.split('#');
+                        if (this.seeded) {
+                            // Carry the persisted author so `exclude.author`
+                            // works for closed events on org-scoped polls —
+                            // otherwise emitPrEvent falls back to the poller's
+                            // own username and misattributes others' PRs.
+                            const login = this.lastPrAuthor.get(key);
+                            await this.emitPrEvent('pull_request.closed', repo, {
+                                number: Number(numStr), title: '', url: '',
+                                state: 'closed', isDraft: false,
+                                updatedAt: new Date().toISOString(),
+                                ...(login ? { author: { login } } : {}),
+                            });
+                        }
+                        this.lastPrUpdatedAt.delete(key);
+                        this.lastPrHeadSha.delete(key);
+                        this.lastPrAuthor.delete(key);
+                        this.lastCommentIds.delete(key);
+                        this.lastReviewIds.delete(key);
                     }
-                    this.lastPrUpdatedAt.delete(key);
-                    this.lastPrHeadSha.delete(key);
-                    this.lastCommentIds.delete(key);
-                    this.lastReviewIds.delete(key);
                 }
             }
 

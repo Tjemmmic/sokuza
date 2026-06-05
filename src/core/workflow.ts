@@ -83,22 +83,38 @@ export function matchesTrigger(
     // Globs (e.g. `my-org/*`) are honoured here so multi-value behaves
     // the same as the single-value path which already globs via filters.
     if (event.source !== 'manual') {
-        const shorthandChecks: Array<{ values: string[]; path: string }> = [
-            { values: toArray(trigger.repo), path: 'metadata.repo' },
-            { values: toArray(trigger.branch), path: 'payload.pull_request.base.ref' },
-            { values: toArray(trigger.author), path: 'payload.pull_request.user.login' },
-        ];
-        for (const { values, path } of shorthandChecks) {
-            if (values.length <= 1) continue; // Single values handled by filters above
-            if (!matchesAnyShorthand(event, path, values)) return false;
+        // repo: multi-value here; single value handled by the resolveShorthands filter.
+        const includeRepos = toArray(trigger.repo);
+        if (includeRepos.length > 1 && !matchesAnyShorthand(event, 'metadata.repo', includeRepos)) {
+            return false;
         }
 
-        // Labels: include requires AT LEAST ONE of the listed labels to
-        // be present. Single-value labels are converted to a filter by
-        // resolveShorthands; multi-value would silently be ignored
-        // without this branch.
+        // Branch is resolved across the PR base ref AND the push ref (with
+        // `refs/heads/` stripped — see BRANCH_PATHS), for ANY count, so
+        // `branch:` works on push events too, not only pull_request.*.
+        const includeBranches = toArray(trigger.branch);
+        if (includeBranches.length >= 1 && !matchesAnyBranch(event, includeBranches)) {
+            return false;
+        }
+
+        // Author is resolved across BOTH the PR and issue payload shapes
+        // (see AUTHOR_PATHS) so `author:` works for issue.* events too, not
+        // only pull_request.*. Checked for ANY count (>= 1): graph workflows
+        // set `trigger.author` directly via extractTriggerFromGraph — they
+        // never go through resolveShorthands — so a single-value author must
+        // be enforced here too, else a one-author graph workflow would match
+        // every author. (Same reasoning as labels, below.)
+        const includeAuthors = toArray(trigger.author);
+        if (includeAuthors.length >= 1 && !matchesAnyAuthor(event, includeAuthors)) {
+            return false;
+        }
+
+        // Labels: include requires AT LEAST ONE of the listed labels to be
+        // present. All label matching (single or multi) goes through
+        // eventLabelsContainAny so globs + case-insensitivity apply uniformly
+        // — single values are no longer demoted to an exact-match filter.
         const includeLabels = trigger.labels ?? [];
-        if (includeLabels.length > 1 && !eventLabelsContainAny(event, includeLabels)) {
+        if (includeLabels.length >= 1 && !eventLabelsContainAny(event, includeLabels)) {
             return false;
         }
     }
@@ -107,14 +123,22 @@ export function matchesTrigger(
     // Evaluated last so a workflow can write `repo: my-org/*` plus
     // `exclude.repo: my-org/legacy-*` to carve out exceptions.
     if (trigger.exclude && event.source !== 'manual') {
-        const excludeChecks: Array<{ values: string[]; path: string }> = [
-            { values: toArray(trigger.exclude.repo), path: 'metadata.repo' },
-            { values: toArray(trigger.exclude.branch), path: 'payload.pull_request.base.ref' },
-            { values: toArray(trigger.exclude.author), path: 'payload.pull_request.user.login' },
-        ];
-        for (const { values, path } of excludeChecks) {
-            if (values.length === 0) continue;
-            if (matchesAnyShorthand(event, path, values)) return false;
+        const excludeRepos = toArray(trigger.exclude.repo);
+        if (excludeRepos.length > 0 && matchesAnyShorthand(event, 'metadata.repo', excludeRepos)) {
+            return false;
+        }
+
+        // Branch exclude — same PR-or-push resolution as include.
+        const excludeBranches = toArray(trigger.exclude.branch);
+        if (excludeBranches.length > 0 && matchesAnyBranch(event, excludeBranches)) {
+            return false;
+        }
+
+        // Author exclude — same PR-or-issue resolution as include, so
+        // `exclude.author: me` rejects my own PRs AND my own issues.
+        const excludeAuthors = toArray(trigger.exclude.author);
+        if (excludeAuthors.length > 0 && matchesAnyAuthor(event, excludeAuthors)) {
+            return false;
         }
 
         const excludeLabels = trigger.exclude.labels ?? [];
@@ -126,6 +150,46 @@ export function matchesTrigger(
     return true;
 }
 
+/** The GitHub username of whoever the event is "about", resolved across the
+ *  PR and issue payload shapes. A pull_request.* event carries the author at
+ *  `payload.pull_request.user.login`; an issues.* event carries it at
+ *  `payload.issue.user.login`. Matching against both is what lets `author:`
+ *  / `exclude.author:` work uniformly for either event family instead of
+ *  silently never matching on issues. */
+export const AUTHOR_PATHS = [
+    'payload.pull_request.user.login',
+    'payload.issue.user.login',
+];
+
+/** True if the event's author (on either AUTHOR_PATHS shape) matches any of
+ *  the given values — honoring glob + case-insensitivity per
+ *  matchesAnyShorthand. */
+function matchesAnyAuthor(event: EventPayload, values: string[]): boolean {
+    return AUTHOR_PATHS.some((path) => matchesAnyShorthand(event, path, values));
+}
+
+/** The branch an event targets, resolved across a PR (base ref) and a push
+ *  (`payload.ref`, which arrives as `refs/heads/<branch>` and is normalized to
+ *  the short name). Matching both is what lets `branch:` / `exclude.branch:`
+ *  work on push events, not only pull_request.*. */
+export const BRANCH_PATHS = [
+    'payload.pull_request.base.ref',
+    'payload.ref',
+];
+
+/** True if the event's branch (on any BRANCH_PATHS shape, with `refs/heads/`
+ *  stripped) matches any value — glob-aware, case-sensitive (branches are). */
+function matchesAnyBranch(event: EventPayload, values: string[]): boolean {
+    return BRANCH_PATHS.some((path) => {
+        const actual = String(resolvePath(event, path) ?? '').replace(/^refs\/heads\//, '');
+        if (!actual) return false;
+        return values.some((v) => {
+            if (typeof v !== 'string') return false;
+            return v.includes('*') ? globMatch(v, actual) : v === actual;
+        });
+    });
+}
+
 /** Match a value list against a single dot-path on the event, honoring
  *  glob (`*` wildcard) and case-insensitivity for the GitHub-username path. */
 function matchesAnyShorthand(event: EventPayload, path: string, values: string[]): boolean {
@@ -133,6 +197,10 @@ function matchesAnyShorthand(event: EventPayload, path: string, values: string[]
     const caseInsensitive = CASE_INSENSITIVE_PATHS.has(path);
     const actualNormalized = caseInsensitive ? actual.toLowerCase() : actual;
     return values.some((v) => {
+        // Guard non-string config (e.g. `author: [123]`) — same protection
+        // eventLabelsContainAny has; without it .toLowerCase()/.includes()
+        // would throw and break matching for the whole workflow.
+        if (typeof v !== 'string') return false;
         const expected = caseInsensitive ? v.toLowerCase() : v;
         if (expected.includes('*')) return globMatch(expected, actualNormalized);
         return expected === actualNormalized;
@@ -152,7 +220,20 @@ function eventLabelsContainAny(event: EventPayload, labels: string[]): boolean {
             if (!item || typeof item !== 'object') continue;
             const name = (item as Record<string, unknown>).name;
             if (typeof name !== 'string') continue;
-            if (labels.includes(name)) return true;
+            // Glob support (`needs-*`, `area/*`) + case-insensitivity (GitHub
+            // label names are case-insensitive) so label shorthand behaves
+            // like repo/branch/author.
+            const target = name.toLowerCase();
+            if (labels.some((raw) => {
+                // Guard non-string config values (e.g. `labels: [123]` from
+                // YAML) — calling .toLowerCase() on them would throw and break
+                // matching for the whole workflow.
+                if (typeof raw !== 'string') return false;
+                const l = raw.toLowerCase();
+                return l.includes('*') ? globMatch(l, target) : l === target;
+            })) {
+                return true;
+            }
         }
     }
     return false;
@@ -161,6 +242,7 @@ function eventLabelsContainAny(event: EventPayload, labels: string[]): boolean {
 /** Paths where comparison should be case-insensitive (GitHub usernames) */
 const CASE_INSENSITIVE_PATHS = new Set([
     'payload.pull_request.user.login',
+    'payload.issue.user.login',
 ]);
 
 /**

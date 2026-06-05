@@ -61,18 +61,43 @@ describe('normalizeWorkflow — shorthand resolution', () => {
         expect(wf.trigger.filters?.['metadata.repo']).toBe('org/repo');
     });
 
-    it('resolves single branch to a filter', async () => {
+    it('keeps a single branch on the trigger (matched across PR + push, no PR-only filter)', async () => {
         const wf = await normalizeWorkflow(
-            minWorkflow({ source: 'github', event: 'push', branch: 'main' }),
+            minWorkflow({ source: 'github', event: ['pull_request.opened', 'push'], branch: 'main' }),
         );
-        expect(wf.trigger.filters?.['payload.pull_request.base.ref']).toBe('main');
+        expect(wf.trigger.branch).toBe('main');
+        // No PR-only exact filter — that would break matching on push events.
+        expect(wf.trigger.filters?.['payload.pull_request.base.ref']).toBeUndefined();
+        const base = { source: 'github', timestamp: '', metadata: {} };
+        // PR event (base ref) and push event (refs/heads/ ref) both match.
+        expect(matchesTrigger(wf, { ...base, event: 'pull_request.opened',
+            payload: { pull_request: { base: { ref: 'main' } } } } as EventPayload)).toBe(true);
+        expect(matchesTrigger(wf, { ...base, event: 'push',
+            payload: { ref: 'refs/heads/main' } } as EventPayload)).toBe(true);
+        expect(matchesTrigger(wf, { ...base, event: 'push',
+            payload: { ref: 'refs/heads/dev' } } as EventPayload)).toBe(false);
     });
 
-    it('resolves single author to a filter', async () => {
+    it('resolves single author to an OR-path filter spanning PR and issue shapes', async () => {
         const wf = await normalizeWorkflow(
             minWorkflow({ source: 'github', event: 'push', author: 'dependabot[bot]' }),
         );
-        expect(wf.trigger.filters?.['payload.pull_request.user.login']).toBe('dependabot[bot]');
+        // OR-path so `author:` matches issue events too, not only PRs.
+        expect(wf.trigger.filters?.['payload.pull_request.user.login|payload.issue.user.login'])
+            .toBe('dependabot[bot]');
+    });
+
+    it('single-value author matches both PR and issue events end-to-end', async () => {
+        const wf = await normalizeWorkflow(
+            minWorkflow({ source: 'github', event: ['pull_request.opened', 'issues.opened'], author: 'alice' }),
+        );
+        const base = { source: 'github', timestamp: '', metadata: {} };
+        expect(matchesTrigger(wf, { ...base, event: 'pull_request.opened',
+            payload: { pull_request: { user: { login: 'alice' } } } } as EventPayload)).toBe(true);
+        expect(matchesTrigger(wf, { ...base, event: 'issues.opened',
+            payload: { issue: { user: { login: 'alice' } } } } as EventPayload)).toBe(true);
+        expect(matchesTrigger(wf, { ...base, event: 'issues.opened',
+            payload: { issue: { user: { login: 'bob' } } } } as EventPayload)).toBe(false);
     });
 
     it('keeps multi-value repo on trigger without converting to filter', async () => {
@@ -100,15 +125,26 @@ describe('normalizeWorkflow — shorthand resolution', () => {
         expect(wf.trigger.filters?.['payload.pull_request.user.login']).toBeUndefined();
     });
 
-    it('resolves single label to array-contains filter', async () => {
+    it('keeps a single label on the trigger (not an exact-match filter, so globs work)', async () => {
         const wf = await normalizeWorkflow(
-            minWorkflow({
-                source: 'github',
-                event: 'push',
-                labels: ['bug'],
-            }),
+            minWorkflow({ source: 'github', event: 'pull_request.opened', labels: ['bug'] }),
         );
-        expect(wf.trigger.filters?.['payload.pull_request.labels[].name']).toBe('bug');
+        expect(wf.trigger.labels).toEqual(['bug']);
+        // No exact-match filter — that path can't glob.
+        expect(wf.trigger.filters?.['payload.pull_request.labels[].name']).toBeUndefined();
+    });
+
+    it('single-value label glob matches case-insensitively (regression: needs-* → Needs-Review)', async () => {
+        const wf = await normalizeWorkflow(
+            minWorkflow({ source: 'github', event: 'pull_request.opened', labels: ['needs-*'] }),
+        );
+        const base = { source: 'github', event: 'pull_request.opened', timestamp: '', metadata: {} };
+        expect(matchesTrigger(wf, { ...base,
+            payload: { pull_request: { labels: [{ name: 'needs-review' }] } } } as EventPayload)).toBe(true);
+        expect(matchesTrigger(wf, { ...base,
+            payload: { pull_request: { labels: [{ name: 'Needs-Review' }] } } } as EventPayload)).toBe(true);
+        expect(matchesTrigger(wf, { ...base,
+            payload: { pull_request: { labels: [{ name: 'bug' }] } } } as EventPayload)).toBe(false);
     });
 
     it('keeps multi-value labels on trigger for multi-match resolution', async () => {

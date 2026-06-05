@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import pino from 'pino';
 import {
     loadAIProviders,
@@ -9,6 +9,8 @@ import {
     spawnCli,
     commandExistsOnPath,
     listImplicitProviders,
+    runCompletionWithFallback,
+    buildCompletionPrompt,
 } from '../core/ai-providers.js';
 
 const TEST_LOGGER = pino({ level: 'silent' });
@@ -482,5 +484,112 @@ describe('spawnCli — abort signal propagation', () => {
             providerName: 'test-cli',
         });
         expect(stdout).toBe('hello');
+    });
+});
+
+describe('completion: temperature + truncation (openai-compatible backend)', () => {
+    const makeReg = () => loadAIProviders({
+        providers: {
+            test: { kind: 'openai-compatible-api', base_url: 'https://x.test/v1', api_key: 'k', default_model: 'm' },
+        },
+    });
+
+    afterEach(() => { vi.restoreAllMocks(); });
+
+    function mockFetch(responseBody: unknown, captured: { body?: any }) {
+        return vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
+            captured.body = JSON.parse((init as RequestInit).body as string);
+            return new Response(JSON.stringify(responseBody), {
+                status: 200, headers: { 'content-type': 'application/json' },
+            });
+        });
+    }
+
+    it('omits temperature when unset and sends it when set', async () => {
+        const captured: { body?: any } = {};
+        mockFetch({ model: 'm', choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }] }, captured);
+
+        await runCompletionWithFallback(makeReg(), 'test', { systemPrompt: 's', userMessage: 'u', logger: TEST_LOGGER });
+        expect('temperature' in captured.body).toBe(false);
+
+        await runCompletionWithFallback(makeReg(), 'test', { systemPrompt: 's', userMessage: 'u', temperature: 0.7, logger: TEST_LOGGER });
+        expect(captured.body.temperature).toBe(0.7);
+    });
+
+    it('flags truncated when finish_reason is "length"', async () => {
+        mockFetch({ model: 'm', choices: [{ message: { content: 'partial…' }, finish_reason: 'length' }] }, {});
+        const r = await runCompletionWithFallback(makeReg(), 'test', { systemPrompt: 's', userMessage: 'u', logger: TEST_LOGGER });
+        expect(r.truncated).toBe(true);
+    });
+
+    it('truncated is false on a normal stop', async () => {
+        mockFetch({ model: 'm', choices: [{ message: { content: 'done' }, finish_reason: 'stop' }] }, {});
+        const r = await runCompletionWithFallback(makeReg(), 'test', { systemPrompt: 's', userMessage: 'u', logger: TEST_LOGGER });
+        expect(r.truncated).toBe(false);
+    });
+
+    it('throws on a malformed 200 response with no choices', async () => {
+        mockFetch({ model: 'm', choices: [] }, {});
+        await expect(
+            runCompletionWithFallback(makeReg(), 'test', { systemPrompt: 's', userMessage: 'u', logger: TEST_LOGGER }),
+        ).rejects.toThrow(/no choices/);
+    });
+});
+
+describe('completion: truncation detection (anthropic-api backend)', () => {
+    function regWithFakeClient(stopReason: string) {
+        const reg = loadAIProviders({
+            providers: { anth: { kind: 'anthropic-api', api_key: 'k', default_model: 'claude-x' } },
+        });
+        const provider = reg.providers.get('anth')!;
+        // Inject a fake SDK client so no network call happens.
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (provider as any)._client = {
+            messages: {
+                create: async () => ({
+                    content: [{ type: 'text', text: 'some output' }],
+                    stop_reason: stopReason,
+                    model: 'claude-x',
+                    usage: { input_tokens: 10, output_tokens: 20 },
+                }),
+            },
+        };
+        return reg;
+    }
+
+    it('flags truncated when stop_reason is max_tokens', async () => {
+        const r = await runCompletionWithFallback(regWithFakeClient('max_tokens'), 'anth',
+            { systemPrompt: 's', userMessage: 'u', logger: TEST_LOGGER });
+        expect(r.truncated).toBe(true);
+    });
+
+    it('truncated is false on a normal end_turn', async () => {
+        const r = await runCompletionWithFallback(regWithFakeClient('end_turn'), 'anth',
+            { systemPrompt: 's', userMessage: 'u', logger: TEST_LOGGER });
+        expect(r.truncated).toBe(false);
+    });
+});
+
+describe('buildCompletionPrompt', () => {
+    it('claude-code: just the user message (system prompt goes via --system-prompt)', () => {
+        const p = buildCompletionPrompt('claude-code', 'SYS', 'USER');
+        expect(p).toBe('USER');
+    });
+
+    it('opencode/codex: folds the system prompt in, no preamble', () => {
+        for (const style of ['opencode', 'codex'] as const) {
+            const p = buildCompletionPrompt(style, 'SYS', 'USER');
+            expect(p).toBe('System instructions:\nSYS\n\n---\n\nUSER');
+            expect(p).not.toMatch(/NO tools available/);
+        }
+    });
+
+    it('gemini: prepends the no-tools preamble so it does pure inference', () => {
+        const p = buildCompletionPrompt('gemini', 'SYS', 'USER');
+        // Preamble first, then the folded system prompt + user message.
+        expect(p).toMatch(/^CRITICAL EXECUTION CONTEXT/);
+        expect(p).toMatch(/NO tools available/);
+        expect(p).toMatch(/run_shell_command/);
+        expect(p).toContain('System instructions:\nSYS\n\n---\n\nUSER');
     });
 });

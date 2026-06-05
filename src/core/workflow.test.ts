@@ -667,6 +667,174 @@ describe('matchesTrigger', () => {
         });
     });
 
+    describe('author filters resolve across PR and issue events', () => {
+        it('matches multi-value author on an issues.* event (issue.user.login)', () => {
+            // Issue events carry the author at payload.issue.user.login, not
+            // payload.pull_request.user.login — this used to silently never match.
+            const wf = makeWorkflow({
+                trigger: { source: 'github', event: 'issues.opened', author: ['alice', 'bob'] },
+            });
+            expect(matchesTrigger(wf, makeEvent({
+                event: 'issues.opened',
+                payload: { issue: { user: { login: 'alice' } } },
+            }))).toBe(true);
+            expect(matchesTrigger(wf, makeEvent({
+                event: 'issues.opened',
+                payload: { issue: { user: { login: 'carol' } } },
+            }))).toBe(false);
+        });
+
+        it('still matches multi-value author on a pull_request.* event', () => {
+            const wf = makeWorkflow({
+                trigger: { source: 'github', event: 'pull_request.opened', author: ['alice', 'bob'] },
+            });
+            expect(matchesTrigger(wf, makeEvent({
+                payload: { pull_request: { user: { login: 'bob' } } },
+            }))).toBe(true);
+        });
+
+        it('enforces a single-value author set directly on the trigger (graph-workflow case)', () => {
+            // Graph workflows set trigger.author directly (no resolveShorthands
+            // filter), so a single author must still be enforced, not match all.
+            const wf = makeWorkflow({
+                trigger: { source: 'github', event: 'pull_request.opened', author: ['alice'] },
+            });
+            expect(matchesTrigger(wf, makeEvent({
+                payload: { pull_request: { user: { login: 'alice' } } },
+            }))).toBe(true);
+            expect(matchesTrigger(wf, makeEvent({
+                payload: { pull_request: { user: { login: 'bob' } } },
+            }))).toBe(false);
+        });
+
+        it('does not crash on a non-string author config (e.g. author: [123])', () => {
+            const wf = makeWorkflow({
+                trigger: { source: 'github', event: 'pull_request.opened', author: [123 as unknown as string] },
+            });
+            const ev = makeEvent({ payload: { pull_request: { user: { login: 'alice' } } } });
+            expect(() => matchesTrigger(wf, ev)).not.toThrow();
+            expect(matchesTrigger(wf, ev)).toBe(false);
+        });
+
+        it('excludes by author on an issues.* event (case-insensitive)', () => {
+            const wf = makeWorkflow({
+                trigger: { source: 'github', event: 'issues.opened', exclude: { author: 'Alice' } },
+            });
+            expect(matchesTrigger(wf, makeEvent({
+                event: 'issues.opened',
+                payload: { issue: { user: { login: 'alice' } } },
+            }))).toBe(false);
+            expect(matchesTrigger(wf, makeEvent({
+                event: 'issues.opened',
+                payload: { issue: { user: { login: 'someone' } } },
+            }))).toBe(true);
+        });
+
+        it('matches a single-value author OR-path filter (resolveShorthands shape) on either payload', () => {
+            const wf = makeWorkflow({
+                trigger: {
+                    source: 'github', event: ['pull_request.opened', 'issues.opened'],
+                    filters: { 'payload.pull_request.user.login|payload.issue.user.login': 'alice' },
+                },
+            });
+            expect(matchesTrigger(wf, makeEvent({
+                event: 'issues.opened', payload: { issue: { user: { login: 'alice' } } },
+            }))).toBe(true);
+            expect(matchesTrigger(wf, makeEvent({
+                payload: { pull_request: { user: { login: 'alice' } } },
+            }))).toBe(true);
+        });
+    });
+
+    describe('branch filters resolve across PR and push events', () => {
+        it('matches a branch on a push event (refs/heads/ normalized)', () => {
+            const wf = makeWorkflow({
+                trigger: { source: 'github', event: 'push', branch: ['main', 'release'] },
+            });
+            expect(matchesTrigger(wf, makeEvent({
+                event: 'push', payload: { ref: 'refs/heads/main' },
+            }))).toBe(true);
+            expect(matchesTrigger(wf, makeEvent({
+                event: 'push', payload: { ref: 'refs/heads/feature' },
+            }))).toBe(false);
+        });
+
+        it('still matches a PR base ref', () => {
+            const wf = makeWorkflow({
+                trigger: { source: 'github', event: 'pull_request.opened', branch: ['main'] },
+            });
+            expect(matchesTrigger(wf, makeEvent({
+                payload: { pull_request: { base: { ref: 'main' } } },
+            }))).toBe(true);
+        });
+
+        it('excludes a branch on a push event', () => {
+            const wf = makeWorkflow({
+                trigger: { source: 'github', event: 'push', exclude: { branch: ['releases/*'] } },
+            });
+            expect(matchesTrigger(wf, makeEvent({
+                event: 'push', payload: { ref: 'refs/heads/releases/2026' },
+            }))).toBe(false);
+            expect(matchesTrigger(wf, makeEvent({
+                event: 'push', payload: { ref: 'refs/heads/main' },
+            }))).toBe(true);
+        });
+    });
+
+    describe('label shorthand globs', () => {
+        it('matches include labels by glob', () => {
+            const wf = makeWorkflow({
+                trigger: { source: 'github', event: 'pull_request.opened', labels: ['needs-*', 'urgent'] },
+            });
+            expect(matchesTrigger(wf, makeEvent({
+                payload: { pull_request: { labels: [{ name: 'needs-review' }] } },
+            }))).toBe(true);
+            expect(matchesTrigger(wf, makeEvent({
+                payload: { pull_request: { labels: [{ name: 'frontend' }] } },
+            }))).toBe(false);
+        });
+
+        it('excludes labels by glob', () => {
+            const wf = makeWorkflow({
+                trigger: { source: 'github', event: 'pull_request.opened', exclude: { labels: ['area/*'] } },
+            });
+            expect(matchesTrigger(wf, makeEvent({
+                payload: { pull_request: { labels: [{ name: 'area/api' }] } },
+            }))).toBe(false);
+            expect(matchesTrigger(wf, makeEvent({
+                payload: { pull_request: { labels: [{ name: 'bug' }] } },
+            }))).toBe(true);
+        });
+
+        it('lowercases the glob PATTERN too (Needs-* matches needs-review)', () => {
+            // Confirms case-folding is applied to the pattern, not just the
+            // label name, before it reaches globMatch.
+            const wf = makeWorkflow({
+                trigger: { source: 'github', event: 'pull_request.opened', labels: ['Needs-*'] },
+            });
+            expect(matchesTrigger(wf, makeEvent({
+                payload: { pull_request: { labels: [{ name: 'needs-review' }] } },
+            }))).toBe(true);
+            // And uppercase exclude pattern against a lowercase label.
+            const wfExclude = makeWorkflow({
+                trigger: { source: 'github', event: 'pull_request.opened', exclude: { labels: ['AREA/*'] } },
+            });
+            expect(matchesTrigger(wfExclude, makeEvent({
+                payload: { pull_request: { labels: [{ name: 'area/api' }] } },
+            }))).toBe(false);
+        });
+
+        it('does not crash on a non-string label config (e.g. labels: [123])', () => {
+            const wf = makeWorkflow({
+                trigger: { source: 'github', event: 'pull_request.opened', labels: [123 as unknown as string] },
+            });
+            const ev = makeEvent({ payload: { pull_request: { labels: [{ name: 'bug' }] } } });
+            // A non-string label pattern is ignored, not thrown on.
+            expect(() => matchesTrigger(wf, ev)).not.toThrow();
+            expect(matchesTrigger(wf, ev)).toBe(false);
+        });
+    });
+
     // ─── Graph trigger + YAML override merge ────────────────────────────
     // Regression for the auto-PR-review trigger bug: a graph workflow that
     // hard-codes `trigger.github` in its first node used to silently

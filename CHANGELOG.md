@@ -15,6 +15,21 @@ under a new `## [X.Y.Z] - YYYY-MM-DD` heading, bump `version` in
 `package.json`, commit, push to main. The release workflow tags +
 publishes automatically.
 
+## [0.2.4] - 2026-06-04
+
+### Added
+
+- **`temperature` on `ai.review`.** Optional per-node sampling temperature, threaded to the Anthropic and OpenAI-compatible backends (sent only when set; the provider default is used otherwise). The point: running the **same** provider on multiple ensemble legs now produces genuinely different reviews — set e.g. `temperature: 0.3` and `0.9` on two `provider: kimi` nodes. CLI providers ignore it.
+- **`gh-cli` can watch other people's / an org's PRs.** The poller was hardwired to your own PRs (`--author @me`). New `integrations.gh-cli.prs` config (`owners`/`authors`/`repos`/`involves`/`search`) widens the `gh search prs` scope; pair with a trigger `exclude.author: <you>` to review everyone's PRs but your own. Default unchanged (still `--author @me`).
+- **`ensemble-pr-review-org` library template** — auto-reviews an org's PRs you didn't author with four parallel reviewers (two providers × two temperatures) synthesized into one review. Demonstrates the two features above.
+
+### Fixed
+
+- **Author trigger filters now work on `issues.*` events, not just `pull_request.*`.** `author:` / `exclude.author:` only checked `payload.pull_request.user.login`, so they silently never matched issue events (which carry the author at `payload.issue.user.login`). Author matching now resolves across both shapes (case-insensitive for both).
+- **Label trigger filters support globs** (`labels: [needs-*]`, `exclude.labels: [area/*]`) — previously exact-match only, an asymmetry with repo/branch/author which already globbed.
+- **Truncated completions are no longer silent.** When a model stops at the `max_tokens` cap (Anthropic `stop_reason: max_tokens` / OpenAI `finish_reason: length`) the result is flagged and a clear warning is logged — so a cut-off review (and the JSON-parse failure it causes, common on ensemble synthesis) points at "raise max_tokens" instead of looking like a bad model. The `ensemble-pr-review-org` synth pass sets `max_tokens: 8192` accordingly.
+- **Gemini completions no longer thrash on tool calls.** The Gemini CLI is an agent harness: during a diff-only `ai.review` it tries file/shell tools (`list_directory`, `read_file`, `run_shell_command`, …) to "explore the code", which fail in the isolated sandbox and make it loop — reviews ran 100s+ or hung past the workflow timeout, taking the whole ensemble down (only the Gemini leg). Completion prompts for Gemini now carry a "no repo, no filesystem, no tools — answer the inline input directly" preamble (`buildCompletionPrompt`), which drops tool attempts to zero. (Disabling tools via Gemini's own settings does **not** work — the model still emits tool calls. For lowest latency, prefer Gemini via its OpenAI-compatible API as a `openai-compatible-api` provider.) Pair with a node `timeout` on each ensemble leg so any slow provider drops out via `on_error: continue` instead of hitting the workflow cap.
+
 ## [0.2.3] - 2026-06-04
 
 ### Fixed

@@ -17,6 +17,18 @@ import { extractEventInfo } from './_event-info.js';
 
 const DEFAULT_MAX_TOKENS = 4096;
 
+/** Coerce a node-config value to a finite number, or undefined when blank /
+ *  unset / non-numeric. Node number-controls usually yield a number, but a
+ *  hand-written YAML config can pass a string ("0.7") or empty string. */
+function parseOptionalNumber(raw: unknown): number | undefined {
+    if (typeof raw === 'number') return Number.isFinite(raw) ? raw : undefined;
+    if (typeof raw === 'string' && raw.trim() !== '') {
+        const n = Number(raw);
+        return Number.isFinite(n) ? n : undefined;
+    }
+    return undefined;
+}
+
 /**
  * Default system prompt — sourced through `default-prompts.ts` so the
  * visual editor's "Load default" button (which hits the same registry
@@ -192,13 +204,31 @@ export const aiReviewAction: ActionHandler = async (params, context) => {
         },
     };
 
+    // Optional sampling temperature. Coerced so a string config ("0.7")
+    // doesn't reach the API verbatim; blank/invalid → undefined (provider
+    // default). The headline use is same-provider ensemble legs: bump this
+    // so two `provider: kimi` nodes don't return near-identical reviews.
+    // temperature: 0 is a VALID, meaningful value (fully deterministic), so it
+    // must always be carried via an explicit `!== undefined` check — never a
+    // truthiness check, which would silently drop it and use the model default.
+    const temperature = parseOptionalNumber(params.temperature);
+    if (temperature !== undefined && (temperature < 0 || temperature > 2)) {
+        // Forwarded as-is; the API decides. Warn so a typo (e.g. -1, 70)
+        // surfaces here instead of as an opaque provider 400.
+        context.logger.warn(
+            { temperature },
+            'ai-review temperature is outside the typical 0–2 range; the provider may reject it',
+        );
+    }
+
     let completion: Awaited<ReturnType<typeof runCompletionWithFallback>>;
     try {
         completion = await runCompletionWithFallback(context.ai, params.provider as string | undefined, {
             systemPrompt,
             userMessage,
             model: params.model as string | undefined,
-            maxTokens: (params.max_tokens as number) ?? DEFAULT_MAX_TOKENS,
+            maxTokens: parseOptionalNumber(params.max_tokens) ?? DEFAULT_MAX_TOKENS,
+            temperature,
             workdir: params.workdir as string | undefined,
             logger: context.logger,
             // Forward the workflow abort signal so a queue timeout /
@@ -228,6 +258,16 @@ export const aiReviewAction: ActionHandler = async (params, context) => {
     // regardless of how well the model obeyed its rules about headings,
     // fences, etc. If parsing fails, fall back to the raw text so users
     // still get *something* — but log loudly so we notice the drift.
+    // A length-capped completion almost always means cut-off JSON below.
+    // Surface the real cause here so a parse failure isn't mistaken for a
+    // misbehaving model — the fix is a higher `max_tokens`, not a new model.
+    if (completion.truncated) {
+        context.logger.warn(
+            { provider: completion.provider, model: completion.model },
+            'ai-review completion was truncated at max_tokens; the review may be incomplete and JSON parsing may fail. Raise the node\'s max_tokens.',
+        );
+    }
+
     let parseResult = parseStructuredReviewExt(completion.text);
     let parsed = parseResult.review;
     const repairAttempts: Array<{ kind: ParseFailureKind; rawSample: string }> = [];
@@ -277,7 +317,8 @@ export const aiReviewAction: ActionHandler = async (params, context) => {
                     systemPrompt: repair.systemPrompt,
                     userMessage: repair.userMessage,
                     model: params.model as string | undefined,
-                    maxTokens: (params.max_tokens as number) ?? DEFAULT_MAX_TOKENS,
+                    maxTokens: parseOptionalNumber(params.max_tokens) ?? DEFAULT_MAX_TOKENS,
+                    temperature,
                     workdir: params.workdir as string | undefined,
                     logger: context.logger,
                     signal: context.signal,

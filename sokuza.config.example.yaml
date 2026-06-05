@@ -108,6 +108,26 @@ integrations:
   #   the next hour's quota window resets. There is currently no
   #   automatic backoff on `X-RateLimit-Remaining`.
 
+  # gh-cli — polls via the GitHub CLI (`gh`), using your existing `gh auth`.
+  #   Auto-enabled when `gh` is installed; this block only customizes it.
+  #   By default it watches YOUR OWN open PRs (`gh search prs --author @me`).
+  #   Widen `prs` to review other people's / an org's PRs:
+  # gh-cli:
+  #   interval: 60                      # poll cadence (default 60s)
+  #   prs:                              # PR search scope (default: author @me)
+  #     owners: [my-org]                # all open PRs in these orgs/users (OR)
+  #     authors: [alice]               # PRs by this author (multiple = LAST wins,
+  #                                     # not OR — use `search` for an OR query)
+  #     repos: [my-org/api]             # specific repos (OR)
+  #     involves: ["@me"]               # PRs you're involved in (last-wins)
+  #     search: "draft:false"           # extra raw `gh search prs` qualifiers
+  #   Pair with a workflow trigger `exclude.author: <you>` to skip your own
+  #   PRs, e.g. the `ensemble-pr-review-org` library template.
+  #   Each poll fetches up to 100 PRs. Orgs with more open PRs than that
+  #   return a partial page; closed-PR detection is skipped on a full page
+  #   to avoid false closed/opened events, so very busy orgs may miss some
+  #   close events — scope `owners`/`repos` narrower if that matters.
+
   # Slack — receives events at /webhooks/slack/events
   #         receives slash commands at /webhooks/slack/commands
   # slack:
