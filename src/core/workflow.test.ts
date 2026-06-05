@@ -765,6 +765,16 @@ describe('matchesTrigger', () => {
                 payload: { pull_request: { labels: [{ name: 'area/api' }] } },
             }))).toBe(false);
         });
+
+        it('does not crash on a non-string label config (e.g. labels: [123])', () => {
+            const wf = makeWorkflow({
+                trigger: { source: 'github', event: 'pull_request.opened', labels: [123 as unknown as string] },
+            });
+            const ev = makeEvent({ payload: { pull_request: { labels: [{ name: 'bug' }] } } });
+            // A non-string label pattern is ignored, not thrown on.
+            expect(() => matchesTrigger(wf, ev)).not.toThrow();
+            expect(matchesTrigger(wf, ev)).toBe(false);
+        });
     });
 
     // ─── Graph trigger + YAML override merge ────────────────────────────

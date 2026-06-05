@@ -527,6 +527,13 @@ describe('completion: temperature + truncation (openai-compatible backend)', () 
         const r = await runCompletionWithFallback(makeReg(), 'test', { systemPrompt: 's', userMessage: 'u', logger: TEST_LOGGER });
         expect(r.truncated).toBe(false);
     });
+
+    it('throws on a malformed 200 response with no choices', async () => {
+        mockFetch({ model: 'm', choices: [] }, {});
+        await expect(
+            runCompletionWithFallback(makeReg(), 'test', { systemPrompt: 's', userMessage: 'u', logger: TEST_LOGGER }),
+        ).rejects.toThrow(/no choices/);
+    });
 });
 
 describe('completion: truncation detection (anthropic-api backend)', () => {

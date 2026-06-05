@@ -209,6 +209,14 @@ export const aiReviewAction: ActionHandler = async (params, context) => {
     // default). The headline use is same-provider ensemble legs: bump this
     // so two `provider: kimi` nodes don't return near-identical reviews.
     const temperature = parseOptionalNumber(params.temperature);
+    if (temperature !== undefined && (temperature < 0 || temperature > 2)) {
+        // Forwarded as-is; the API decides. Warn so a typo (e.g. -1, 70)
+        // surfaces here instead of as an opaque provider 400.
+        context.logger.warn(
+            { temperature },
+            'ai-review temperature is outside the typical 0–2 range; the provider may reject it',
+        );
+    }
 
     let completion: Awaited<ReturnType<typeof runCompletionWithFallback>>;
     try {

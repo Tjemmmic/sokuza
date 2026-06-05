@@ -189,6 +189,10 @@ function eventLabelsContainAny(event: EventPayload, labels: string[]): boolean {
             // like repo/branch/author.
             const target = name.toLowerCase();
             if (labels.some((raw) => {
+                // Guard non-string config values (e.g. `labels: [123]` from
+                // YAML) — calling .toLowerCase() on them would throw and break
+                // matching for the whole workflow.
+                if (typeof raw !== 'string') return false;
                 const l = raw.toLowerCase();
                 return l.includes('*') ? globMatch(l, target) : l === target;
             })) {

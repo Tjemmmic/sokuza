@@ -836,6 +836,13 @@ async function runOpenAICompletion(
         usage?: { prompt_tokens?: number; completion_tokens?: number };
     };
 
+    // A 200 with no choices is a malformed response — fail loudly rather than
+    // treat it as an empty completion (which would silently hide the problem
+    // and skew the truncation check below).
+    if (!data.choices?.length) {
+        throw new Error(`OpenAI-compatible API ${provider.name} returned no choices`);
+    }
+
     const text = data.choices?.[0]?.message?.content ?? '';
     const usage = data.usage
         ? {
