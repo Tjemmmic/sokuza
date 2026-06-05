@@ -109,6 +109,39 @@ describe('SokuzaEngine', () => {
         });
     });
 
+    describe('registerAutoDetectedIntegration', () => {
+        function makeGhLikeIntegration(): Integration {
+            return {
+                name: 'gh-cli',
+                supportedEvents: ['pr.opened'],
+                initialize: vi.fn(),
+                registerRoutes: vi.fn(),
+                parseEvent: vi.fn(),
+            };
+        }
+
+        it('reports as enabled despite no entry in the config file', async () => {
+            const engine = await createEngine();
+            engine.registerAutoDetectedIntegration(makeGhLikeIntegration());
+
+            expect(engine.getIntegrationStatus()['gh-cli'].enabled).toBe(true);
+        });
+
+        it('survives reloadConfig() — the config file never carries it', async () => {
+            // Regression: reloadConfig() replaces config.integrations with the
+            // on-disk version (which omits auto-detected gh-cli). Without
+            // re-seeding, the integration flips to "not configured" after any
+            // workflow edit triggers a reload.
+            const engine = await createEngine();
+            engine.registerAutoDetectedIntegration(makeGhLikeIntegration());
+            expect(engine.getIntegrationStatus()['gh-cli'].enabled).toBe(true);
+
+            await engine.reloadConfig();
+
+            expect(engine.getIntegrationStatus()['gh-cli'].enabled).toBe(true);
+        });
+    });
+
     describe('registerAction', () => {
         it('stores action by name', async () => {
             const engine = await createEngine();

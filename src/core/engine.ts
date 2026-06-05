@@ -49,6 +49,15 @@ const MAX_SEEN_DELIVERY_IDS = 1000;
 
 export class SokuzaEngine {
     private integrations = new Map<string, Integration>();
+    /**
+     * Names of integrations auto-detected at runtime (e.g. `gh-cli`, enabled
+     * whenever the GitHub CLI is installed) rather than declared in
+     * sokuza.config.yaml. The config file is the source of truth for reloads,
+     * so these entries must be re-seeded after every reloadConfig() — otherwise
+     * a reload drops the in-memory entry and the integration wrongly reports as
+     * "not configured" on the dashboard.
+     */
+    private autoDetectedIntegrations = new Set<string>();
     private actions = new Map<string, ActionHandler>();
     private server: FastifyInstance | null = null;
     readonly logger: Logger;
@@ -145,6 +154,20 @@ export class SokuzaEngine {
             { integration: integration.name, events: integration.supportedEvents },
             'Registered integration',
         );
+    }
+
+    /**
+     * Register an integration that is auto-detected at runtime rather than
+     * declared in the config file (e.g. `gh-cli`, enabled whenever the GitHub
+     * CLI is installed and authenticated). Seeds a config entry so the engine
+     * treats it as active, and remembers it so the entry survives reloadConfig().
+     */
+    registerAutoDetectedIntegration(integration: Integration): void {
+        this.autoDetectedIntegrations.add(integration.name);
+        if (!this.config.integrations[integration.name]) {
+            this.config.integrations[integration.name] = {};
+        }
+        this.registerIntegration(integration);
     }
 
     private async evictWorkdirOnPrClose(event: EventPayload): Promise<void> {
@@ -381,7 +404,17 @@ export class SokuzaEngine {
             }
             if (reloaded.ai) this.config.ai = reloaded.ai;
             if (reloaded.queue) this.config.queue = reloaded.queue;
-            if (reloaded.integrations) this.config.integrations = reloaded.integrations;
+            if (reloaded.integrations) {
+                this.config.integrations = reloaded.integrations;
+                // Re-seed auto-detected integrations (e.g. gh-cli) that live in
+                // memory only — the reloaded config file never carries them, so
+                // without this they'd be dropped and report as "not configured".
+                for (const name of this.autoDetectedIntegrations) {
+                    if (!this.config.integrations[name]) {
+                        this.config.integrations[name] = {};
+                    }
+                }
+            }
             this.queue.setExecutor(this.createJobExecutor(), {
                 integrationConfigs: this.config.integrations,
                 ai: this.config.ai,

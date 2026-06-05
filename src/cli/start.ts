@@ -80,10 +80,10 @@ export async function runStart(opts: StartOptions): Promise<void> {
 
     const ghAvailable = await isGhInstalled();
     if (ghAvailable) {
-        if (!config.integrations['gh-cli']) {
-            config.integrations['gh-cli'] = {};
-        }
-        engine.registerIntegration(new GhCliIntegration());
+        // gh-cli is auto-detected, not declared in the config file. Register it
+        // as such so its config entry survives reloadConfig() (otherwise editing
+        // any workflow would make it report as "not configured").
+        engine.registerAutoDetectedIntegration(new GhCliIntegration());
     }
 
     if (config.integrations.slack) {
