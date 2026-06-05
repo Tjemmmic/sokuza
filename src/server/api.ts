@@ -572,51 +572,14 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
         try {
             const { listAiReviewRuns } = await import('../core/run-store.js');
             const { GhCliIntegration } = await import('../integrations/gh-cli/index.js');
+            const { selectRecentReviewedPrs } = await import('./recent-reviewed.js');
 
-            // Pull recent runs and keep the newest manual review per PR.
-            // listAiReviewRuns returns newest-first, so the first time we see a
-            // PR is its most-recent review.
             const runs = await listAiReviewRuns({ since, limit: 500 });
-            const seen = new Set<string>();
-            const candidates: { repo: string; number: number; lastReviewedAt: string }[] = [];
-            for (const run of runs) {
-                if (run.event?.source !== 'manual') continue;
-                const repo = run.event.repo;
-                const number = run.event.prNumber;
-                if (!repo || typeof number !== 'number') continue;
-                const key = `${repo}#${number}`;
-                if (seen.has(key)) continue;
-                seen.add(key);
-                candidates.push({ repo, number, lastReviewedAt: run.createdAt });
-                // Over-fetch a little so closed-PR filtering can still fill `limit`,
-                // while bounding the number of live gh lookups below.
-                if (candidates.length >= limit * 2) break;
-            }
-
-            // Re-check live state in parallel; drop anything not open or
-            // unreadable (deleted repo, lost access).
-            const settled = await Promise.allSettled(
-                candidates.map(async (c) => ({
-                    c,
-                    pr: await GhCliIntegration.getPrDetails(c.repo, c.number),
-                })),
+            const items = await selectRecentReviewedPrs(
+                runs,
+                (repo, prNumber) => GhCliIntegration.getPrDetails(repo, prNumber),
+                limit,
             );
-            const items: Array<Record<string, unknown>> = [];
-            for (const result of settled) {
-                if (result.status !== 'fulfilled') continue;
-                const { c, pr } = result.value;
-                if (String((pr as { state?: string }).state ?? '').toLowerCase() !== 'open') continue;
-                items.push({
-                    number: c.number,
-                    repo: c.repo,
-                    title: (pr as { title?: string }).title ?? '',
-                    author: (pr as { author?: { login?: string } }).author?.login ?? '',
-                    url: (pr as { url?: string }).url ?? '',
-                    draft: Boolean((pr as { isDraft?: boolean }).isDraft),
-                    lastReviewedAt: c.lastReviewedAt,
-                });
-                if (items.length >= limit) break;
-            }
             return { items };
         } catch (err: any) {
             logger.warn({ err }, 'Failed to build recent-reviewed PR list');
