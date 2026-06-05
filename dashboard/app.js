@@ -2535,6 +2535,16 @@ async function initPrQuickPick(i) {
         ${qpSectionShell(i, 'mine', '🙋 My open PRs')}
         <div class="qp-divider">or browse a repository ↓</div>`;
 
+    // One delegated listener on the host handles clicks for both (dynamically
+    // rendered) lists — the row carries its identity in data-qpkey, so no
+    // per-row inline handler / string interpolation is needed.
+    host.addEventListener('click', (e) => {
+        const row = e.target.closest('.qp-item');
+        if (!row || !host.contains(row)) return;
+        const [list, idx] = (row.dataset.qpkey || '').split(':');
+        selectQuickPickPr(i, list, Number(idx));
+    });
+
     // Load both lists independently so one being slow/unavailable doesn't
     // block the other.
     loadQpList(i, 'recent', '/api/pr-picker/recent-reviewed', (d) => d.items || []);
@@ -2581,7 +2591,7 @@ async function loadQpList(i, list, url, extract) {
 
 function qpRow(i, list, idx, item) {
     const draft = item.draft ? '<span class="badge badge-warning" style="font-size:9px">draft</span>' : '';
-    return `<div class="picker-item qp-item" data-qpkey="${list}:${idx}" onclick="selectQuickPickPr(${i},'${list}',${idx})">
+    return `<div class="picker-item qp-item" data-qpkey="${list}:${idx}">
         <div style="display:flex;align-items:center;gap:8px;width:100%">
             <span style="font-weight:600;color:var(--accent);min-width:42px">#${item.number}</span>
             <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(item.title)}</span>
