@@ -94,6 +94,11 @@ const DEFAULT_INTERVAL = 60;
  * field or separate workflows. `buildPrSearchArgs` emits the flags either
  * way; `GhCliIntegration.initialize` warns when a last-wins selector is
  * given more than one value so it isn't silent.
+ *
+ * NOTE for direct callers (this is exported mainly for tests): this function
+ * does NOT warn — the runtime warning lives in `initialize`. If you call it
+ * directly with multiple `authors`/`involves`, validate that yourself; only
+ * the last value of those selectors takes effect.
  */
 export function buildPrSearchArgs(raw: unknown): string[] {
     if (!raw || typeof raw !== 'object') return ['--author', '@me'];

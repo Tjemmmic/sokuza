@@ -29,6 +29,12 @@
 description: Auto-review an org's PRs you didn't author — 4 parallel reviewers (2 providers × 2 temperatures), synthesized
 icon: 🏛️
 
+# Ships DISABLED so an unconfigured copy can't auto-fire. Replace the
+# placeholders below (exclude.author + providers), then enable it in the
+# Workflows tab. Without this, an unreplaced `exclude.author` would match
+# no one and the workflow would review every org PR — including your own.
+enabled: false
+
 trigger:
   source: gh-cli
   event:
@@ -47,6 +53,10 @@ graph:
       position: { x: 60, y: 320 }
       config:
         events: [pull_request.opened, pull_request.synchronize]
+        # Mirrors the top-level `trigger.exclude.author` so the visual editor
+        # shows the exclusion. graph-trigger.ts maps `exclude_authors` →
+        # `trigger.exclude.author`, so this is NOT dead config — keep both in
+        # sync (replace the placeholder here too).
         exclude_authors: <your-github-username>
     - id: fetch_diff
       type: github.fetch-diff

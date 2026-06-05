@@ -747,6 +747,24 @@ describe('matchesTrigger', () => {
                 payload: { pull_request: { labels: [{ name: 'bug' }] } },
             }))).toBe(true);
         });
+
+        it('lowercases the glob PATTERN too (Needs-* matches needs-review)', () => {
+            // Confirms case-folding is applied to the pattern, not just the
+            // label name, before it reaches globMatch.
+            const wf = makeWorkflow({
+                trigger: { source: 'github', event: 'pull_request.opened', labels: ['Needs-*'] },
+            });
+            expect(matchesTrigger(wf, makeEvent({
+                payload: { pull_request: { labels: [{ name: 'needs-review' }] } },
+            }))).toBe(true);
+            // And uppercase exclude pattern against a lowercase label.
+            const wfExclude = makeWorkflow({
+                trigger: { source: 'github', event: 'pull_request.opened', exclude: { labels: ['AREA/*'] } },
+            });
+            expect(matchesTrigger(wfExclude, makeEvent({
+                payload: { pull_request: { labels: [{ name: 'area/api' }] } },
+            }))).toBe(false);
+        });
     });
 
     // ─── Graph trigger + YAML override merge ────────────────────────────
