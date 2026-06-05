@@ -1210,9 +1210,12 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
             command: entry.command,
             args_style: entry.args_style,
             base_url: entry.base_url,
-            // Secret-bearing custom headers (X-API-Key, …) are masked like
-            // api_key; non-sensitive ones (User-Agent) stay readable.
-            headers: maskProviderHeaders(entry.headers as Record<string, string> | undefined, maskSecret),
+            // Display-only, like api_key_masked: secret-bearing custom headers
+            // (X-API-Key, …) are masked, non-sensitive ones (User-Agent) stay
+            // readable. Exposed under a distinct name so a client round-tripping
+            // the GET payload can't PUT a mask back over the real value — the
+            // write path reads `headers`, which this field is deliberately not.
+            headers_masked: maskProviderHeaders(entry.headers as Record<string, string> | undefined, maskSecret),
             env: entry.env,
             api_key_masked: maskSecret(apiKey),
             key_status: keyStatus,

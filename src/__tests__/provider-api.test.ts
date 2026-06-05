@@ -92,7 +92,7 @@ describe('provider API — custom headers', () => {
         expect(created.status).toBe(200);
 
         const got = await getProvider('kimi');
-        expect(got?.headers).toEqual({ 'User-Agent': 'claude-code/0.1.0' });
+        expect(got?.headers_masked).toEqual({ 'User-Agent': 'claude-code/0.1.0' });
         // Secrets stay masked; headers are returned as-is.
         expect(got?.api_key_masked).not.toBe('sk-test');
     });
@@ -113,7 +113,7 @@ describe('provider API — custom headers', () => {
         expect(res.status).toBe(200);
 
         const got = await getProvider('kimi');
-        expect(got?.headers).toEqual({ 'X-Keep': 'yes' });
+        expect(got?.headers_masked).toEqual({ 'X-Keep': 'yes' });
     });
 
     it('PUT omitting headers preserves the existing set', async () => {
@@ -124,7 +124,7 @@ describe('provider API — custom headers', () => {
         expect(res.status).toBe(200);
 
         const got = await getProvider('kimi');
-        expect(got?.headers).toEqual({ 'User-Agent': 'claude-code/0.1.0' });
+        expect(got?.headers_masked).toEqual({ 'User-Agent': 'claude-code/0.1.0' });
         expect(got?.default_model).toBe('kimi-k2.7');
     });
 
@@ -135,7 +135,7 @@ describe('provider API — custom headers', () => {
         expect(res.status).toBe(200);
 
         const got = await getProvider('kimi');
-        expect(got?.headers).toBeUndefined();
+        expect(got?.headers_masked).toBeUndefined();
     });
 
     it('GET masks secret-bearing header values but not benign ones', async () => {
@@ -145,10 +145,31 @@ describe('provider API — custom headers', () => {
         });
 
         const got = await getProvider('kimi');
-        expect(got?.headers['User-Agent']).toBe('claude-code/0.1.0');
+        expect(got?.headers_masked['User-Agent']).toBe('claude-code/0.1.0');
         // The secret value is not echoed in cleartext.
-        expect(got?.headers['X-API-Key']).not.toBe('super-secret-value-123');
-        expect(got?.headers['X-API-Key']).toBeTruthy();
+        expect(got?.headers_masked['X-API-Key']).not.toBe('super-secret-value-123');
+        expect(got?.headers_masked['X-API-Key']).toBeTruthy();
+    });
+
+    it('round-tripping the masked GET payload does not corrupt the stored secret', async () => {
+        await createProvider({ ...base, headers: { 'X-API-Key': 'super-secret-value-123' } });
+
+        // A naive client echoes the GET payload back (masked headers under
+        // `headers_masked`) while editing another field. The write path reads
+        // `headers`, which the GET deliberately doesn't expose, so the raw
+        // secret must survive.
+        const got = await getProvider('kimi');
+        const res = await putProvider('kimi', {
+            ...base,
+            default_model: 'kimi-k2.7',
+            headers_masked: got?.headers_masked,
+        });
+        expect(res.status).toBe(200);
+
+        // Assert against the RAW stored value — masking is idempotent, so a GET
+        // can't distinguish a corrupted (mask-of-mask) header from a good one.
+        const cfg = await configStore.read() as any;
+        expect(cfg.ai.providers.kimi.headers['X-API-Key']).toBe('super-secret-value-123');
     });
 
     it('PUT preserves the api_key when the edit omits it', async () => {
