@@ -115,13 +115,18 @@ integrations:
   # gh-cli:
   #   interval: 60                      # poll cadence (default 60s)
   #   prs:                              # PR search scope (default: author @me)
-  #     owners: [my-org]                # all open PRs in these orgs/users
-  #     authors: [alice, bob]           # PRs by these authors (OR)
-  #     repos: [my-org/api]             # specific repos
-  #     involves: ["@me"]               # PRs you're involved in
+  #     owners: [my-org]                # all open PRs in these orgs/users (OR)
+  #     authors: [alice]               # PRs by this author (multiple = LAST wins,
+  #                                     # not OR — use `search` for an OR query)
+  #     repos: [my-org/api]             # specific repos (OR)
+  #     involves: ["@me"]               # PRs you're involved in (last-wins)
   #     search: "draft:false"           # extra raw `gh search prs` qualifiers
   #   Pair with a workflow trigger `exclude.author: <you>` to skip your own
   #   PRs, e.g. the `ensemble-pr-review-org` library template.
+  #   Each poll fetches up to 100 PRs. Orgs with more open PRs than that
+  #   return a partial page; closed-PR detection is skipped on a full page
+  #   to avoid false closed/opened events, so very busy orgs may miss some
+  #   close events — scope `owners`/`repos` narrower if that matters.
 
   # Slack — receives events at /webhooks/slack/events
   #         receives slash commands at /webhooks/slack/commands

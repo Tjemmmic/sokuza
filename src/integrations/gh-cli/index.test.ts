@@ -158,4 +158,42 @@ describe('GhCliIntegration', () => {
             expect(events[0].payload.pull_request.user.login).toBe('alice');
         });
     });
+
+    describe('poll(): closed-PR detection vs full-page guard', () => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const state = (i: GhCliIntegration) => i as any;
+
+        it('does NOT emit closed (or drop tracking) on a full page', async () => {
+            const events: Array<{ event: string }> = [];
+            state(integration).onEvent = async (e: { event: string }) => { events.push(e); };
+            state(integration).seeded = true;
+            // Track PR #1 — it will be absent from the (full) result page.
+            state(integration).lastPrUpdatedAt.set('org/repo#1', 't1');
+            // A full page (100) of already-tracked, unchanged PRs → no per-PR work.
+            const page = [];
+            for (let n = 2; n <= 101; n++) {
+                page.push({ number: n, repository: { nameWithOwner: 'org/repo' }, updatedAt: `u${n}` });
+                state(integration).lastPrUpdatedAt.set(`org/repo#${n}`, `u${n}`);
+            }
+            mockedGhJson.mockResolvedValueOnce(page);
+            await state(integration).poll();
+            expect(events.some((e) => e.event === 'pull_request.closed')).toBe(false);
+            expect(state(integration).lastPrUpdatedAt.has('org/repo#1')).toBe(true);
+        });
+
+        it('emits closed (and cleans up) for a tracked PR missing from a short page', async () => {
+            const events: Array<{ event: string; payload: { pull_request: { number: number } } }> = [];
+            state(integration).onEvent = async (e: never) => { events.push(e); };
+            state(integration).seeded = true;
+            state(integration).lastPrUpdatedAt.set('org/repo#1', 't1');   // will disappear
+            state(integration).lastPrUpdatedAt.set('org/repo#2', 'u2');   // stays
+            mockedGhJson.mockResolvedValueOnce([
+                { number: 2, repository: { nameWithOwner: 'org/repo' }, updatedAt: 'u2' },
+            ]);
+            await state(integration).poll();
+            const closed = events.filter((e) => e.event === 'pull_request.closed');
+            expect(closed.map((e) => e.payload.pull_request.number)).toContain(1);
+            expect(state(integration).lastPrUpdatedAt.has('org/repo#1')).toBe(false);
+        });
+    });
 });
