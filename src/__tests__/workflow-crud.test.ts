@@ -454,6 +454,13 @@ graph:
         await server.inject({ method: 'DELETE', url: '/api/workflows/tagged-audit3' });
         const raw = yaml.load(await configStore.readRaw()) as Record<string, unknown>;
         expect((raw.deck as string[]) ?? []).toContain('audit3');
+
+        // Now delete the LAST instance — an untagged legacy one. The library id
+        // is inferred from its `my-<id>` name (confirmed against the deck), so
+        // the cascade still fires and the deck entry is cleaned.
+        await server.inject({ method: 'DELETE', url: '/api/workflows/my-audit3' });
+        const rawFinal = yaml.load(await configStore.readRaw()) as Record<string, unknown>;
+        expect((rawFinal.deck as string[]) ?? []).not.toContain('audit3');
     });
 
     // ─── POST /api/workflows/:name/toggle ───────────────────────────────

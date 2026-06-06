@@ -435,15 +435,19 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
         } catch (err) {
             logger.warn({ err, from: name, to: newName }, 'Failed to migrate in-memory references after rename');
         }
+        // Null signals the persisted migration didn't run (module load failed),
+        // distinct from 0 (ran, nothing matched) — surfaced in the response so
+        // a caller can tell the difference.
+        let persistedMigrated: number | null = null;
         try {
             const { renameWorkflowInRuns } = await import('../core/run-store.js');
-            const migrated = await renameWorkflowInRuns(name, newName, logger);
-            logger.info({ from: name, to: newName, migrated }, 'Workflow renamed; migrated persisted run records');
+            persistedMigrated = await renameWorkflowInRuns(name, newName, logger);
+            logger.info({ from: name, to: newName, migrated: persistedMigrated }, 'Workflow renamed; migrated persisted run records');
         } catch (err) {
             logger.warn({ err, from: name, to: newName }, 'Failed to migrate persisted run records after rename');
         }
 
-        return { ok: true, name: newName };
+        return { ok: true, name: newName, persistedMigrated };
     });
 
     // Quick enable/disable from the Workflows tab without opening the
@@ -503,7 +507,19 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
             const workflows = ((config.workflows as unknown[]) ?? []) as Record<string, unknown>[];
             const target = workflows.find((w) => w.name === name);
             if (!target) return false;
-            if (typeof target._libraryItem === 'string') libraryItem = target._libraryItem;
+            if (typeof target._libraryItem === 'string') {
+                libraryItem = target._libraryItem;
+            } else {
+                // Legacy untagged install: infer the library id from the
+                // `my-<id>` / `<id>` name convention, but only act on it when
+                // it's actually a deck entry — so deleting the last legacy
+                // instance still cascades cleanup, while a random workflow
+                // named "my-x" can't trigger a spurious one.
+                const deck = (config.deck as string[]) ?? [];
+                const tname = typeof target.name === 'string' ? target.name : '';
+                const candidate = tname.startsWith('my-') ? tname.slice(3) : tname;
+                if (candidate && deck.includes(candidate)) libraryItem = candidate;
+            }
             const filtered = workflows.filter((w) => w.name !== name);
             config.workflows = filtered;
             // A remaining sibling counts whether it carries the `_libraryItem`
@@ -2640,16 +2656,34 @@ function serializeJob(job: import('../core/types.js').QueueJob) {
     };
 }
 
+/** Keys whose values are masked in queue job detail — step output and event
+ *  metadata are operational data that can incidentally carry credentials. */
+const SENSITIVE_KEY_RE = /(token|authorization|password|secret|api[-_]?key|cookie|credential)/i;
+
+/** Recursively mask values under sensitive-looking keys. Bounded depth guards
+ *  against pathological nesting/cycles; non-objects pass through unchanged. */
+function redactSecrets(value: unknown, depth = 0): unknown {
+    if (depth > 6 || value === null || typeof value !== 'object') return value;
+    if (Array.isArray(value)) return value.map((v) => redactSecrets(v, depth + 1));
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+        out[k] = SENSITIVE_KEY_RE.test(k) ? '[redacted]' : redactSecrets(v, depth + 1);
+    }
+    return out;
+}
+
 /**
  * Full single-job view for the queue detail panel: everything serializeJob
  * carries, plus the workflow definition, the event metadata, and the step
- * output so a run can be inspected and traced to its related entities.
+ * output so a run can be inspected and traced to its related entities. Step
+ * output and event metadata are redacted of secret-bearing keys first, since
+ * they can incidentally include shell output, headers, or prompts.
  */
 function serializeJobDetail(job: import('../core/types.js').QueueJob) {
     return {
         ...serializeJob(job),
         workflow: job.workflow,
-        eventMetadata: (job.event.metadata ?? {}) as Record<string, unknown>,
-        output: job.output ?? null,
+        eventMetadata: redactSecrets((job.event.metadata ?? {})) as Record<string, unknown>,
+        output: redactSecrets(job.output ?? null),
     };
 }

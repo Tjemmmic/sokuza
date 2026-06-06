@@ -217,3 +217,70 @@ describe('queue API — run context + job detail', () => {
         expect(res.statusCode).toBe(404);
     });
 });
+
+describe('queue API — job detail redacts secrets', () => {
+    let server: FastifyInstance;
+
+    const secretJob = {
+        id: 'job-secret',
+        status: 'completed',
+        priority: 'normal',
+        dedupKey: 'dk',
+        enqueuedAt: '2026-06-05T10:00:00.000Z',
+        attempts: 1,
+        workflow: { name: 'wf', trigger: { source: 'manual', event: 'manual' }, steps: [] },
+        event: {
+            source: 'webhook',
+            event: 'incoming',
+            metadata: { repo: 'acme/widgets', authorization: 'Bearer sk-live-zzz' },
+            payload: {},
+        },
+        output: {
+            results: {},
+            steps: { fetch: { api_key: 'super-secret', note: 'visible' } },
+        },
+    };
+
+    beforeAll(async () => {
+        await mkdir(TMP_DIR, { recursive: true });
+        const configPath = join(TMP_DIR, 'config.yaml');
+        await writeFile(configPath, 'server:\n  port: 0\nworkflows: []\n', 'utf-8');
+        server = createServer(logger);
+        registerApiRoutes(server, {
+            logger,
+            configStore: new ConfigStore(configPath, logger),
+            getTemplateDir: () => join(TMP_DIR, 'templates'),
+            getIntegrationStatus: () => ({}),
+            getRecentEvents: () => [],
+            addEventSubscriber: () => () => {},
+            getRegisteredActions: () => [],
+            runWorkflow: async () => ({ ok: false, error: 'not implemented' }),
+            rerunWorkflow: async () => ({ ok: false, error: 'not implemented' }),
+            replayEvent: () => ({ ok: false, error: 'not implemented' }),
+            getRunHistory: () => [],
+            getConfig: () => ({ server: { port: 0 }, integrations: {}, workflows: [] }),
+            previewEvent: () => ({ matched: [], unmatched: [] }),
+            getWebhookDeliveries: () => [],
+            getQueue: () => ({
+                getStats: () => ({ queued: 0, running: 0, completed: 1, failed: 0 }),
+                getJobs: () => [secretJob],
+                getJob: (id: string) => (id === secretJob.id ? secretJob : undefined),
+            }) as never,
+        });
+    });
+
+    afterAll(async () => {
+        await server.close();
+        await rm(TMP_DIR, { recursive: true, force: true });
+    });
+
+    it('masks secret-bearing keys in output and metadata, preserves benign fields', async () => {
+        const res = await server.inject({ method: 'GET', url: '/api/queue/jobs/job-secret' });
+        expect(res.statusCode).toBe(200);
+        const job = JSON.parse(res.payload).job;
+        expect(job.eventMetadata.authorization).toBe('[redacted]');
+        expect(job.eventMetadata.repo).toBe('acme/widgets');
+        expect(job.output.steps.fetch.api_key).toBe('[redacted]');
+        expect(job.output.steps.fetch.note).toBe('visible');
+    });
+});
