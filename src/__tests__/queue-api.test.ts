@@ -127,3 +127,179 @@ describe('queue API — empty JSON body on cancel/retry', () => {
         expect(res.statusCode).toBeGreaterThanOrEqual(400);
     });
 });
+
+describe('queue API — run context + job detail', () => {
+    let server: FastifyInstance;
+
+    // A completed PR-review job carrying the GitHub context the dashboard
+    // needs: repo/owner in metadata, branch in the PR payload.
+    const fakeJob = {
+        id: 'job-42',
+        status: 'completed',
+        priority: 'normal',
+        dedupKey: 'dk',
+        enqueuedAt: '2026-06-05T10:00:00.000Z',
+        startedAt: '2026-06-05T10:00:01.000Z',
+        completedAt: '2026-06-05T10:00:05.000Z',
+        attempts: 1,
+        workflow: {
+            name: 'pr-review',
+            trigger: { source: 'github', event: 'pull_request.opened' },
+            steps: [{ action: 'ai-review' }],
+        },
+        event: {
+            source: 'github',
+            event: 'pull_request.opened',
+            action: 'opened',
+            metadata: { repo: 'acme/widgets', owner: 'acme', repoName: 'widgets', prNumber: 42 },
+            payload: { pull_request: { number: 42, head: { ref: 'feature/login' } } },
+        },
+        output: { results: {}, steps: {} },
+    };
+
+    beforeAll(async () => {
+        await mkdir(TMP_DIR, { recursive: true });
+        const configPath = join(TMP_DIR, 'config.yaml');
+        await writeFile(configPath, 'server:\n  port: 0\nworkflows: []\n', 'utf-8');
+
+        server = createServer(logger);
+        registerApiRoutes(server, {
+            logger,
+            configStore: new ConfigStore(configPath, logger),
+            getTemplateDir: () => join(TMP_DIR, 'templates'),
+            getIntegrationStatus: () => ({}),
+            getRecentEvents: () => [],
+            addEventSubscriber: () => () => {},
+            getRegisteredActions: () => [],
+            runWorkflow: async () => ({ ok: false, error: 'not implemented' }),
+            rerunWorkflow: async () => ({ ok: false, error: 'not implemented' }),
+            replayEvent: () => ({ ok: false, error: 'not implemented' }),
+            getRunHistory: () => [],
+            getConfig: () => ({ server: { port: 0 }, integrations: {}, workflows: [] }),
+            previewEvent: () => ({ matched: [], unmatched: [] }),
+            getWebhookDeliveries: () => [],
+            getQueue: () => ({
+                getStats: () => ({ queued: 0, running: 0, completed: 1, failed: 0 }),
+                getJobs: () => [fakeJob],
+                getJob: (id: string) => (id === fakeJob.id ? fakeJob : undefined),
+            }) as never,
+        });
+    });
+
+    afterAll(async () => {
+        await server.close();
+        await rm(TMP_DIR, { recursive: true, force: true });
+    });
+
+    it('GET /api/queue surfaces repo/owner/PR/branch context on each job', async () => {
+        const res = await server.inject({ method: 'GET', url: '/api/queue' });
+        expect(res.statusCode).toBe(200);
+        const ev = JSON.parse(res.payload).jobs[0].event;
+        expect(ev.repo).toBe('acme/widgets');
+        expect(ev.owner).toBe('acme');
+        expect(ev.prNumber).toBe(42);
+        expect(ev.branch).toBe('feature/login');
+    });
+
+    it('GET /api/queue/jobs/:id returns full detail (workflow + metadata + output)', async () => {
+        const res = await server.inject({ method: 'GET', url: '/api/queue/jobs/job-42' });
+        expect(res.statusCode).toBe(200);
+        const job = JSON.parse(res.payload).job;
+        expect(job.workflowName).toBe('pr-review');
+        expect(job.event.branch).toBe('feature/login');
+        expect(job.workflow.name).toBe('pr-review');
+        expect(job.eventMetadata.repo).toBe('acme/widgets');
+        expect(job.output).toEqual({ results: {}, steps: {} });
+    });
+
+    it('GET /api/queue/jobs/:id returns 404 for an unknown id', async () => {
+        const res = await server.inject({ method: 'GET', url: '/api/queue/jobs/nope' });
+        expect(res.statusCode).toBe(404);
+    });
+});
+
+describe('queue API — job detail redacts secrets', () => {
+    let server: FastifyInstance;
+
+    // A self-referential object to prove cycles don't crash JSON serialization.
+    const cyclic: Record<string, unknown> = { label: 'loop' };
+    cyclic.self = cyclic;
+    // A secret buried deeper than the recursion bound — must not leak.
+    const deep = { a: { b: { c: { d: { e: { f: { g: { h: { i: { token: 'deep-secret' } } } } } } } } } };
+
+    const secretJob = {
+        id: 'job-secret',
+        status: 'completed',
+        priority: 'normal',
+        dedupKey: 'dk',
+        enqueuedAt: '2026-06-05T10:00:00.000Z',
+        attempts: 1,
+        workflow: {
+            name: 'wf',
+            trigger: { source: 'manual', event: 'manual' },
+            steps: [{ action: 'webhook', params: { token: 'wf-secret', url: 'https://x' } }],
+        },
+        event: {
+            source: 'webhook',
+            event: 'incoming',
+            metadata: { repo: 'acme/widgets', authorization: 'Bearer sk-live-zzz' },
+            payload: {},
+        },
+        output: {
+            results: {},
+            steps: { fetch: { api_key: 'super-secret', note: 'visible' }, cyclic, deep },
+        },
+    };
+
+    beforeAll(async () => {
+        await mkdir(TMP_DIR, { recursive: true });
+        const configPath = join(TMP_DIR, 'config.yaml');
+        await writeFile(configPath, 'server:\n  port: 0\nworkflows: []\n', 'utf-8');
+        server = createServer(logger);
+        registerApiRoutes(server, {
+            logger,
+            configStore: new ConfigStore(configPath, logger),
+            getTemplateDir: () => join(TMP_DIR, 'templates'),
+            getIntegrationStatus: () => ({}),
+            getRecentEvents: () => [],
+            addEventSubscriber: () => () => {},
+            getRegisteredActions: () => [],
+            runWorkflow: async () => ({ ok: false, error: 'not implemented' }),
+            rerunWorkflow: async () => ({ ok: false, error: 'not implemented' }),
+            replayEvent: () => ({ ok: false, error: 'not implemented' }),
+            getRunHistory: () => [],
+            getConfig: () => ({ server: { port: 0 }, integrations: {}, workflows: [] }),
+            previewEvent: () => ({ matched: [], unmatched: [] }),
+            getWebhookDeliveries: () => [],
+            getQueue: () => ({
+                getStats: () => ({ queued: 0, running: 0, completed: 1, failed: 0 }),
+                getJobs: () => [secretJob],
+                getJob: (id: string) => (id === secretJob.id ? secretJob : undefined),
+            }) as never,
+        });
+    });
+
+    afterAll(async () => {
+        await server.close();
+        await rm(TMP_DIR, { recursive: true, force: true });
+    });
+
+    it('masks secrets across output, metadata, and workflow; survives cycles and deep nesting', async () => {
+        const res = await server.inject({ method: 'GET', url: '/api/queue/jobs/job-secret' });
+        // No crash despite the cyclic object → the redactor broke the cycle.
+        expect(res.statusCode).toBe(200);
+        const job = JSON.parse(res.payload).job;
+
+        expect(job.eventMetadata.authorization).toBe('[redacted]');
+        expect(job.eventMetadata.repo).toBe('acme/widgets');
+        expect(job.output.steps.fetch.api_key).toBe('[redacted]');
+        expect(job.output.steps.fetch.note).toBe('visible');
+        // Workflow definition is redacted too.
+        expect(job.workflow.steps[0].params.token).toBe('[redacted]');
+        expect(job.workflow.steps[0].params.url).toBe('https://x');
+        // Cycle replaced with a sentinel rather than recursing forever.
+        expect(job.output.steps.cyclic.self).toBe('[circular]');
+        // A secret past the depth bound is truncated, never leaked verbatim.
+        expect(JSON.stringify(job.output.steps.deep)).not.toContain('deep-secret');
+    });
+});

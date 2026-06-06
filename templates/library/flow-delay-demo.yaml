@@ -12,6 +12,12 @@
 
 description: Wait 30 seconds after a PR opens before posting the welcome comment
 icon: ⏲️
+library:
+  name: Flow.delay Demo
+  category: productivity
+  difficulty: easy
+  tags: [flow.delay, demo]
+  requiredIntegrations: [github]
 
 trigger:
   source: github

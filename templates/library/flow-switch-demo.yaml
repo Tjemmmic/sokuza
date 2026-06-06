@@ -14,6 +14,12 @@
 
 description: Branch the workflow N ways on the AI review's decision
 icon: 🎚️
+library:
+  name: Flow.switch Demo
+  category: productivity
+  difficulty: easy
+  tags: [flow.switch, demo]
+  requiredIntegrations: [github]
 
 trigger:
   source: github

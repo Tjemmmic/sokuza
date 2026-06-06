@@ -57,6 +57,25 @@ steps:
 `,
             'utf-8',
         );
+        // A template carrying a `library:` frontmatter block — drives the
+        // dashboard's auto-discovery of templates with no curated app.js entry.
+        await writeFile(
+            join(LIBRARY_DIR, 'auto-meta.yaml'),
+            `description: Auto-discovered demo
+icon: 🧩
+library:
+  name: Auto Meta Demo
+  category: productivity
+  difficulty: easy
+  tags: [demo, auto]
+  requiredIntegrations: [github]
+trigger: { source: manual, event: manual }
+steps:
+  - action: log
+    params: { message: hi }
+`,
+            'utf-8',
+        );
         // A malformed YAML to exercise error paths.
         await writeFile(
             join(LIBRARY_DIR, 'broken.yaml'),
@@ -109,6 +128,12 @@ steps:
         expect(legacy).toBeDefined();
         expect(legacy.steps?.length).toBe(1);
         expect(legacy.graph).toBeUndefined();
+
+        // Templates without a `library:` block surface it as null; ones with
+        // it pass the parsed object through for dashboard auto-discovery.
+        expect(demo.library).toBeNull();
+        const auto = byName.get('auto-meta');
+        expect(auto.library).toMatchObject({ name: 'Auto Meta Demo', category: 'productivity', difficulty: 'easy' });
     });
 
     it('GET /api/templates/library/:name/graph returns the parsed graph for a graph template', async () => {

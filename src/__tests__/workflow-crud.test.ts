@@ -135,6 +135,26 @@ describe('/api/workflows CRUD reloads in-memory config', () => {
         expect(body.workflow?.graph?.nodes?.length).toBe(2);
     });
 
+    it('PUT must not rename — the name is forced to the route param so it cannot bypass the rename migration', async () => {
+        await server.inject({
+            method: 'POST',
+            url: '/api/workflows',
+            payload: { name: 'immutable', trigger: { source: 'manual', event: 'manual' }, graph: { nodes: [], edges: [] } },
+        });
+
+        // A PUT body that tries to change the name must be ignored.
+        const put = await server.inject({
+            method: 'PUT',
+            url: '/api/workflows/immutable',
+            payload: { name: 'sneaky-rename', trigger: { source: 'manual', event: 'manual' }, graph: { nodes: [], edges: [] } },
+        });
+        expect(put.statusCode).toBe(200);
+
+        // The workflow is still under the original name; no phantom created.
+        expect((await server.inject({ method: 'GET', url: '/api/workflows/immutable/details' })).statusCode).toBe(200);
+        expect((await server.inject({ method: 'GET', url: '/api/workflows/sneaky-rename/details' })).statusCode).toBe(404);
+    });
+
     it('DELETE → GET /:name/details: a deleted workflow is no longer in the in-memory config', async () => {
         await server.inject({
             method: 'POST',
@@ -153,6 +173,63 @@ describe('/api/workflows CRUD reloads in-memory config', () => {
             url: '/api/workflows/to-delete/details',
         });
         expect(detail.statusCode).toBe(404);
+    });
+
+    // ── Rename ─────────────────────────────────────────────────────────────
+    it('POST /:name/rename moves the workflow to the new name', async () => {
+        await server.inject({
+            method: 'POST',
+            url: '/api/workflows',
+            payload: { name: 'old-name', trigger: { source: 'manual', event: 'manual' }, graph: { nodes: [], edges: [] } },
+        });
+
+        const res = await server.inject({
+            method: 'POST',
+            url: '/api/workflows/old-name/rename',
+            payload: { newName: 'new-name' },
+        });
+        expect(res.statusCode).toBe(200);
+        expect(JSON.parse(res.payload).name).toBe('new-name');
+
+        // Old gone, new present.
+        expect((await server.inject({ method: 'GET', url: '/api/workflows/old-name/details' })).statusCode).toBe(404);
+        const moved = await server.inject({ method: 'GET', url: '/api/workflows/new-name/details' });
+        expect(moved.statusCode).toBe(200);
+        expect(JSON.parse(moved.payload).workflow?.name).toBe('new-name');
+    });
+
+    it('POST /:name/rename rejects a name that already exists (409)', async () => {
+        for (const name of ['flow-a', 'flow-b']) {
+            await server.inject({
+                method: 'POST',
+                url: '/api/workflows',
+                payload: { name, trigger: { source: 'manual', event: 'manual' }, graph: { nodes: [], edges: [] } },
+            });
+        }
+        const res = await server.inject({
+            method: 'POST',
+            url: '/api/workflows/flow-a/rename',
+            payload: { newName: 'flow-b' },
+        });
+        expect(res.statusCode).toBe(409);
+        // flow-a must be untouched after a rejected rename.
+        expect((await server.inject({ method: 'GET', url: '/api/workflows/flow-a/details' })).statusCode).toBe(200);
+    });
+
+    it('POST /:name/rename returns 404 for an unknown workflow and 400 for an invalid name', async () => {
+        expect((await server.inject({
+            method: 'POST', url: '/api/workflows/ghost/rename', payload: { newName: 'whatever' },
+        })).statusCode).toBe(404);
+
+        await server.inject({
+            method: 'POST',
+            url: '/api/workflows',
+            payload: { name: 'rename-bad', trigger: { source: 'manual', event: 'manual' }, graph: { nodes: [], edges: [] } },
+        });
+        const bad = await server.inject({
+            method: 'POST', url: '/api/workflows/rename-bad/rename', payload: { newName: 'has spaces!' },
+        });
+        expect(bad.statusCode).toBe(400);
     });
 
     // ── Library install cascade ────────────────────────────────────────────
@@ -299,6 +376,91 @@ graph:
         expect((finalRaw.deck as string[]) ?? []).toEqual([]);
         // Presets cleaned → no orphans in the palette.
         expect(await presetStore.list()).toEqual([]);
+    });
+
+    it('DELETE of ONE instance keeps deck + presets while siblings from the same template remain', async () => {
+        await writeFile(
+            join(templateDir, 'library', 'audit2.yaml'),
+            `graph:
+  nodes:
+    - id: a
+      type: ai.agent
+      config: { prompt: shared }
+  edges: []
+`,
+            'utf-8',
+        );
+        const { resetTemplateCache } = await import('../core/templates.js');
+        resetTemplateCache();
+
+        await configStore.updateRaw((config) => {
+            config.deck = ['audit2'];
+        });
+        // Two instances of the same library item ("Use Template" twice).
+        for (const name of ['my-audit2', 'my-audit2-2']) {
+            await server.inject({
+                method: 'POST',
+                url: '/api/workflows',
+                payload: { name, template: 'audit2', _libraryItem: 'audit2', trigger: { source: 'manual', event: 'manual' } },
+            });
+        }
+
+        // Delete just the first instance.
+        const del = await server.inject({ method: 'DELETE', url: '/api/workflows/my-audit2' });
+        expect(del.statusCode).toBe(200);
+
+        // The sibling still exists → deck entry and shared presets must survive.
+        const raw = yaml.load(await configStore.readRaw()) as Record<string, unknown>;
+        expect((raw.deck as string[]) ?? []).toContain('audit2');
+        expect((await presetStore.list()).length).toBeGreaterThan(0);
+
+        // Deleting the last instance now cascades the cleanup.
+        await server.inject({ method: 'DELETE', url: '/api/workflows/my-audit2-2' });
+        const rawAfter = yaml.load(await configStore.readRaw()) as Record<string, unknown>;
+        expect((rawAfter.deck as string[]) ?? []).not.toContain('audit2');
+        expect(await presetStore.list()).toEqual([]);
+    });
+
+    it('DELETE keeps deck while a LEGACY (untagged) sibling created from the same recipe remains', async () => {
+        await writeFile(
+            join(templateDir, 'library', 'audit3.yaml'),
+            `graph:
+  nodes:
+    - id: a
+      type: ai.agent
+      config: { prompt: shared }
+  edges: []
+`,
+            'utf-8',
+        );
+        const { resetTemplateCache } = await import('../core/templates.js');
+        resetTemplateCache();
+
+        await configStore.updateRaw((config) => {
+            config.deck = ['audit3'];
+        });
+        // A tagged instance plus a legacy one matched only by the `my-<id>`
+        // name convention (no `_libraryItem` tag, as pre-provenance installs).
+        await server.inject({
+            method: 'POST', url: '/api/workflows',
+            payload: { name: 'tagged-audit3', template: 'audit3', _libraryItem: 'audit3', trigger: { source: 'manual', event: 'manual' } },
+        });
+        await server.inject({
+            method: 'POST', url: '/api/workflows',
+            payload: { name: 'my-audit3', template: 'audit3', trigger: { source: 'manual', event: 'manual' } },
+        });
+
+        // Delete the tagged one — the legacy sibling should keep the deck entry.
+        await server.inject({ method: 'DELETE', url: '/api/workflows/tagged-audit3' });
+        const raw = yaml.load(await configStore.readRaw()) as Record<string, unknown>;
+        expect((raw.deck as string[]) ?? []).toContain('audit3');
+
+        // Now delete the LAST instance — an untagged legacy one. The library id
+        // is inferred from its `my-<id>` name (confirmed against the deck), so
+        // the cascade still fires and the deck entry is cleaned.
+        await server.inject({ method: 'DELETE', url: '/api/workflows/my-audit3' });
+        const rawFinal = yaml.load(await configStore.readRaw()) as Record<string, unknown>;
+        expect((rawFinal.deck as string[]) ?? []).not.toContain('audit3');
     });
 
     // ─── POST /api/workflows/:name/toggle ───────────────────────────────

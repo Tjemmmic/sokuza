@@ -372,7 +372,11 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
             const workflows = ((config.workflows as unknown[]) ?? []) as Record<string, unknown>[];
             const idx = workflows.findIndex((w) => w.name === name);
             if (idx === -1) return { found: false as const, workflow: null as Record<string, unknown> | null };
-            workflows[idx] = { ...update, name: update.name ?? name };
+            // The name is the primary key. PUT must never rename — that would
+            // bypass the collision check + reference migration that only
+            // POST /api/workflows/:name/rename performs. Force the route's
+            // name regardless of what the body carries.
+            workflows[idx] = { ...update, name };
             config.workflows = workflows;
             return { found: true as const, workflow: workflows[idx] };
         });
@@ -385,6 +389,65 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
 
         logger.info({ workflow: name }, 'Workflow updated via dashboard');
         return { ok: true, workflow: result.workflow };
+    });
+
+    // Rename a workflow. The name is the primary key (config entry, run
+    // history, webhook deliveries, persisted AI reviews all reference it), so
+    // a rename is a small migration: rename the config entry, then carry the
+    // references along. Collision-checked so two workflows can't share a name.
+    server.post('/api/workflows/:name/rename', async (request, reply) => {
+        const { name } = request.params as { name: string };
+        const body = (request.body ?? {}) as { newName?: unknown };
+        const newName = typeof body.newName === 'string' ? body.newName.trim() : '';
+
+        if (!newName) {
+            return reply.status(400).send({ error: 'newName is required' });
+        }
+        if (!/^[a-zA-Z0-9_-]+$/.test(newName)) {
+            return reply.status(400).send({ error: 'newName may only contain letters, numbers, hyphens, and underscores' });
+        }
+        if (newName === name) {
+            return { ok: true, name }; // no-op rename
+        }
+
+        const outcome = await deps.configStore.updateRaw((config) => {
+            const workflows = ((config.workflows as unknown[]) ?? []) as Record<string, unknown>[];
+            const idx = workflows.findIndex((w) => w.name === name);
+            if (idx === -1) return 'not-found' as const;
+            if (workflows.some((w) => w.name === newName)) return 'conflict' as const;
+            workflows[idx].name = newName;
+            config.workflows = workflows;
+            return 'ok' as const;
+        });
+
+        if (outcome === 'not-found') {
+            return reply.status(404).send({ error: `Workflow "${name}" not found` });
+        }
+        if (outcome === 'conflict') {
+            return reply.status(409).send({ error: `A workflow named "${newName}" already exists` });
+        }
+
+        await deps.reloadConfig();
+
+        // Carry references along so history doesn't orphan under the old name.
+        try {
+            deps.getEngine().renameWorkflowReferences(name, newName);
+        } catch (err) {
+            logger.warn({ err, from: name, to: newName }, 'Failed to migrate in-memory references after rename');
+        }
+        // Null signals the persisted migration didn't run (module load failed),
+        // distinct from 0 (ran, nothing matched) — surfaced in the response so
+        // a caller can tell the difference.
+        let persistedMigrated: number | null = null;
+        try {
+            const { renameWorkflowInRuns } = await import('../core/run-store.js');
+            persistedMigrated = await renameWorkflowInRuns(name, newName, logger);
+            logger.info({ from: name, to: newName, migrated: persistedMigrated }, 'Workflow renamed; migrated persisted run records');
+        } catch (err) {
+            logger.warn({ err, from: name, to: newName }, 'Failed to migrate persisted run records after rename');
+        }
+
+        return { ok: true, name: newName, persistedMigrated };
     });
 
     // Quick enable/disable from the Workflows tab without opening the
@@ -434,13 +497,43 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
         // "Installed" with no workflow behind it — and the auto-
         // extracted presets stranded with nothing to drop them onto.
         let libraryItem: string | null = null;
+        // Multiple workflows can be created from the same library template
+        // ("Use Template" makes a fresh instance each time). Only cascade the
+        // deck/preset cleanup when the one being deleted is the LAST instance
+        // of its library item — otherwise removing one instance would strip
+        // the quick-action and shared presets out from under its siblings.
+        let stillReferenced = false;
         const found = await deps.configStore.updateRaw((config) => {
             const workflows = ((config.workflows as unknown[]) ?? []) as Record<string, unknown>[];
             const target = workflows.find((w) => w.name === name);
             if (!target) return false;
-            if (typeof target._libraryItem === 'string') libraryItem = target._libraryItem;
+            if (typeof target._libraryItem === 'string') {
+                libraryItem = target._libraryItem;
+            } else {
+                // Legacy untagged install: infer the library id from the
+                // `my-<id>` / `<id>` name convention, but only act on it when
+                // it's actually a deck entry — so deleting the last legacy
+                // instance still cascades cleanup, while a random workflow
+                // named "my-x" can't trigger a spurious one.
+                const deck = (config.deck as string[]) ?? [];
+                const tname = typeof target.name === 'string' ? target.name : '';
+                const candidate = tname.startsWith('my-') ? tname.slice(3) : tname;
+                if (candidate && deck.includes(candidate)) libraryItem = candidate;
+            }
             const filtered = workflows.filter((w) => w.name !== name);
             config.workflows = filtered;
+            // A remaining sibling counts whether it carries the `_libraryItem`
+            // tag or only matches the legacy name convention (`my-<id>` / `<id>`),
+            // mirroring the dashboard's libraryInstanceNames — so deleting a
+            // tagged instance never strips deck/presets out from under an older
+            // untagged one created from the same recipe.
+            if (libraryItem) {
+                stillReferenced = filtered.some((w) =>
+                    w._libraryItem === libraryItem ||
+                    w.name === `my-${libraryItem}` ||
+                    w.name === libraryItem,
+                );
+            }
             return true;
         });
 
@@ -450,9 +543,9 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
 
         await deps.reloadConfig();
 
-        if (libraryItem) {
-            // Remove the orphaned deck entry so the library card flips
-            // back to "Install" instead of getting stuck on "Installed".
+        if (libraryItem && !stillReferenced) {
+            // Last instance gone — drop the deck quick-action and the presets
+            // that were extracted from this library template.
             try {
                 await deps.configStore.updateRaw((config) => {
                     const deck = ((config.deck as string[]) ?? []).filter((d) => d !== libraryItem);
@@ -802,6 +895,10 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
                 graph: parsed.graph,
                 description: parsed.description,
                 icon: parsed.icon,
+                // Optional catalog metadata for auto-discovered cards. A
+                // `library:` block in the YAML lets a template surface itself
+                // in the Library without a hand-written entry in app.js.
+                library: parsed.library ?? null,
             });
         }
 
@@ -1984,6 +2081,15 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
         return { jobs: jobs.map(serializeJob) };
     });
 
+    server.get('/api/queue/jobs/:id', async (request, reply) => {
+        const queue = deps.getQueue?.();
+        if (!queue) return reply.status(503).send({ error: 'Queue not available' });
+        const { id } = request.params as { id: string };
+        const job = queue.getJob(id);
+        if (!job) return reply.status(404).send({ error: `Job "${id}" not found` });
+        return { job: serializeJobDetail(job) };
+    });
+
     server.post('/api/queue/jobs/:id/cancel', async (request, reply) => {
         const queue = deps.getQueue?.();
         if (!queue) return reply.status(503).send({ error: 'Queue not available' });
@@ -2494,6 +2600,34 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
     });
 }
 
+/**
+ * Pull the human-meaningful context off a job's triggering event: repo,
+ * owner, PR/issue number, and branch. The data already rides on the event
+ * (GitHub sets repo/owner/prNumber/issueNumber in metadata; branch lives in
+ * the PR payload) — the queue UI just needs it surfaced instead of stripped.
+ *
+ * Mirrors extractEventInfo() in src/actions but lives here to respect that
+ * helper's within-actions boundary, and adds the owner/issueNumber fields a
+ * generic job view needs.
+ */
+function jobEventContext(event: import('../core/types.js').EventPayload) {
+    const meta = (event.metadata ?? {}) as Record<string, unknown>;
+    const pr = event.payload?.pull_request as Record<string, unknown> | undefined;
+    const branch = (pr?.head as Record<string, unknown> | undefined)?.ref;
+    const ctx: {
+        repo?: string; owner?: string; repoName?: string;
+        prNumber?: number; issueNumber?: number; branch?: string;
+    } = {};
+    if (typeof meta.repo === 'string') ctx.repo = meta.repo;
+    if (typeof meta.owner === 'string') ctx.owner = meta.owner;
+    if (typeof meta.repoName === 'string') ctx.repoName = meta.repoName;
+    const prNumber = meta.prNumber ?? pr?.number;
+    if (typeof prNumber === 'number') ctx.prNumber = prNumber;
+    if (typeof meta.issueNumber === 'number') ctx.issueNumber = meta.issueNumber;
+    if (typeof branch === 'string') ctx.branch = branch;
+    return ctx;
+}
+
 function serializeJob(job: import('../core/types.js').QueueJob) {
     return {
         id: job.id,
@@ -2517,6 +2651,53 @@ function serializeJob(job: import('../core/types.js').QueueJob) {
             source: job.event.source,
             event: job.event.event,
             action: job.event.action,
+            ...jobEventContext(job.event),
         },
+    };
+}
+
+/** Keys whose values are masked in queue job detail — step output and event
+ *  metadata are operational data that can incidentally carry credentials. */
+const SENSITIVE_KEY_RE = /(token|authorization|password|secret|api[-_]?key|cookie|credential)/i;
+
+/** Recursively mask values under sensitive-looking keys. A WeakSet of the
+ *  current ancestor path breaks cycles (and is backtracked so genuinely-shared
+ *  sibling refs aren't false-flagged); the depth limit returns a sentinel —
+ *  never the raw value — so a secret nested past the bound can't leak and
+ *  serialization can't loop. */
+function redactSecrets(value: unknown, depth = 0, seen = new WeakSet<object>()): unknown {
+    if (value === null || typeof value !== 'object') return value;
+    if (depth > 8) return '[truncated]';
+    if (seen.has(value)) return '[circular]';
+    seen.add(value);
+    let result: unknown;
+    if (Array.isArray(value)) {
+        result = value.map((v) => redactSecrets(v, depth + 1, seen));
+    } else {
+        const out: Record<string, unknown> = {};
+        for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+            out[k] = SENSITIVE_KEY_RE.test(k) ? '[redacted]' : redactSecrets(v, depth + 1, seen);
+        }
+        result = out;
+    }
+    seen.delete(value);
+    return result;
+}
+
+/**
+ * Full single-job view for the queue detail panel: everything serializeJob
+ * carries, plus the workflow definition, the event metadata, and the step
+ * output so a run can be inspected and traced to its related entities. Step
+ * output and event metadata are redacted of secret-bearing keys first, since
+ * they can incidentally include shell output, headers, or prompts. The
+ * workflow definition is redacted too, since action params can carry
+ * hardcoded tokens/headers.
+ */
+function serializeJobDetail(job: import('../core/types.js').QueueJob) {
+    return {
+        ...serializeJob(job),
+        workflow: redactSecrets(job.workflow),
+        eventMetadata: redactSecrets((job.event.metadata ?? {})) as Record<string, unknown>,
+        output: redactSecrets(job.output ?? null),
     };
 }

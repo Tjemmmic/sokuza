@@ -109,6 +109,39 @@ describe('SokuzaEngine', () => {
         });
     });
 
+    describe('registerAutoDetectedIntegration', () => {
+        function makeGhLikeIntegration(): Integration {
+            return {
+                name: 'gh-cli',
+                supportedEvents: ['pr.opened'],
+                initialize: vi.fn(),
+                registerRoutes: vi.fn(),
+                parseEvent: vi.fn(),
+            };
+        }
+
+        it('reports as enabled despite no entry in the config file', async () => {
+            const engine = await createEngine();
+            engine.registerAutoDetectedIntegration(makeGhLikeIntegration());
+
+            expect(engine.getIntegrationStatus()['gh-cli'].enabled).toBe(true);
+        });
+
+        it('survives reloadConfig() — the config file never carries it', async () => {
+            // Regression: reloadConfig() replaces config.integrations with the
+            // on-disk version (which omits auto-detected gh-cli). Without
+            // re-seeding, the integration flips to "not configured" after any
+            // workflow edit triggers a reload.
+            const engine = await createEngine();
+            engine.registerAutoDetectedIntegration(makeGhLikeIntegration());
+            expect(engine.getIntegrationStatus()['gh-cli'].enabled).toBe(true);
+
+            await engine.reloadConfig();
+
+            expect(engine.getIntegrationStatus()['gh-cli'].enabled).toBe(true);
+        });
+    });
+
     describe('registerAction', () => {
         it('stores action by name', async () => {
             const engine = await createEngine();
@@ -241,6 +274,31 @@ describe('SokuzaEngine', () => {
 
             expect(result.ok).toBe(false);
             expect(result.error).toContain('not found');
+        });
+    });
+
+    describe('renameWorkflowReferences', () => {
+        it('moves in-memory run history from the old name to the new name', async () => {
+            // Seed a real run-history record by executing a workflow that
+            // exists in the on-disk config (runWorkflowByName reloads it).
+            await writeFile(
+                configPath,
+                'server:\n  port: 0\nintegrations: {}\nworkflows:\n' +
+                '  - name: wf-old\n    trigger: { source: manual, event: manual }\n' +
+                '    steps:\n      - action: log\n        params: {}\n',
+                'utf-8',
+            );
+            const engine = await createEngine();
+            engine.registerAction('log', vi.fn());
+
+            await engine.runWorkflowByName('wf-old');
+            expect(engine.getRunHistory('wf-old').length).toBeGreaterThan(0);
+
+            const migrated = engine.renameWorkflowReferences('wf-old', 'wf-new');
+
+            expect(migrated).toBeGreaterThan(0);
+            expect(engine.getRunHistory('wf-old')).toHaveLength(0);
+            expect(engine.getRunHistory('wf-new').length).toBeGreaterThan(0);
         });
     });
 });

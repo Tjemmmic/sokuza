@@ -15,6 +15,23 @@ under a new `## [X.Y.Z] - YYYY-MM-DD` heading, bump `version` in
 `package.json`, commit, push to main. The release workflow tags +
 publishes automatically.
 
+### Added
+
+- **Workflows can be renamed.** A new **Rename** action (in every Workflows view) and a `POST /api/workflows/:name/rename` endpoint. Because the name is a workflow's primary key, the rename is a real migration: it collision-checks against existing names (409 on conflict), renames the config entry, and carries the references along — in-memory run history and webhook deliveries, plus persisted AI-review / address-review records on disk — so history no longer orphans under the old name.
+- **Workflows page view modes.** A List / Tiles / Compact toggle in the page header, persisted per browser (`localStorage`). Tiles give a card grid with trigger, type, and recent-run status; Compact is a dense one-line-per-workflow list for large collections. List remains the default.
+- **Library overhaul — templates instead of one-shot installs.** "Install / Installed / Uninstall" is replaced by **Use Template**, which creates a fresh, uniquely-named workflow instance every time (so you can spin up several variations of the same recipe). Cards show an "N in use" count linking to Workflows instead of a sticky "Installed" badge, and the dead "Edit" button is gone. Deleting a workflow now only tears down the shared deck quick-action / node presets when it was the **last** instance of that template. The **Preview** is now a structured summary (trigger, the steps/nodes that run, required integrations) rather than a raw-YAML dump. A new **PR Review** category groups the review variants, miscategorized items were fixed, and tag pills filter the library. Finally, templates under `templates/library/` are **auto-discovered**: drop in a YAML (optionally with a `library:` metadata block for name/category/tags/difficulty) and it appears as a card with no app.js edit — this also surfaces previously-hidden templates like `agentic-pr-review` and `pr-test-runner`.
+- **Event Log entries are now linked and inspectable.** Matched workflow names open the workflow editor; repo, owner, PR, issue, and branch are linkified to GitHub. A new **Details** action opens a dedicated event page showing the trigger, linked entities, triggered workflows (each with a jump to its editor), and the raw payload. The outbound-calls tab was also renamed from the ambiguous "Webhook Deliveries" to "Outbound Webhooks".
+- **Queue rows now show what they're for and open a run detail.** Each job displays its repo · PR/issue · branch, and clicking a row opens a detail panel with the trigger, workflow (with a jump to the editor), step actions, error, and — for PR jobs — the related AI review / address-run timeline. Backed by a new `GET /api/queue/jobs/:id` endpoint; the event context (already present on the job) is no longer stripped during serialization.
+
+### Changed
+
+- **AI Providers moved to their own top-level page.** They previously shared the Integrations page, which blurred the line between event-source integrations and the models that power AI actions. Providers now live under a dedicated **AI Providers** nav entry; Integrations is purely event sources.
+- **Removed the Cron "integration" card.** Cron has no global configuration — schedules are defined per-workflow by choosing `cron` as the trigger source. The card implied a setup step that doesn't exist. The internal scheduler is unchanged; the Integrations page now notes where cron lives.
+
+### Fixed
+
+- **gh CLI integration no longer flips to "not configured" after editing a workflow.** `gh-cli` is auto-detected at runtime (whenever the GitHub CLI is installed) and injected into the in-memory config, but it's never written to `sokuza.config.yaml`. Any workflow create/update/delete triggers `reloadConfig()`, which replaced the integrations map with the on-disk version and silently dropped the `gh-cli` entry — so the Integrations page reported it as not set up even while gh-cli workflows kept running. Auto-detected integrations are now tracked and re-seeded across reloads.
+
 ## [0.2.5] - 2026-06-05
 
 ### Added
