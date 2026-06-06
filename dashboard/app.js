@@ -3958,22 +3958,34 @@ window.confirmUseTemplate = async function (itemId) {
 window.previewLibraryItem = async function (itemId) {
     const item = findLibraryItem(itemId);
     if (!item) return;
-    openModal(`Preview: ${item.name}`, '<div class="skeleton skeleton-card"></div>', `
-        <button class="btn btn-ghost" onclick="closeModal()">Close</button>
-        <button class="btn btn-primary" onclick="closeModal();useTemplateFromLibrary('${item.id}')">＋ Use Template</button>
-    `);
 
-    let res = null;
+    const footer = `
+        <button class="btn btn-ghost" onclick="closeModal()">Close</button>
+        <button class="btn btn-primary" onclick="closeModal();useTemplateFromLibrary('${item.id}')">＋ Use Template</button>`;
+
+    // The library and root template lists are already loaded by renderLibrary,
+    // so resolve the template from memory first — no network round-trip and no
+    // spurious 404 when the template lives in the root dir rather than library/.
+    let res = libraryTemplates.find(t => t.name === item.template)
+        || customTemplates.find(t => t.name === item.template)
+        || templates.find(t => t.name === item.template)
+        || null;
+
+    if (res) {
+        openModal(`Preview: ${item.name}`, renderLibraryPreviewBody(item, res), footer);
+        return;
+    }
+
+    // Not in memory (preview opened before lists loaded) — fetch on demand.
+    openModal(`Preview: ${item.name}`, '<div class="skeleton skeleton-card"></div>', footer);
     try {
         res = await api.get(`/api/templates/library/${encodeURIComponent(item.template)}/graph`);
     } catch {
-        // Fall back to the root templates dir for non-library templates.
         try {
             const all = await api.get('/api/templates');
             res = (all.templates || []).find(t => t.name === item.template) || null;
         } catch { res = null; }
     }
-
     const body = $('#modal-body');
     if (body) body.innerHTML = renderLibraryPreviewBody(item, res);
 };
