@@ -221,6 +221,12 @@ describe('queue API — run context + job detail', () => {
 describe('queue API — job detail redacts secrets', () => {
     let server: FastifyInstance;
 
+    // A self-referential object to prove cycles don't crash JSON serialization.
+    const cyclic: Record<string, unknown> = { label: 'loop' };
+    cyclic.self = cyclic;
+    // A secret buried deeper than the recursion bound — must not leak.
+    const deep = { a: { b: { c: { d: { e: { f: { g: { h: { i: { token: 'deep-secret' } } } } } } } } } };
+
     const secretJob = {
         id: 'job-secret',
         status: 'completed',
@@ -228,7 +234,11 @@ describe('queue API — job detail redacts secrets', () => {
         dedupKey: 'dk',
         enqueuedAt: '2026-06-05T10:00:00.000Z',
         attempts: 1,
-        workflow: { name: 'wf', trigger: { source: 'manual', event: 'manual' }, steps: [] },
+        workflow: {
+            name: 'wf',
+            trigger: { source: 'manual', event: 'manual' },
+            steps: [{ action: 'webhook', params: { token: 'wf-secret', url: 'https://x' } }],
+        },
         event: {
             source: 'webhook',
             event: 'incoming',
@@ -237,7 +247,7 @@ describe('queue API — job detail redacts secrets', () => {
         },
         output: {
             results: {},
-            steps: { fetch: { api_key: 'super-secret', note: 'visible' } },
+            steps: { fetch: { api_key: 'super-secret', note: 'visible' }, cyclic, deep },
         },
     };
 
@@ -274,13 +284,22 @@ describe('queue API — job detail redacts secrets', () => {
         await rm(TMP_DIR, { recursive: true, force: true });
     });
 
-    it('masks secret-bearing keys in output and metadata, preserves benign fields', async () => {
+    it('masks secrets across output, metadata, and workflow; survives cycles and deep nesting', async () => {
         const res = await server.inject({ method: 'GET', url: '/api/queue/jobs/job-secret' });
+        // No crash despite the cyclic object → the redactor broke the cycle.
         expect(res.statusCode).toBe(200);
         const job = JSON.parse(res.payload).job;
+
         expect(job.eventMetadata.authorization).toBe('[redacted]');
         expect(job.eventMetadata.repo).toBe('acme/widgets');
         expect(job.output.steps.fetch.api_key).toBe('[redacted]');
         expect(job.output.steps.fetch.note).toBe('visible');
+        // Workflow definition is redacted too.
+        expect(job.workflow.steps[0].params.token).toBe('[redacted]');
+        expect(job.workflow.steps[0].params.url).toBe('https://x');
+        // Cycle replaced with a sentinel rather than recursing forever.
+        expect(job.output.steps.cyclic.self).toBe('[circular]');
+        // A secret past the depth bound is truncated, never leaked verbatim.
+        expect(JSON.stringify(job.output.steps.deep)).not.toContain('deep-secret');
     });
 });

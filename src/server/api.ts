@@ -2660,16 +2660,28 @@ function serializeJob(job: import('../core/types.js').QueueJob) {
  *  metadata are operational data that can incidentally carry credentials. */
 const SENSITIVE_KEY_RE = /(token|authorization|password|secret|api[-_]?key|cookie|credential)/i;
 
-/** Recursively mask values under sensitive-looking keys. Bounded depth guards
- *  against pathological nesting/cycles; non-objects pass through unchanged. */
-function redactSecrets(value: unknown, depth = 0): unknown {
-    if (depth > 6 || value === null || typeof value !== 'object') return value;
-    if (Array.isArray(value)) return value.map((v) => redactSecrets(v, depth + 1));
-    const out: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-        out[k] = SENSITIVE_KEY_RE.test(k) ? '[redacted]' : redactSecrets(v, depth + 1);
+/** Recursively mask values under sensitive-looking keys. A WeakSet of the
+ *  current ancestor path breaks cycles (and is backtracked so genuinely-shared
+ *  sibling refs aren't false-flagged); the depth limit returns a sentinel —
+ *  never the raw value — so a secret nested past the bound can't leak and
+ *  serialization can't loop. */
+function redactSecrets(value: unknown, depth = 0, seen = new WeakSet<object>()): unknown {
+    if (value === null || typeof value !== 'object') return value;
+    if (depth > 8) return '[truncated]';
+    if (seen.has(value)) return '[circular]';
+    seen.add(value);
+    let result: unknown;
+    if (Array.isArray(value)) {
+        result = value.map((v) => redactSecrets(v, depth + 1, seen));
+    } else {
+        const out: Record<string, unknown> = {};
+        for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+            out[k] = SENSITIVE_KEY_RE.test(k) ? '[redacted]' : redactSecrets(v, depth + 1, seen);
+        }
+        result = out;
     }
-    return out;
+    seen.delete(value);
+    return result;
 }
 
 /**
@@ -2677,12 +2689,14 @@ function redactSecrets(value: unknown, depth = 0): unknown {
  * carries, plus the workflow definition, the event metadata, and the step
  * output so a run can be inspected and traced to its related entities. Step
  * output and event metadata are redacted of secret-bearing keys first, since
- * they can incidentally include shell output, headers, or prompts.
+ * they can incidentally include shell output, headers, or prompts. The
+ * workflow definition is redacted too, since action params can carry
+ * hardcoded tokens/headers.
  */
 function serializeJobDetail(job: import('../core/types.js').QueueJob) {
     return {
         ...serializeJob(job),
-        workflow: job.workflow,
+        workflow: redactSecrets(job.workflow),
         eventMetadata: redactSecrets((job.event.metadata ?? {})) as Record<string, unknown>,
         output: redactSecrets(job.output ?? null),
     };
