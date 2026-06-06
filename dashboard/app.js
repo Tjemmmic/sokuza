@@ -180,6 +180,7 @@ const actionDocs = {
 // ─── Library Catalog ────────────────────────────────────────────────────────
 const libraryCategories = [
     { key: 'all', label: 'All', icon: '📋' },
+    { key: 'pr-review', label: 'PR Review', icon: '🧑‍⚖️' },
     { key: 'code-quality', label: 'Code Quality', icon: '🔍' },
     { key: 'issue-management', label: 'Issue Management', icon: '🐛' },
     { key: 'docs-release', label: 'Docs & Release', icon: '📝' },
@@ -197,13 +198,13 @@ const libraryCategories = [
 // the curated display names ("Auto-Label PRs").
 const libraryItems = window.libraryItems = [
     // ── Code Quality ──
-    { id: 'ai-pr-review', name: 'AI PR Review', description: 'Claude reviews every PR for bugs, security issues, and code quality — posts a detailed comment with approve/reject decision.', category: 'code-quality', icon: '🔍', tags: ['ai', 'review', 'pr', 'automated'], template: 'ai-pr-review', requiredIntegrations: ['github'], difficulty: 'easy', status: 'available', popular: true, defaultTrigger: { source: ['github', 'gh-cli'], event: ['pull_request.opened'] } },
-    { id: 'review-on-update', name: 'Review on Update', description: 'Re-run AI review whenever new commits are pushed to an open PR.', category: 'code-quality', icon: '🔄', tags: ['ai', 'review', 'pr', 'synchronize'], template: 'ai-pr-review', requiredIntegrations: ['github'], difficulty: 'easy', status: 'available', popular: false, defaultTrigger: { source: ['github', 'gh-cli'], event: ['pull_request.synchronize'] } },
-    { id: 'respond-to-reviews', name: 'Respond to Reviews', description: 'AI reads reviewer feedback, implements fixes, runs quality checks, and pushes — then posts a structured response.', category: 'code-quality', icon: '💬', tags: ['ai', 'review', 'response', 'agent'], template: 'respond-to-reviews', requiredIntegrations: ['github'], difficulty: 'medium', status: 'available', popular: true, defaultTrigger: { source: ['github', 'gh-cli'], event: ['issue_comment.created', 'pull_request_review.submitted'] } },
+    { id: 'ai-pr-review', name: 'AI PR Review', description: 'Claude reviews every PR for bugs, security issues, and code quality — posts a detailed comment with approve/reject decision.', category: 'pr-review', icon: '🔍', tags: ['ai', 'review', 'pr', 'automated'], template: 'ai-pr-review', requiredIntegrations: ['github'], difficulty: 'easy', status: 'available', popular: true, defaultTrigger: { source: ['github', 'gh-cli'], event: ['pull_request.opened'] } },
+    { id: 'review-on-update', name: 'Review on Update', description: 'Re-run AI review whenever new commits are pushed to an open PR.', category: 'pr-review', icon: '🔄', tags: ['ai', 'review', 'pr', 'synchronize'], template: 'ai-pr-review', requiredIntegrations: ['github'], difficulty: 'easy', status: 'available', popular: false, defaultTrigger: { source: ['github', 'gh-cli'], event: ['pull_request.synchronize'] } },
+    { id: 'respond-to-reviews', name: 'Respond to Reviews', description: 'AI reads reviewer feedback, implements fixes, runs quality checks, and pushes — then posts a structured response.', category: 'pr-review', icon: '💬', tags: ['ai', 'review', 'response', 'agent'], template: 'respond-to-reviews', requiredIntegrations: ['github'], difficulty: 'medium', status: 'available', popular: true, defaultTrigger: { source: ['github', 'gh-cli'], event: ['issue_comment.created', 'pull_request_review.submitted'] } },
     { id: 'enforce-rules', name: 'Enforce Repo Rules', description: 'Claude reads your project rules (CONTRIBUTING.md, RULES.md) and checks PRs for compliance — auto-creates fix PRs.', category: 'code-quality', icon: '📏', tags: ['ai', 'rules', 'compliance', 'agent'], template: 'enforce-rules', requiredIntegrations: ['github'], difficulty: 'medium', status: 'available', popular: false, defaultTrigger: { source: ['github'], event: ['pull_request.opened'] } },
-    { id: 'security-audit', name: 'Security Audit', description: 'Comprehensive security scan: secrets, dependency vulns, XSS, SQL injection, SSRF, and more.', category: 'code-quality', icon: '🛡️', tags: ['security', 'audit', 'vulnerabilities'], template: 'security-audit', requiredIntegrations: ['github'], difficulty: 'easy', status: 'available', popular: true, defaultTrigger: { source: ['github'], event: ['pull_request.opened'] } },
+    { id: 'security-audit', name: 'Security Audit', description: 'Comprehensive security scan: secrets, dependency vulns, XSS, SQL injection, SSRF, and more.', category: 'security', icon: '🛡️', tags: ['security', 'audit', 'vulnerabilities'], template: 'security-audit', requiredIntegrations: ['github'], difficulty: 'easy', status: 'available', popular: true, defaultTrigger: { source: ['github'], event: ['pull_request.opened'] } },
     { id: 'dependency-review', name: 'Dependency Review', description: 'Analyzes dependency changes for vulnerabilities, breaking versions, and deprecated packages.', category: 'code-quality', icon: '📦', tags: ['dependencies', 'npm', 'security'], template: 'dependency-review', requiredIntegrations: ['github'], difficulty: 'easy', status: 'available', popular: false, defaultTrigger: { source: ['github'], event: ['pull_request.opened'] } },
-    { id: 'pr-summary', name: 'PR Summary Generator', description: 'Auto-generates a structured summary of PR changes: what changed, impact, testing status.', category: 'code-quality', icon: '📋', tags: ['summary', 'pr', 'documentation'], template: 'pr-summary', requiredIntegrations: ['github'], difficulty: 'easy', status: 'available', popular: true, defaultTrigger: { source: ['github', 'gh-cli'], event: ['pull_request.opened'] } },
+    { id: 'pr-summary', name: 'PR Summary Generator', description: 'Auto-generates a structured summary of PR changes: what changed, impact, testing status.', category: 'pr-review', icon: '📋', tags: ['summary', 'pr', 'documentation'], template: 'pr-summary', requiredIntegrations: ['github'], difficulty: 'easy', status: 'available', popular: true, defaultTrigger: { source: ['github', 'gh-cli'], event: ['pull_request.opened'] } },
 
     // ── Issue Management ──
     { id: 'fix-github-issue', name: 'Fix GitHub Issue', description: 'AI clones the repo, reads the issue, implements a fix, runs tests, and creates a PR — fully automated.', category: 'issue-management', icon: '🔧', tags: ['ai', 'agent', 'fix', 'pr'], template: 'fix-github-issue', requiredIntegrations: ['github'], difficulty: 'advanced', status: 'available', popular: true, defaultTrigger: { source: ['manual'], event: ['manual'] } },
@@ -240,10 +241,10 @@ const libraryItems = window.libraryItems = [
     { id: 'test-impact', name: 'Test Impact Analyzer', description: 'Analyzes which tests are affected by PR changes and suggests which test suites to run.', category: 'productivity', icon: '🧪', tags: ['tests', 'ci', 'analysis'], template: 'ai-pr-review', requiredIntegrations: ['github'], difficulty: 'advanced', status: 'coming-soon', popular: false, defaultTrigger: { source: ['github'], event: ['pull_request.opened'] } },
 
     // ── Advanced Code Quality (Skills-inspired) ──
-    { id: 'pr-inspector', name: 'PR Inspector', description: 'Senior-level PR review with P1/P2/P3 severity prioritization, AI slop detection, full-context analysis, and mandatory approve/reject decision.', category: 'code-quality', icon: '🔎', tags: ['ai', 'review', 'pr', 'structured', 'severity'], template: 'pr-inspector', requiredIntegrations: ['github'], difficulty: 'easy', status: 'available', popular: true, defaultTrigger: { source: ['github', 'gh-cli'], event: ['pull_request.opened'] } },
-    { id: 'ensemble-pr-review', name: 'Ensemble PR Review', description: 'Reviews a PR with several AI providers in parallel, then a final pass synthesizes their findings into one combined review. More robust; each leg is optional (on_error: continue).', category: 'code-quality', icon: '🧑‍⚖️', tags: ['ai', 'review', 'pr', 'multi-provider', 'ensemble', 'synthesis'], template: 'ensemble-pr-review', requiredIntegrations: ['github'], difficulty: 'medium', status: 'available', popular: true, defaultTrigger: { source: ['github'], event: ['pull_request.opened'] } },
-    { id: 'ensemble-pr-review-manual', name: 'Ensemble PR Review (Manual)', description: 'On-demand multi-provider PR review: pick a PR, run several AIs in parallel, synthesize one combined review.', category: 'code-quality', icon: '🧑‍⚖️', tags: ['ai', 'review', 'pr', 'multi-provider', 'ensemble', 'manual'], template: 'ensemble-pr-review-manual', requiredIntegrations: ['github'], difficulty: 'medium', status: 'available', popular: false, defaultTrigger: { source: ['manual'], event: ['manual'] } },
-    { id: 'ensemble-pr-review-org', name: 'Ensemble PR Review (Org / not me)', description: 'Auto-review an org’s PRs you did NOT author. Four reviewers in parallel (two providers × two temperatures) synthesized into one review. Set integrations.gh-cli.prs.owners (or github-poll orgs) + exclude.author.', category: 'code-quality', icon: '🏛️', tags: ['ai', 'review', 'pr', 'multi-provider', 'ensemble', 'org', 'temperature'], template: 'ensemble-pr-review-org', requiredIntegrations: ['gh-cli'], difficulty: 'advanced', status: 'available', popular: false, defaultTrigger: { source: ['gh-cli'], event: ['pull_request.opened', 'pull_request.synchronize'] } },
+    { id: 'pr-inspector', name: 'PR Inspector', description: 'Senior-level PR review with P1/P2/P3 severity prioritization, AI slop detection, full-context analysis, and mandatory approve/reject decision.', category: 'pr-review', icon: '🔎', tags: ['ai', 'review', 'pr', 'structured', 'severity'], template: 'pr-inspector', requiredIntegrations: ['github'], difficulty: 'easy', status: 'available', popular: true, defaultTrigger: { source: ['github', 'gh-cli'], event: ['pull_request.opened'] } },
+    { id: 'ensemble-pr-review', name: 'Ensemble PR Review', description: 'Reviews a PR with several AI providers in parallel, then a final pass synthesizes their findings into one combined review. More robust; each leg is optional (on_error: continue).', category: 'pr-review', icon: '🧑‍⚖️', tags: ['ai', 'review', 'pr', 'multi-provider', 'ensemble', 'synthesis'], template: 'ensemble-pr-review', requiredIntegrations: ['github'], difficulty: 'medium', status: 'available', popular: true, defaultTrigger: { source: ['github'], event: ['pull_request.opened'] } },
+    { id: 'ensemble-pr-review-manual', name: 'Ensemble PR Review (Manual)', description: 'On-demand multi-provider PR review: pick a PR, run several AIs in parallel, synthesize one combined review.', category: 'pr-review', icon: '🧑‍⚖️', tags: ['ai', 'review', 'pr', 'multi-provider', 'ensemble', 'manual'], template: 'ensemble-pr-review-manual', requiredIntegrations: ['github'], difficulty: 'medium', status: 'available', popular: false, defaultTrigger: { source: ['manual'], event: ['manual'] } },
+    { id: 'ensemble-pr-review-org', name: 'Ensemble PR Review (Org / not me)', description: 'Auto-review an org’s PRs you did NOT author. Four reviewers in parallel (two providers × two temperatures) synthesized into one review. Set integrations.gh-cli.prs.owners (or github-poll orgs) + exclude.author.', category: 'pr-review', icon: '🏛️', tags: ['ai', 'review', 'pr', 'multi-provider', 'ensemble', 'org', 'temperature'], template: 'ensemble-pr-review-org', requiredIntegrations: ['gh-cli'], difficulty: 'advanced', status: 'available', popular: false, defaultTrigger: { source: ['gh-cli'], event: ['pull_request.opened', 'pull_request.synchronize'] } },
     { id: 'deep-audit', name: 'Deep Audit', description: 'Staff-engineer-level codebase audit across correctness, architecture, and standards — auto-detects project type and scores code X/10.', category: 'code-quality', icon: '🔬', tags: ['audit', 'quality', 'scoring', 'architecture'], template: 'deep-audit', requiredIntegrations: ['github'], difficulty: 'medium', status: 'available', popular: true, defaultTrigger: { source: ['manual'], event: ['manual'] } },
     { id: 'quality-loop', name: 'Quality Loop', description: 'Iterative improvement engine: audit → fix → test → re-rate across 5 dimensions — repeats until target score met (default 9/10).', category: 'code-quality', icon: '🔄', tags: ['quality', 'iterative', 'improvement', 'scoring'], template: 'quality-loop', requiredIntegrations: ['github'], difficulty: 'advanced', status: 'available', popular: true, defaultTrigger: { source: ['manual'], event: ['manual'] } },
     { id: 'ship-check', name: 'Ship Check', description: 'Pre-merge verification: runs tests, scans for debug artifacts and secrets, checks build — posts pass/fail table with SHIP IT or HOLD verdict.', category: 'code-quality', icon: '✅', tags: ['verification', 'pre-merge', 'checklist'], template: 'ship-check', requiredIntegrations: ['github'], difficulty: 'easy', status: 'available', popular: true, defaultTrigger: { source: ['manual'], event: ['manual'] } },
@@ -272,8 +273,8 @@ const libraryItems = window.libraryItems = [
     { id: 'cron-stale-pr-bump', name: 'Cron — Stale PR Bump', description: 'Daily cron trigger — agent uses the local gh CLI to nudge PRs that have been idle for 7+ days.', category: 'productivity', icon: '⏰', tags: ['cron', 'stale', 'gh-cli'], template: 'cron-stale-pr-bump', requiredIntegrations: [], difficulty: 'medium', status: 'available', popular: false, defaultTrigger: { source: ['cron'], event: ['daily'] } },
     { id: 'webhook-forwarder', name: 'Webhook Forwarder', description: 'Inbound webhook → outbound webhook. Decompose the event, build a payload via data.template, POST it onward. Requires a configured webhook endpoint.', category: 'productivity', icon: '🪝', tags: ['webhook', 'forwarder', 'utility.webhook'], template: 'webhook-forwarder', requiredIntegrations: [], difficulty: 'medium', status: 'available', popular: false, defaultTrigger: { source: ['webhook'], event: ['deploy-hook'] } },
     { id: 'event-debug-tap', name: 'Event Debug Tap', description: 'Wires data.event-fields → utility.log to dump every incoming event\'s source/name/payload to the log.', category: 'diagnostics', icon: '🩺', tags: ['debug', 'data.event-fields', 'tap'], template: 'event-debug-tap', requiredIntegrations: ['github'], difficulty: 'easy', status: 'available', popular: false, defaultTrigger: { source: ['github'], event: ['pull_request.opened', 'push', 'issues.opened'] } },
-    { id: 'gh-cli-quick-review', name: 'gh-CLI Quick Review', description: 'Local gh-CLI poll — review each new PR and post a real GitHub Review (not just a comment).', category: 'code-quality', icon: '⚡', tags: ['gh-cli', 'review', 'local-only'], template: 'gh-cli-quick-review', requiredIntegrations: ['gh-cli'], difficulty: 'easy', status: 'available', popular: false, defaultTrigger: { source: ['gh-cli'], event: ['pull_request.opened'] } },
-    { id: 'address-review-on-changes', name: 'Auto-Address Review Feedback', description: 'When a reviewer requests changes, run ai.address-review in suggest-mode and post inline fix suggestions.', category: 'code-quality', icon: '🩹', tags: ['address-review', 'auto-fix', 'data.review-fields'], template: 'address-review-on-changes', requiredIntegrations: ['github', 'slack'], difficulty: 'advanced', status: 'available', popular: false, defaultTrigger: { source: ['github'], event: ['pull_request_review.submitted'] } },
+    { id: 'gh-cli-quick-review', name: 'gh-CLI Quick Review', description: 'Local gh-CLI poll — review each new PR and post a real GitHub Review (not just a comment).', category: 'pr-review', icon: '⚡', tags: ['gh-cli', 'review', 'local-only'], template: 'gh-cli-quick-review', requiredIntegrations: ['gh-cli'], difficulty: 'easy', status: 'available', popular: false, defaultTrigger: { source: ['gh-cli'], event: ['pull_request.opened'] } },
+    { id: 'address-review-on-changes', name: 'Auto-Address Review Feedback', description: 'When a reviewer requests changes, run ai.address-review in suggest-mode and post inline fix suggestions.', category: 'pr-review', icon: '🩹', tags: ['address-review', 'auto-fix', 'data.review-fields'], template: 'address-review-on-changes', requiredIntegrations: ['github', 'slack'], difficulty: 'advanced', status: 'available', popular: false, defaultTrigger: { source: ['github'], event: ['pull_request_review.submitted'] } },
     { id: 'push-changelog-pr', name: 'Push Changelog Draft', description: 'On push to main, decompose commits, pluck the latest SHA, log a changelog header derived from the message list.', category: 'docs-release', icon: '📜', tags: ['push', 'commits', 'data.commits-fields'], template: 'push-changelog-pr', requiredIntegrations: ['github'], difficulty: 'medium', status: 'available', popular: false, defaultTrigger: { source: ['github'], event: ['push'] } },
     { id: 'flow-merge-demo', name: 'Flow.merge Demo', description: 'Two flow.set values feed into flow.merge — the first defined wins. Demonstrates fan-in.', category: 'productivity', icon: '🔗', tags: ['flow.merge', 'flow.set', 'demo'], template: 'flow-merge-demo', requiredIntegrations: [], difficulty: 'easy', status: 'available', popular: false, defaultTrigger: { source: ['manual'], event: ['manual'] } },
     { id: 'flow-filter-demo', name: 'Flow.filter-list Demo', description: 'Filter a JSON array by a per-item field test — count + first-match outputs flow downstream.', category: 'productivity', icon: '⚗️', tags: ['flow.filter-list', 'demo'], template: 'flow-filter-demo', requiredIntegrations: [], difficulty: 'easy', status: 'available', popular: false, defaultTrigger: { source: ['manual'], event: ['manual'] } },
@@ -3400,47 +3401,77 @@ window.deleteCustomTemplate = async function (name) {
 // LIBRARY + DECK
 // ═════════════════════════════════════════════════════════════════════════════
 
+// Auto-discovered library cards: templates in templates/library/ that no
+// curated `libraryItems` entry references. Populated by renderLibrary from
+// /api/templates/library so new templates appear without a hand-written
+// app.js entry. Curated items intentionally stay many-to-one with templates
+// (one YAML can back several cards), so this only fills the gaps — it never
+// replaces the curated catalog.
+let autoLibraryItems = [];
+
+// The full catalog the Library renders from: curated + auto-discovered.
+function allLibraryItems() {
+    return libraryItems.concat(autoLibraryItems);
+}
+
+// Lookup by id across both curated and auto-discovered items.
+function findLibraryItem(itemId) {
+    return allLibraryItems().find(i => i.id === itemId) || null;
+}
+
 function getFilteredLibraryItems() {
-    let items = libraryItems;
-    if (libraryActiveCategory !== 'all') {
+    let items = allLibraryItems();
+    if (libraryActiveCategory !== 'all' && libraryActiveCategory !== 'custom') {
         items = items.filter(i => i.category === libraryActiveCategory);
     }
     if (librarySearchQuery.trim()) {
         const q = librarySearchQuery.toLowerCase().trim();
         items = items.filter(i =>
             i.name.toLowerCase().includes(q) ||
-            i.description.toLowerCase().includes(q) ||
-            i.tags.some(t => t.includes(q)) ||
+            (i.description || '').toLowerCase().includes(q) ||
+            (i.tags || []).some(t => t.toLowerCase().includes(q)) ||
             i.category.replace('-', ' ').includes(q)
         );
     }
-    // Sort: installed first, then popular, then available before coming-soon.
-    // "Installed" derives from actual workflow existence so the sort
-    // matches the visual badge — deck-only would float orphaned cards
-    // to the top after a manual workflow delete.
-    items.sort((a, b) => {
-        const aInstalled = getInstalledWorkflowName(a.id) ? 1 : 0;
-        const bInstalled = getInstalledWorkflowName(b.id) ? 1 : 0;
-        if (aInstalled !== bInstalled) return bInstalled - aInstalled;
-        if (a.popular !== b.popular) return b.popular - a.popular;
+    // Sort: in-use first (matches the "N in use" badge), then popular, then
+    // available before coming-soon, then alphabetical.
+    items = items.slice().sort((a, b) => {
+        const aUsed = libraryInstanceNames(a).length > 0 ? 1 : 0;
+        const bUsed = libraryInstanceNames(b).length > 0 ? 1 : 0;
+        if (aUsed !== bUsed) return bUsed - aUsed;
+        if (!!a.popular !== !!b.popular) return (b.popular ? 1 : 0) - (a.popular ? 1 : 0);
         if (a.status !== b.status) return a.status === 'available' ? -1 : 1;
         return a.name.localeCompare(b.name);
     });
     return items;
 }
 
-// Find the installed workflow name for a library item
+// Names of all workflows created from a library item. "Use Template" stamps
+// each instance with `_libraryItem`; the name/template fallback keeps older
+// pre-provenance installs recognized. Length 0 means "not in use".
+function libraryInstanceNames(item) {
+    if (!item) return [];
+    return workflows.filter(w =>
+        w._libraryItem === item.id ||
+        (w.template === item.template && (w.name === `my-${item.id}` || w.name === item.id))
+    ).map(w => w.name);
+}
+
+// First workflow instance created from a library item, or null. Deck
+// quick-actions (Dashboard/PR/Issue pages) run "the" workflow for a recipe;
+// with multiple instances now possible, we just pick the first.
 function getInstalledWorkflowName(itemId) {
-    // Check if any workflow's name matches a known pattern for this item
-    const item = libraryItems.find(i => i.id === itemId);
-    if (!item) return null;
-    return workflows.find(w =>
-        w.template === item.template && (
-            w.name === `my-${item.id}` ||
-            w.name === item.id ||
-            w._libraryItem === item.id
-        )
-    )?.name || null;
+    return libraryInstanceNames(findLibraryItem(itemId))[0] || null;
+}
+
+// Pick a workflow name that doesn't collide with an existing one, so "Use
+// Template" can always create a fresh instance (my-x, my-x-2, my-x-3, …).
+function uniqueWorkflowName(base) {
+    const existing = new Set(workflows.map(w => w.name));
+    if (!existing.has(base)) return base;
+    let n = 2;
+    while (existing.has(`${base}-${n}`)) n++;
+    return `${base}-${n}`;
 }
 
 // Get all deck items that have PR triggers
@@ -3459,47 +3490,76 @@ function getDeckIssueItems() {
     });
 }
 
+// Build cards for library templates that no curated item references, so new
+// YAMLs surface automatically. Uses the optional `library:` frontmatter block
+// for catalog metadata (name, category, tags, difficulty, integrations) and
+// falls back to sensible defaults when it's absent.
+function buildAutoLibraryItems(libTemplates) {
+    const covered = new Set(libraryItems.map(i => i.template));
+    const prettify = (n) => n.replace(/[-_]/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+    return (libTemplates || [])
+        .filter(t => t && t.name && !covered.has(t.name))
+        .map(t => {
+            const meta = (t.library && typeof t.library === 'object') ? t.library : {};
+            const validCat = libraryCategories.some(c => c.key === meta.category);
+            return {
+                id: `tmpl-${t.name}`,
+                name: meta.name || prettify(t.name),
+                description: t.description || meta.description || 'Library template.',
+                category: validCat ? meta.category : 'productivity',
+                icon: t.icon || meta.icon || '🧩',
+                tags: Array.isArray(meta.tags) ? meta.tags : [],
+                template: t.name,
+                requiredIntegrations: Array.isArray(meta.requiredIntegrations) ? meta.requiredIntegrations : [],
+                difficulty: ['easy', 'medium', 'advanced'].includes(meta.difficulty) ? meta.difficulty : 'medium',
+                status: 'available',
+                popular: !!meta.popular,
+                defaultTrigger: t.trigger || { source: 'manual', event: 'manual' },
+                auto: true,
+            };
+        });
+}
+
 function renderLibraryCard(item) {
-    // Source of truth: does a workflow that originated from this
-    // library item actually exist? `deck` can desync (e.g. user
-    // deletes the workflow via the workflows page) — using deck
-    // membership alone makes the card lie about state and strands
-    // the user with no install button. See getInstalledWorkflowName
-    // for the matching rules.
-    const isInstalled = getInstalledWorkflowName(item.id) !== null;
+    // A template is a reusable recipe: "Use Template" always creates a fresh
+    // instance, so a card is never "locked" after first use. We show how many
+    // instances currently exist instead of an install/uninstall toggle.
+    const inUse = libraryInstanceNames(item).length;
     const isComingSoon = item.status === 'coming-soon';
+    const isAuto = item.auto === true;
     const diffColors = { easy: '#22c55e', medium: '#f59e0b', advanced: '#a855f7' };
     const diffColor = diffColors[item.difficulty] || '#6b7280';
-    const integBadges = item.requiredIntegrations.map(i =>
+    const integBadges = (item.requiredIntegrations || []).map(i =>
         `<span class="badge badge-${i}" style="font-size:10px;padding:2px 6px">${esc(i)}</span>`
     ).join(' ');
+    // Tag pills filter the library when clicked.
+    const tagPills = (item.tags || []).slice(0, 3).map(t =>
+        `<span class="tag-pill" style="cursor:pointer" title="Filter by ${esc(t)}" onclick="librarySearchQuery='${escJs(t)}';renderLibrary($('#content'))">${esc(t)}</span>`
+    ).join('');
 
     return `
-    <div class="library-card ${isInstalled ? 'in-deck' : ''} ${isComingSoon ? 'coming-soon' : ''}">
+    <div class="library-card ${inUse > 0 ? 'in-deck' : ''} ${isComingSoon ? 'coming-soon' : ''}">
         <div class="library-card-header">
             <span class="library-card-icon">${item.icon}</span>
             <div class="library-card-title-area">
                 <span class="library-card-name">${esc(item.name)}</span>
                 <span class="difficulty-badge" style="--diff-color:${diffColor}">${item.difficulty}</span>
                 ${isComingSoon ? '<span class="badge" style="background:rgba(107,114,128,0.3);color:#9ca3af;font-size:10px;padding:2px 6px">Coming Soon</span>' : ''}
-                ${isInstalled ? '<span class="badge" style="background:rgba(34,197,94,0.2);color:#22c55e;font-size:10px;padding:2px 6px">✓ Installed</span>' : ''}
+                ${isAuto ? '<span class="badge" style="background:rgba(99,102,241,0.15);color:var(--accent-hover);font-size:10px;padding:2px 6px" title="Auto-discovered from templates/library">template</span>' : ''}
+                ${inUse > 0 ? `<span class="badge" style="background:rgba(34,197,94,0.2);color:#22c55e;font-size:10px;padding:2px 6px;cursor:pointer" title="View instances in Workflows" onclick="navigate('workflows')">${inUse} in use</span>` : ''}
             </div>
         </div>
         <p class="library-card-desc">${esc(item.description)}</p>
         <div class="library-card-meta">
             <div class="library-card-integrations">${integBadges}</div>
-            <div class="library-card-tags">${item.tags.slice(0, 3).map(t => `<span class="tag-pill">${esc(t)}</span>`).join('')}</div>
+            <div class="library-card-tags">${tagPills}</div>
         </div>
         <div class="library-card-actions">
             ${isComingSoon ? `
                 <button class="btn btn-ghost btn-sm" disabled>Not Available</button>
-            ` : isInstalled ? `
-                <button class="btn btn-ghost btn-sm" style="color:#ef4444" onclick="uninstallLibraryItem('${item.id}')">Uninstall</button>
-                <button class="btn btn-ghost btn-sm" onclick="openLibraryItemInEditor('${item.id}')">✏️ Edit</button>
-                <button class="btn btn-ghost btn-sm" onclick="previewLibraryItem('${item.id}')">Preview</button>
             ` : `
-                <button class="btn btn-primary btn-sm" onclick="installLibraryItem('${item.id}')">⚡ Install</button>
-                <button class="btn btn-ghost btn-sm" onclick="openLibraryItemInEditor('${item.id}')">✏️ Open in Editor</button>
+                <button class="btn btn-primary btn-sm" onclick="useTemplateFromLibrary('${item.id}')">＋ Use Template</button>
+                <button class="btn btn-ghost btn-sm" onclick="openLibraryItemInEditor('${item.id}')">✏️ Customize</button>
                 <button class="btn btn-ghost btn-sm" onclick="previewLibraryItem('${item.id}')">Preview</button>
             `}
         </div>
@@ -3507,25 +3567,19 @@ function renderLibraryCard(item) {
 }
 
 // Library card → Visual Editor. For not-installed items: stage the
-// template's graph in the editor so the user can tweak before saving;
-// Save in the editor creates the workflow + flips the library badge.
-// For installed items: open the actual workflow that backs the card.
+// "Customize" → stage the template's graph in the editor so the user can
+// tweak before saving. Save creates a NEW workflow instance (the staged name
+// is made unique up front so it never collides with an existing instance).
 window.openLibraryItemInEditor = async function (itemId) {
-    const item = libraryItems.find(i => i.id === itemId);
+    const item = findLibraryItem(itemId);
     if (!item) { toast('Library item not found', 'error'); return; }
 
-    // Already installed → open the existing workflow.
-    const installedName = getInstalledWorkflowName(itemId);
-    if (installedName && typeof window.openGraphEditor === 'function') {
-        return window.openGraphEditor(installedName);
-    }
+    const stagedName = uniqueWorkflowName(`my-${item.id}`);
 
-    // Stage from the template. Prefer the graph form when the YAML has
-    // one; fall back to the legacy steps form (the editor's
-    // ensureGraphShape will linearize it).
+    // Prefer the graph form when the YAML has one; fall back to the legacy
+    // steps form (the editor's ensureGraphShape will linearize it).
     try {
         const res = await api.get(`/api/templates/library/${encodeURIComponent(item.template)}/graph`);
-        const stagedName = `my-${item.id}`;
         const stagedShape = {
             name: stagedName,
             description: res.description || item.description,
@@ -3541,7 +3595,6 @@ window.openLibraryItemInEditor = async function (itemId) {
             const all = await api.get('/api/templates');
             const tmpl = (all.templates || []).find(t => t.name === item.template);
             if (!tmpl) throw new Error(`Template "${item.template}" not found`);
-            const stagedName = `my-${item.id}`;
             const stagedShape = {
                 name: stagedName,
                 description: tmpl.description || item.description,
@@ -3561,12 +3614,10 @@ async function renderLibrary(el) {
     // If builder is active, render it instead
     if (builderState) { renderTemplateBuilder(el); return; }
 
-    // Refresh the workflows list before rendering: the library card's
-    // "Installed" badge derives from actual workflow existence (via
-    // `getInstalledWorkflowName`), so a stale module-scoped `workflows`
-    // would make the badge lie after a deletion that happened in
-    // another tab / via the API / via a workflow uninstall that
-    // navigated us elsewhere before refreshing.
+    // Refresh the workflows list before rendering: the card's "N in use"
+    // count derives from actual workflow existence (via libraryInstanceNames),
+    // so a stale module-scoped `workflows` would make the count lie after a
+    // deletion that happened elsewhere (another tab / the API / the editor).
     try {
         const wfData = await api.get('/api/workflows');
         workflows = wfData.workflows || [];
@@ -3578,14 +3629,24 @@ async function renderLibrary(el) {
         customTemplates = tmplData.templates || [];
     } catch { customTemplates = []; }
 
+    // Load library templates and auto-discover any not backed by a curated
+    // catalog entry, so new templates appear without an app.js edit.
+    try {
+        const libData = await api.get('/api/templates/library');
+        libraryTemplates = libData.templates || [];
+    } catch { libraryTemplates = []; }
+    autoLibraryItems = buildAutoLibraryItems(libraryTemplates);
+
     const filtered = getFilteredLibraryItems();
+    const all = allLibraryItems();
     const catCounts = {};
     for (const cat of libraryCategories) {
-        if (cat.key === 'all') catCounts[cat.key] = libraryItems.length + customTemplates.length;
+        if (cat.key === 'all') catCounts[cat.key] = all.length + customTemplates.length;
         else if (cat.key === 'custom') catCounts[cat.key] = customTemplates.length;
-        else catCounts[cat.key] = libraryItems.filter(i => i.category === cat.key).length;
+        else catCounts[cat.key] = all.filter(i => i.category === cat.key).length;
     }
-    const installedCount = deck.length;
+    // Distinct curated/auto items that have at least one workflow instance.
+    const inUseCount = all.filter(i => libraryInstanceNames(i).length > 0).length;
 
     // Custom template cards
     const customCards = (libraryActiveCategory === 'custom' || libraryActiveCategory === 'all')
@@ -3625,10 +3686,10 @@ async function renderLibrary(el) {
     <div class="page-header">
         <div>
             <h1>Library</h1>
-            <p class="page-subtitle">Browse AI workflow recipes — install to activate and get quick actions everywhere</p>
+            <p class="page-subtitle">Browse workflow recipes — use a template to create an instance you can run and customize</p>
         </div>
         <div style="display:flex;gap:8px;align-items:center">
-            <span class="badge" style="background:rgba(34,197,94,0.15);color:#22c55e;border:1px solid rgba(34,197,94,0.3);font-size:12px;padding:4px 10px">${installedCount} installed</span>
+            ${inUseCount > 0 ? `<span class="badge" style="background:rgba(34,197,94,0.15);color:#22c55e;border:1px solid rgba(34,197,94,0.3);font-size:12px;padding:4px 10px">${inUseCount} in use</span>` : ''}
             <button class="btn btn-primary" onclick="openTemplateBuilder()" id="create-custom-btn">🛠️ Create Custom Recipe</button>
         </div>
     </div>
@@ -3675,26 +3736,26 @@ async function renderLibrary(el) {
     }
 }
 
-// Install = Create workflow + Add to deck (single action)
-window.installLibraryItem = async function (itemId) {
-    const item = libraryItems.find(i => i.id === itemId);
+// Use Template = create a NEW workflow instance from the template. Never
+// gated by prior use — each click makes a fresh, uniquely-named workflow.
+window.useTemplateFromLibrary = async function (itemId) {
+    const item = findLibraryItem(itemId);
     if (!item) return;
 
-    const defaultName = `my-${item.id}`;
+    const defaultName = uniqueWorkflowName(`my-${item.id.replace(/^tmpl-/, '')}`);
     const sources = ensureArray(item.defaultTrigger?.source || 'github');
     const events = ensureArray(item.defaultTrigger?.event || '');
 
-    // Build source & event options for the config modal
     const sourceOptions = [...new Set(['github', 'gh-cli', 'github-poll', 'slack', 'cron', 'webhook', 'manual', ...sources])];
     const triggerSource = sources[0] || 'github';
     const triggerEvent = events.join(', ');
 
-    openModal(`⚡ Install: ${item.name}`, `
+    openModal(`＋ Use Template: ${item.name}`, `
         <p style="color:var(--text-secondary);margin-bottom:16px;line-height:1.5">${esc(item.description)}</p>
 
         <div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap">
             <span class="difficulty-badge" style="--diff-color:${item.difficulty === 'easy' ? '#22c55e' : item.difficulty === 'medium' ? '#f59e0b' : '#a855f7'}">${item.difficulty}</span>
-            ${item.requiredIntegrations.map(i => `<span class="badge badge-${i}">${esc(i)}</span>`).join(' ')}
+            ${(item.requiredIntegrations || []).map(i => `<span class="badge badge-${i}">${esc(i)}</span>`).join(' ')}
         </div>
 
         <div style="margin-bottom:16px">
@@ -3721,17 +3782,17 @@ window.installLibraryItem = async function (itemId) {
         <div style="padding:12px;border-radius:8px;background:rgba(99,102,241,0.08);border:1px solid rgba(99,102,241,0.15);margin-bottom:8px">
             <div style="font-size:12px;color:var(--text-secondary);line-height:1.5">
                 <strong>Template:</strong> <code>${esc(item.template)}</code><br>
-                <strong>What happens:</strong> A workflow will be created that runs automatically on matching events. It will appear as a quick action on your Dashboard, PRs, and Issues pages.
+                <strong>What happens:</strong> A new workflow is created that runs on matching events. Use this template again any time to spin up another variation.
             </div>
         </div>
     `, `
         <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
-        <button class="btn btn-primary" onclick="confirmInstallLibraryItem('${item.id}')">Create Workflow</button>
+        <button class="btn btn-primary" onclick="confirmUseTemplate('${item.id}')">Create Workflow</button>
     `);
 };
 
-window.confirmInstallLibraryItem = async function (itemId) {
-    const item = libraryItems.find(i => i.id === itemId);
+window.confirmUseTemplate = async function (itemId) {
+    const item = findLibraryItem(itemId);
     if (!item) return;
 
     const nameEl = document.getElementById('install-wf-name');
@@ -3739,16 +3800,17 @@ window.confirmInstallLibraryItem = async function (itemId) {
     const eventEl = document.getElementById('install-wf-event');
     if (!nameEl || !sourceEl || !eventEl) return;
 
-    const wfName = nameEl.value.trim();
+    let wfName = nameEl.value.trim();
     const wfSource = sourceEl.value;
     const wfEvents = eventEl.value.split(',').map(e => e.trim()).filter(Boolean);
 
     if (!wfName) { toast('Please enter a workflow name', 'error'); return; }
+    // Guard against creating two workflows with the same name.
+    wfName = uniqueWorkflowName(wfName);
 
     closeModal();
 
     try {
-        // 1. Create workflow
         const workflow = {
             name: wfName,
             template: item.template,
@@ -3760,107 +3822,94 @@ window.confirmInstallLibraryItem = async function (itemId) {
         };
         await api.post('/api/workflows', workflow);
 
-        // 2. Add to deck
+        // Track the recipe in the deck so its quick actions surface on the
+        // Dashboard/PR/Issue pages. Idempotent — multiple instances, one entry.
         if (!deck.includes(item.id)) {
             deck.push(item.id);
-            await api.post('/api/deck/add', { id: item.id });
+            try { await api.post('/api/deck/add', { id: item.id }); } catch { /* deck optional */ }
         }
 
-        // 3. Refresh workflows list
         const wfData = await api.get('/api/workflows');
         workflows = wfData.workflows || [];
 
-        toast(`"${item.name}" installed! Workflow "${wfName}" created.`);
+        toast(`Workflow "${wfName}" created from "${item.name}".`);
     } catch (err) {
-        toast('Install failed: ' + (err.message || 'Unknown error'), 'error');
+        toast('Failed to create workflow: ' + (err.message || 'Unknown error'), 'error');
     }
 
     if (currentPage === 'library') renderLibrary($('#content'));
 };
 
-window.uninstallLibraryItem = async function (itemId) {
-    const item = libraryItems.find(i => i.id === itemId);
-    if (!item) return;
-
-    // Find the associated workflow(s)
-    const matchingWfs = workflows.filter(w =>
-        w._libraryItem === item.id ||
-        (w.template === item.template && (w.name === `my-${item.id}` || w.name === item.id))
-    );
-
-    const wfNames = matchingWfs.map(w => w.name);
-
-    openModal(`Uninstall: ${item.name}`, `
-        <p style="color:var(--text-secondary);margin-bottom:16px;line-height:1.5">
-            This will remove the recipe from your deck${wfNames.length > 0 ? ` and delete ${wfNames.length === 1 ? 'the workflow' : wfNames.length + ' workflows'}: <strong>${wfNames.map(n => esc(n)).join(', ')}</strong>` : ''}.
-        </p>
-        <p style="color:var(--text-muted);font-size:12px">
-            The recipe will remain in the Library if you want to install it again later.
-        </p>
-    `, `
-        <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
-        <button class="btn btn-primary" style="background:#ef4444;border-color:#ef4444" onclick="confirmUninstallLibraryItem('${item.id}')">Uninstall</button>
-    `);
-};
-
-window.confirmUninstallLibraryItem = async function (itemId) {
-    const item = libraryItems.find(i => i.id === itemId);
-    if (!item) return;
-    closeModal();
-
-    try {
-        // 1. Delete matching workflows
-        const matchingWfs = workflows.filter(w =>
-            w._libraryItem === item.id ||
-            (w.template === item.template && (w.name === `my-${item.id}` || w.name === item.id))
-        );
-        for (const wf of matchingWfs) {
-            try { await api.del(`/api/workflows/${encodeURIComponent(wf.name)}`); } catch { /* ignore */ }
-        }
-
-        // 2. Remove from deck
-        deck = deck.filter(id => id !== item.id);
-        try { await api.del(`/api/deck/${encodeURIComponent(item.id)}`); } catch { /* ignore */ }
-
-        // 3. Refresh workflows list
-        const wfData = await api.get('/api/workflows');
-        workflows = wfData.workflows || [];
-
-        toast(`"${item.name}" uninstalled`);
-    } catch (err) {
-        toast('Uninstall failed: ' + err.message, 'error');
-    }
-
-    if (currentPage === 'library') renderLibrary($('#content'));
-};
-
+// Structured preview: what the template DOES (trigger, steps, integrations,
+// outputs) rather than a raw YAML dump. Pulls the parsed graph/steps from the
+// library endpoint so graph-form templates read as a human flow.
 window.previewLibraryItem = async function (itemId) {
-    const item = libraryItems.find(i => i.id === itemId);
+    const item = findLibraryItem(itemId);
     if (!item) return;
-    // Match renderLibraryCard: workflow existence is the source of truth.
-    const isInstalled = getInstalledWorkflowName(item.id) !== null;
+    openModal(`Preview: ${item.name}`, '<div class="skeleton skeleton-card"></div>', `
+        <button class="btn btn-ghost" onclick="closeModal()">Close</button>
+        <button class="btn btn-primary" onclick="closeModal();useTemplateFromLibrary('${item.id}')">＋ Use Template</button>
+    `);
+
+    let res = null;
     try {
-        const tmpl = templates.find(t => t.name === item.template) || libraryTemplates.find(t => t.name === item.template);
-        const yamlContent = tmpl?.content || `# Template: ${item.template}\n# (Template content will be loaded on install)`;
-        openModal(`Preview: ${item.name}`, `
-            <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap">
-                <span class="difficulty-badge" style="--diff-color:${item.difficulty === 'easy' ? '#22c55e' : item.difficulty === 'medium' ? '#f59e0b' : '#a855f7'}">${item.difficulty}</span>
-                ${item.requiredIntegrations.map(i => `<span class="badge badge-${i}">${esc(i)}</span>`).join(' ')}
-                ${item.tags.map(t => `<span class="tag-pill">${esc(t)}</span>`).join('')}
-                ${isInstalled ? '<span class="badge" style="background:rgba(34,197,94,0.2);color:#22c55e;font-size:10px;padding:2px 6px">✓ Installed</span>' : ''}
-            </div>
-            <p style="color:var(--text-secondary);margin-bottom:16px;line-height:1.6">${esc(item.description)}</p>
-            <div style="font-size:12px;font-weight:600;color:var(--text-muted);margin-bottom:6px">TEMPLATE: ${esc(item.template)}</div>
-            <pre style="background:var(--bg-secondary);padding:14px;border-radius:8px;font-size:12px;overflow:auto;max-height:400px;border:1px solid var(--border)">${esc(typeof yamlContent === 'string' ? yamlContent : JSON.stringify(yamlContent, null, 2))}</pre>
-        `, `
-            <button class="btn btn-ghost" onclick="closeModal()">Close</button>
-            ${isInstalled ?
-                `<button class="btn btn-ghost" style="color:#ef4444" onclick="closeModal();uninstallLibraryItem('${item.id}')">Uninstall</button>` :
-                `<button class="btn btn-primary" onclick="closeModal();installLibraryItem('${item.id}')">⚡ Install</button>`
-            }
-        `);
-    } catch { /* ignore */ }
+        res = await api.get(`/api/templates/library/${encodeURIComponent(item.template)}/graph`);
+    } catch {
+        // Fall back to the root templates dir for non-library templates.
+        try {
+            const all = await api.get('/api/templates');
+            res = (all.templates || []).find(t => t.name === item.template) || null;
+        } catch { res = null; }
+    }
+
+    const body = $('#modal-body');
+    if (body) body.innerHTML = renderLibraryPreviewBody(item, res);
 };
+
+// Turn a parsed template into a readable summary. Graph nodes and legacy steps
+// are both flattened to a numbered "what runs" list.
+function renderLibraryPreviewBody(item, res) {
+    const diffColor = item.difficulty === 'easy' ? '#22c55e' : item.difficulty === 'medium' ? '#f59e0b' : '#a855f7';
+    const trig = res?.trigger || item.defaultTrigger || {};
+    const trigSources = ensureArray(trig.source).join(', ') || '—';
+    const trigEvents = ensureArray(trig.event).join(', ') || '—';
+
+    // Build the step list from graph nodes (preferred) or legacy steps.
+    let steps = [];
+    if (res?.graph && Array.isArray(res.graph.nodes)) {
+        steps = res.graph.nodes
+            .filter(n => n.type !== 'trigger')
+            .map(n => ({ label: n.type, detail: n.data?.label || n.label || n.id || '' }));
+    } else if (Array.isArray(res?.steps)) {
+        steps = res.steps.map(s => ({ label: s.action, detail: s.condition ? `if: ${typeof s.condition === 'string' ? s.condition : 'conditional'}` : '' }));
+    }
+
+    const integBadges = (item.requiredIntegrations || []).map(i => `<span class="badge badge-${i}">${esc(i)}</span>`).join(' ') || '<span style="color:var(--text-muted);font-size:12px">none</span>';
+    const tagPills = (item.tags || []).map(t => `<span class="tag-pill">${esc(t)}</span>`).join('');
+
+    const stepsHtml = steps.length
+        ? `<ol style="margin:0;padding-left:18px;display:flex;flex-direction:column;gap:4px">${steps.map(s =>
+            `<li style="font-size:12px"><code>${esc(s.label)}</code>${s.detail ? ` — <span style="color:var(--text-secondary)">${esc(s.detail)}</span>` : ''}</li>`).join('')}</ol>`
+        : '<p style="color:var(--text-muted);font-size:12px">Step details unavailable.</p>';
+
+    const row = (label, value) => `<div style="display:flex;gap:10px;padding:4px 0"><div style="min-width:120px;color:var(--text-muted);font-size:12px">${label}</div><div style="font-size:12px">${value}</div></div>`;
+
+    return `
+        <div style="display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap;align-items:center">
+            <span class="difficulty-badge" style="--diff-color:${diffColor}">${item.difficulty}</span>
+            ${item.auto ? '<span class="badge" style="background:rgba(99,102,241,0.15);color:var(--accent-hover);font-size:10px;padding:2px 6px">template</span>' : ''}
+            ${tagPills}
+        </div>
+        <p style="color:var(--text-secondary);margin-bottom:16px;line-height:1.6">${esc(item.description)}</p>
+        <div style="display:flex;flex-direction:column;gap:2px;margin-bottom:16px">
+            ${row('Template', `<code>${esc(item.template)}</code>`)}
+            ${row('Trigger', `${esc(trigSources)} · <code>${esc(trigEvents)}</code>`)}
+            ${row('Integrations', integBadges)}
+        </div>
+        <div style="font-size:12px;font-weight:600;color:var(--text-muted);margin-bottom:8px;text-transform:uppercase;letter-spacing:0.4px">What runs</div>
+        ${stepsHtml}
+    `;
+}
 
 
 // ═════════════════════════════════════════════════════════════════════════════

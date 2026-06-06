@@ -434,6 +434,12 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
         // "Installed" with no workflow behind it — and the auto-
         // extracted presets stranded with nothing to drop them onto.
         let libraryItem: string | null = null;
+        // Multiple workflows can be created from the same library template
+        // ("Use Template" makes a fresh instance each time). Only cascade the
+        // deck/preset cleanup when the one being deleted is the LAST instance
+        // of its library item — otherwise removing one instance would strip
+        // the quick-action and shared presets out from under its siblings.
+        let stillReferenced = false;
         const found = await deps.configStore.updateRaw((config) => {
             const workflows = ((config.workflows as unknown[]) ?? []) as Record<string, unknown>[];
             const target = workflows.find((w) => w.name === name);
@@ -441,6 +447,7 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
             if (typeof target._libraryItem === 'string') libraryItem = target._libraryItem;
             const filtered = workflows.filter((w) => w.name !== name);
             config.workflows = filtered;
+            if (libraryItem) stillReferenced = filtered.some((w) => w._libraryItem === libraryItem);
             return true;
         });
 
@@ -450,9 +457,9 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
 
         await deps.reloadConfig();
 
-        if (libraryItem) {
-            // Remove the orphaned deck entry so the library card flips
-            // back to "Install" instead of getting stuck on "Installed".
+        if (libraryItem && !stillReferenced) {
+            // Last instance gone — drop the deck quick-action and the presets
+            // that were extracted from this library template.
             try {
                 await deps.configStore.updateRaw((config) => {
                     const deck = ((config.deck as string[]) ?? []).filter((d) => d !== libraryItem);
@@ -802,6 +809,10 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
                 graph: parsed.graph,
                 description: parsed.description,
                 icon: parsed.icon,
+                // Optional catalog metadata for auto-discovered cards. A
+                // `library:` block in the YAML lets a template surface itself
+                // in the Library without a hand-written entry in app.js.
+                library: parsed.library ?? null,
             });
         }
 

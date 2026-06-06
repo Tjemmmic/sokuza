@@ -301,6 +301,49 @@ graph:
         expect(await presetStore.list()).toEqual([]);
     });
 
+    it('DELETE of ONE instance keeps deck + presets while siblings from the same template remain', async () => {
+        await writeFile(
+            join(templateDir, 'library', 'audit2.yaml'),
+            `graph:
+  nodes:
+    - id: a
+      type: ai.agent
+      config: { prompt: shared }
+  edges: []
+`,
+            'utf-8',
+        );
+        const { resetTemplateCache } = await import('../core/templates.js');
+        resetTemplateCache();
+
+        await configStore.updateRaw((config) => {
+            config.deck = ['audit2'];
+        });
+        // Two instances of the same library item ("Use Template" twice).
+        for (const name of ['my-audit2', 'my-audit2-2']) {
+            await server.inject({
+                method: 'POST',
+                url: '/api/workflows',
+                payload: { name, template: 'audit2', _libraryItem: 'audit2', trigger: { source: 'manual', event: 'manual' } },
+            });
+        }
+
+        // Delete just the first instance.
+        const del = await server.inject({ method: 'DELETE', url: '/api/workflows/my-audit2' });
+        expect(del.statusCode).toBe(200);
+
+        // The sibling still exists → deck entry and shared presets must survive.
+        const raw = yaml.load(await configStore.readRaw()) as Record<string, unknown>;
+        expect((raw.deck as string[]) ?? []).toContain('audit2');
+        expect((await presetStore.list()).length).toBeGreaterThan(0);
+
+        // Deleting the last instance now cascades the cleanup.
+        await server.inject({ method: 'DELETE', url: '/api/workflows/my-audit2-2' });
+        const rawAfter = yaml.load(await configStore.readRaw()) as Record<string, unknown>;
+        expect((rawAfter.deck as string[]) ?? []).not.toContain('audit2');
+        expect(await presetStore.list()).toEqual([]);
+    });
+
     // ─── POST /api/workflows/:name/toggle ───────────────────────────────
 
     const readWf = async (name: string): Promise<Record<string, unknown> | undefined> => {

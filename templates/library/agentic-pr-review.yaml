@@ -20,6 +20,13 @@
 
 description: Clone the repo, run a tool-using agent, post the result as a real GitHub Review (loop-compatible)
 icon: 🛠️
+library:
+  name: Agentic PR Review
+  category: pr-review
+  difficulty: medium
+  popular: true
+  tags: [ai, review, pr, agent, clone]
+  requiredIntegrations: [gh-cli]
 
 trigger:
   source: gh-cli

@@ -17,6 +17,13 @@
 
 description: Clone the PR, run your test command, comment the result
 icon: ⚙️
+library:
+  name: PR Test Runner
+  category: code-quality
+  difficulty: medium
+  popular: false
+  tags: [tests, ci, pr, shell]
+  requiredIntegrations: [gh-cli]
 
 trigger:
   source: gh-cli

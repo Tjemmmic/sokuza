@@ -21,6 +21,12 @@
 
 description: Run tests after a PR opens; fail the workflow loudly if they don't pass
 icon: 🛑
+library:
+  name: Flow.fail Demo
+  category: productivity
+  difficulty: easy
+  tags: [flow.fail, demo, ci]
+  requiredIntegrations: [github]
 
 trigger:
   source: gh-cli
