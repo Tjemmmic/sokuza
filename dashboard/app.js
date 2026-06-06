@@ -1264,6 +1264,7 @@ async function renderWorkflows(el) {
             <button class="btn ${hasInputs ? 'btn-primary' : 'btn-ghost'} btn-sm" onclick="openRunModal('${escJs(wf.name)}')" title="Run workflow manually">${hasInputs ? '▶ Run' : '▶'}</button>
             <button class="btn btn-ghost btn-sm" onclick="toggleWorkflow('${escJs(wf.name)}', ${wf.enabled === false})" title="${wf.enabled === false ? 'Enable — resume processing events' : 'Pause — stop processing events'}">${wf.enabled === false ? '▶' : '⏸'}</button>
             <button class="btn btn-ghost btn-sm" onclick="openWorkflowEditor('${escJs(wf.name)}')">Edit</button>
+            <button class="btn btn-ghost btn-sm" onclick="renameWorkflow('${escJs(wf.name)}')" title="Rename">✎</button>
             <button class="btn btn-ghost btn-sm" onclick="duplicateWorkflow('${escJs(wf.name)}')" title="Duplicate">⧉</button>
             <button class="btn btn-danger-outline btn-sm" onclick="deleteWorkflow('${escJs(wf.name)}')" title="Delete">🗑</button>`;
     };
@@ -1317,6 +1318,7 @@ async function renderWorkflows(el) {
                         <button class="btn ${hasInputs ? 'btn-primary' : 'btn-ghost'} btn-sm" onclick="openRunModal('${escJs(wf.name)}')" title="Run workflow manually">${hasInputs ? '▶ Run' : '▶'}</button>
                         <button class="btn btn-ghost btn-sm" onclick="toggleWorkflow('${escJs(wf.name)}', ${wf.enabled === false})" title="${wf.enabled === false ? 'Enable — resume processing events' : 'Pause — stop processing events'}">${wf.enabled === false ? '▶ Enable' : '⏸ Pause'}</button>
                         <button class="btn btn-ghost btn-sm" onclick="openWorkflowEditor('${escJs(wf.name)}')">Edit</button>
+                        <button class="btn btn-ghost btn-sm" onclick="renameWorkflow('${escJs(wf.name)}')">Rename</button>
                         <button class="btn btn-ghost btn-sm" onclick="duplicateWorkflow('${escJs(wf.name)}')">Duplicate</button>
                         <button class="btn btn-danger-outline btn-sm" onclick="deleteWorkflow('${escJs(wf.name)}')">Delete</button>
                     </div>
@@ -1349,6 +1351,39 @@ function getWorkflowViewMode() {
 window.setWorkflowViewMode = function (mode) {
     setUiPref('workflowView', mode);
     if (currentPage === 'workflows') renderWorkflows($('#content'));
+};
+
+// Rename a workflow. The server migrates run history + persisted reviews to
+// the new name (the name is the workflow's primary key everywhere).
+window.renameWorkflow = function (name) {
+    openModal('Rename Workflow', `
+        <p style="color:var(--text-secondary);margin-bottom:12px;font-size:13px">Rename <strong>${esc(name)}</strong>. Its run history and AI reviews move to the new name.</p>
+        <input type="text" id="rename-wf-input" class="form-input" value="${esc(name)}" style="width:100%;padding:10px 12px" onkeydown="if(event.key==='Enter')confirmRenameWorkflow('${escJs(name)}')">
+        <p id="rename-wf-err" style="color:#ef4444;font-size:12px;margin-top:8px;display:none"></p>
+    `, `
+        <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
+        <button class="btn btn-primary" onclick="confirmRenameWorkflow('${escJs(name)}')">Rename</button>
+    `);
+    setTimeout(() => { const i = $('#rename-wf-input'); if (i) { i.focus(); i.select(); } }, 50);
+};
+
+window.confirmRenameWorkflow = async function (oldName) {
+    const input = $('#rename-wf-input');
+    if (!input) return;
+    const newName = input.value.trim();
+    const errEl = $('#rename-wf-err');
+    const showErr = (m) => { if (errEl) { errEl.textContent = m; errEl.style.display = 'block'; } };
+    if (!newName) return showErr('Name is required');
+    if (!/^[a-zA-Z0-9_-]+$/.test(newName)) return showErr('Only letters, numbers, hyphens, and underscores are allowed');
+    if (newName === oldName) { closeModal(); return; }
+    try {
+        await api.post(`/api/workflows/${encodeURIComponent(oldName)}/rename`, { newName });
+        closeModal();
+        toast(`Renamed to "${newName}"`);
+        if (currentPage === 'workflows') renderWorkflows($('#content'));
+    } catch (err) {
+        showErr(err.message || 'Rename failed');
+    }
 };
 
 // ─── Workflow Editor ────────────────────────────────────────────────────────

@@ -273,6 +273,55 @@ export async function recordAddressReviewRun(
     await writeRecord(record, logger, baseDir);
 }
 
+/**
+ * Migrate persisted run records when a workflow is renamed: rewrite the
+ * `workflowName` field of every ai-review / address-review record that
+ * referenced the old name. Without this, the AI Reviews page's
+ * `?workflow=` filter would silently drop a renamed workflow's history.
+ *
+ * Best-effort, like the rest of this module — per-file failures are logged,
+ * never thrown. Returns the number of records updated.
+ */
+export async function renameWorkflowInRuns(
+    oldName: string,
+    newName: string,
+    logger: Logger,
+    baseDir?: string,
+): Promise<number> {
+    const root = baseDir ?? defaultRunsDir();
+    let updated = 0;
+    for (const action of ['ai-review', 'address-review'] as const) {
+        const actionRoot = join(root, action);
+        if (!existsSync(actionRoot)) continue;
+        let dateDirs: string[];
+        try {
+            dateDirs = (await readdir(actionRoot, { withFileTypes: true }))
+                .filter((d) => d.isDirectory())
+                .map((d) => d.name);
+        } catch { continue; }
+        for (const dateDir of dateDirs) {
+            const dirPath = join(actionRoot, dateDir);
+            let files: string[];
+            try { files = (await readdir(dirPath)).filter((f) => f.endsWith('.json')); }
+            catch { continue; }
+            for (const file of files) {
+                const filePath = join(dirPath, file);
+                const record = await readRunFile(filePath);
+                if (!record || record.workflowName !== oldName) continue;
+                record.workflowName = newName;
+                try {
+                    await writeFile(filePath, JSON.stringify(record, null, 2), 'utf-8');
+                    await chmod(filePath, 0o600).catch(() => undefined);
+                    updated++;
+                } catch (err) {
+                    logger.warn({ err, filePath }, 'Failed to migrate run record during workflow rename');
+                }
+            }
+        }
+    }
+    return updated;
+}
+
 export async function getAddressReviewRunById(
     id: string,
     baseDir?: string,

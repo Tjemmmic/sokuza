@@ -155,6 +155,63 @@ describe('/api/workflows CRUD reloads in-memory config', () => {
         expect(detail.statusCode).toBe(404);
     });
 
+    // ── Rename ─────────────────────────────────────────────────────────────
+    it('POST /:name/rename moves the workflow to the new name', async () => {
+        await server.inject({
+            method: 'POST',
+            url: '/api/workflows',
+            payload: { name: 'old-name', trigger: { source: 'manual', event: 'manual' }, graph: { nodes: [], edges: [] } },
+        });
+
+        const res = await server.inject({
+            method: 'POST',
+            url: '/api/workflows/old-name/rename',
+            payload: { newName: 'new-name' },
+        });
+        expect(res.statusCode).toBe(200);
+        expect(JSON.parse(res.payload).name).toBe('new-name');
+
+        // Old gone, new present.
+        expect((await server.inject({ method: 'GET', url: '/api/workflows/old-name/details' })).statusCode).toBe(404);
+        const moved = await server.inject({ method: 'GET', url: '/api/workflows/new-name/details' });
+        expect(moved.statusCode).toBe(200);
+        expect(JSON.parse(moved.payload).workflow?.name).toBe('new-name');
+    });
+
+    it('POST /:name/rename rejects a name that already exists (409)', async () => {
+        for (const name of ['flow-a', 'flow-b']) {
+            await server.inject({
+                method: 'POST',
+                url: '/api/workflows',
+                payload: { name, trigger: { source: 'manual', event: 'manual' }, graph: { nodes: [], edges: [] } },
+            });
+        }
+        const res = await server.inject({
+            method: 'POST',
+            url: '/api/workflows/flow-a/rename',
+            payload: { newName: 'flow-b' },
+        });
+        expect(res.statusCode).toBe(409);
+        // flow-a must be untouched after a rejected rename.
+        expect((await server.inject({ method: 'GET', url: '/api/workflows/flow-a/details' })).statusCode).toBe(200);
+    });
+
+    it('POST /:name/rename returns 404 for an unknown workflow and 400 for an invalid name', async () => {
+        expect((await server.inject({
+            method: 'POST', url: '/api/workflows/ghost/rename', payload: { newName: 'whatever' },
+        })).statusCode).toBe(404);
+
+        await server.inject({
+            method: 'POST',
+            url: '/api/workflows',
+            payload: { name: 'rename-bad', trigger: { source: 'manual', event: 'manual' }, graph: { nodes: [], edges: [] } },
+        });
+        const bad = await server.inject({
+            method: 'POST', url: '/api/workflows/rename-bad/rename', payload: { newName: 'has spaces!' },
+        });
+        expect(bad.statusCode).toBe(400);
+    });
+
     // ── Library install cascade ────────────────────────────────────────────
     // The dashboard "Install" flow POSTs the workflow with a `_libraryItem`
     // tag and a `template:` reference. The server walks the template's

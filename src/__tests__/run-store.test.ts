@@ -10,6 +10,7 @@ import {
     setAiReviewLabel,
     clearAiReviewLabel,
     aggregateAiReviewStats,
+    renameWorkflowInRuns,
     runStoreEvents,
     dateFromRunId,
     generateRunId,
@@ -98,6 +99,28 @@ describe('run-store', () => {
         const dir = join(tmpRoot, 'ai-review');
         const entries = await readdir(dir);
         expect(entries.sort()).toEqual(['2026-01-02', '2026-01-03']);
+    });
+
+    it('renameWorkflowInRuns migrates only the matching workflowName across dates', async () => {
+        await recordAiReviewRun(makeRecord({ id: 'a', createdAt: '2026-01-02T00:00:00.000Z', workflowName: 'old' }), logger, tmpRoot);
+        await recordAiReviewRun(makeRecord({ id: 'b', createdAt: '2026-01-03T00:00:00.000Z', workflowName: 'old' }), logger, tmpRoot);
+        await recordAiReviewRun(makeRecord({ id: 'c', createdAt: '2026-01-03T00:00:00.000Z', workflowName: 'keep' }), logger, tmpRoot);
+
+        const migrated = await renameWorkflowInRuns('old', 'new', logger, tmpRoot);
+        expect(migrated).toBe(2);
+
+        // The two "old" records now filter under "new"; "keep" is untouched.
+        const asNew = await listAiReviewRuns({ workflowName: 'new', baseDir: tmpRoot });
+        expect(asNew.map(r => r.id).sort()).toEqual(['a', 'b']);
+        const asOld = await listAiReviewRuns({ workflowName: 'old', baseDir: tmpRoot });
+        expect(asOld).toHaveLength(0);
+        const asKeep = await listAiReviewRuns({ workflowName: 'keep', baseDir: tmpRoot });
+        expect(asKeep.map(r => r.id)).toEqual(['c']);
+    });
+
+    it('renameWorkflowInRuns returns 0 when nothing references the old name', async () => {
+        await recordAiReviewRun(makeRecord({ id: 'x', workflowName: 'something-else' }), logger, tmpRoot);
+        expect(await renameWorkflowInRuns('absent', 'new', logger, tmpRoot)).toBe(0);
     });
 
     it('writes file with 0600 permissions', async () => {

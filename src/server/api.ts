@@ -387,6 +387,61 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
         return { ok: true, workflow: result.workflow };
     });
 
+    // Rename a workflow. The name is the primary key (config entry, run
+    // history, webhook deliveries, persisted AI reviews all reference it), so
+    // a rename is a small migration: rename the config entry, then carry the
+    // references along. Collision-checked so two workflows can't share a name.
+    server.post('/api/workflows/:name/rename', async (request, reply) => {
+        const { name } = request.params as { name: string };
+        const body = (request.body ?? {}) as { newName?: unknown };
+        const newName = typeof body.newName === 'string' ? body.newName.trim() : '';
+
+        if (!newName) {
+            return reply.status(400).send({ error: 'newName is required' });
+        }
+        if (!/^[a-zA-Z0-9_-]+$/.test(newName)) {
+            return reply.status(400).send({ error: 'newName may only contain letters, numbers, hyphens, and underscores' });
+        }
+        if (newName === name) {
+            return { ok: true, name }; // no-op rename
+        }
+
+        const outcome = await deps.configStore.updateRaw((config) => {
+            const workflows = ((config.workflows as unknown[]) ?? []) as Record<string, unknown>[];
+            const idx = workflows.findIndex((w) => w.name === name);
+            if (idx === -1) return 'not-found' as const;
+            if (workflows.some((w) => w.name === newName)) return 'conflict' as const;
+            workflows[idx].name = newName;
+            config.workflows = workflows;
+            return 'ok' as const;
+        });
+
+        if (outcome === 'not-found') {
+            return reply.status(404).send({ error: `Workflow "${name}" not found` });
+        }
+        if (outcome === 'conflict') {
+            return reply.status(409).send({ error: `A workflow named "${newName}" already exists` });
+        }
+
+        await deps.reloadConfig();
+
+        // Carry references along so history doesn't orphan under the old name.
+        try {
+            deps.getEngine().renameWorkflowReferences(name, newName);
+        } catch (err) {
+            logger.warn({ err, from: name, to: newName }, 'Failed to migrate in-memory references after rename');
+        }
+        try {
+            const { renameWorkflowInRuns } = await import('../core/run-store.js');
+            const migrated = await renameWorkflowInRuns(name, newName, logger);
+            logger.info({ from: name, to: newName, migrated }, 'Workflow renamed; migrated persisted run records');
+        } catch (err) {
+            logger.warn({ err, from: name, to: newName }, 'Failed to migrate persisted run records after rename');
+        }
+
+        return { ok: true, name: newName };
+    });
+
     // Quick enable/disable from the Workflows tab without opening the
     // editor. Body `{ enabled: bool }` sets it explicitly; an empty body
     // flips the current state (default is enabled, so a workflow with no

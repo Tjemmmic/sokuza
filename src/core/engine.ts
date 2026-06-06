@@ -457,6 +457,23 @@ export class SokuzaEngine {
         return this.runWorkflowByName(originalRun.workflowName, originalRun.inputs);
     }
 
+    /**
+     * Migrate in-memory references after a workflow is renamed so its run
+     * history and webhook-delivery log follow the new name (they're keyed by
+     * `workflowName`). The config entry itself is renamed by the API handler;
+     * this only fixes the engine's runtime state. Returns the count migrated.
+     */
+    renameWorkflowReferences(oldName: string, newName: string): number {
+        let migrated = 0;
+        for (const r of this.runHistory) {
+            if (r.workflowName === oldName) { r.workflowName = newName; migrated++; }
+        }
+        for (const d of this.webhookDeliveries) {
+            if (d.workflowName === oldName) { d.workflowName = newName; migrated++; }
+        }
+        return migrated;
+    }
+
     /** Replay a stored event by index (bypasses delivery ID dedup) */
     replayEvent(eventIndex: number): { ok: boolean; error?: string } {
         if (eventIndex < 0 || eventIndex >= this.recentEvents.length) {

@@ -276,4 +276,29 @@ describe('SokuzaEngine', () => {
             expect(result.error).toContain('not found');
         });
     });
+
+    describe('renameWorkflowReferences', () => {
+        it('moves in-memory run history from the old name to the new name', async () => {
+            // Seed a real run-history record by executing a workflow that
+            // exists in the on-disk config (runWorkflowByName reloads it).
+            await writeFile(
+                configPath,
+                'server:\n  port: 0\nintegrations: {}\nworkflows:\n' +
+                '  - name: wf-old\n    trigger: { source: manual, event: manual }\n' +
+                '    steps:\n      - action: log\n        params: {}\n',
+                'utf-8',
+            );
+            const engine = await createEngine();
+            engine.registerAction('log', vi.fn());
+
+            await engine.runWorkflowByName('wf-old');
+            expect(engine.getRunHistory('wf-old').length).toBeGreaterThan(0);
+
+            const migrated = engine.renameWorkflowReferences('wf-old', 'wf-new');
+
+            expect(migrated).toBeGreaterThan(0);
+            expect(engine.getRunHistory('wf-old')).toHaveLength(0);
+            expect(engine.getRunHistory('wf-new').length).toBeGreaterThan(0);
+        });
+    });
 });
