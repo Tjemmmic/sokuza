@@ -298,12 +298,18 @@ export async function renameWorkflowInRuns(
             dateDirs = (await readdir(actionRoot, { withFileTypes: true }))
                 .filter((d) => d.isDirectory())
                 .map((d) => d.name);
-        } catch { continue; }
+        } catch (err) {
+            logger.debug({ err, actionRoot }, 'Skipping action dir during rename migration');
+            continue;
+        }
         for (const dateDir of dateDirs) {
             const dirPath = join(actionRoot, dateDir);
             let files: string[];
             try { files = (await readdir(dirPath)).filter((f) => f.endsWith('.json')); }
-            catch { continue; }
+            catch (err) {
+                logger.debug({ err, dirPath }, 'Skipping date dir during rename migration');
+                continue;
+            }
             for (const file of files) {
                 const filePath = join(dirPath, file);
                 const record = await readRunFile(filePath);
