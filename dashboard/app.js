@@ -5257,7 +5257,9 @@ function connectSSE() {
                 if (list) {
                     const empty = list.querySelector('.empty-state');
                     if (empty) empty.remove();
-                    list.insertAdjacentHTML('afterbegin', renderEventCard(data));
+                    // `data` was just unshifted to events[0], so its Details /
+                    // Replay actions must reference index 0.
+                    list.insertAdjacentHTML('afterbegin', renderEventCard(data, 0));
                 }
             }
             // Refresh dashboard stats on new event
