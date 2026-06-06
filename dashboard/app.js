@@ -628,7 +628,7 @@ async function renderDashboard(el) {
             </div>
             <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px">
                 ${deck.map(id => {
-                    const item = libraryItems.find(i => i.id === id);
+                    const item = findLibraryItem(id);
                     if (!item) return '';
                     const wfName = getInstalledWorkflowName(item.id);
                     const isManual = ensureArray(item.defaultTrigger?.event).includes('manual');
@@ -3588,7 +3588,7 @@ function uniqueWorkflowName(base) {
 
 // Get all deck items that have PR triggers
 function getDeckPrItems() {
-    return deck.map(id => libraryItems.find(i => i.id === id)).filter(Boolean).filter(item => {
+    return deck.map(id => findLibraryItem(id)).filter(Boolean).filter(item => {
         const events = ensureArray(item.defaultTrigger?.event);
         return events.some(e => e?.startsWith('pull_request'));
     });
@@ -3596,7 +3596,7 @@ function getDeckPrItems() {
 
 // Get all deck items that have issue triggers
 function getDeckIssueItems() {
-    return deck.map(id => libraryItems.find(i => i.id === id)).filter(Boolean).filter(item => {
+    return deck.map(id => findLibraryItem(id)).filter(Boolean).filter(item => {
         const events = ensureArray(item.defaultTrigger?.event);
         return item.category === 'issue-management' || events.some(e => e?.startsWith('issues'));
     });
@@ -4868,7 +4868,7 @@ async function renderEvents(el) {
                 </div>
 
                 <div id="event-list" style="display:flex;flex-direction:column;gap:6px">
-                    ${filtered.length > 0 ? filtered.slice(0, 50).map(renderEventCard).join('') : '<div class="empty-state"><div class="empty-icon">📡</div><p class="empty-text">No events match your filter</p></div>'}
+                    ${filtered.length > 0 ? filtered.slice(0, 50).map(e => renderEventCard(e, events.indexOf(e))).join('') : '<div class="empty-state"><div class="empty-icon">📡</div><p class="empty-text">No events match your filter</p></div>'}
                 </div>
             </div>
 
@@ -4992,7 +4992,7 @@ window.rerenderEventList = function () {
     const filtered = filterEvents(events);
     const list = $('#event-list');
     if (list) list.innerHTML = filtered.length > 0
-        ? filtered.slice(0, 50).map(renderEventCard).join('')
+        ? filtered.slice(0, 50).map(e => renderEventCard(e, events.indexOf(e))).join('')
         : '<div class="empty-state"><div class="empty-icon">📡</div><p class="empty-text">No events match your filter</p></div>';
 };
 
