@@ -372,7 +372,11 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
             const workflows = ((config.workflows as unknown[]) ?? []) as Record<string, unknown>[];
             const idx = workflows.findIndex((w) => w.name === name);
             if (idx === -1) return { found: false as const, workflow: null as Record<string, unknown> | null };
-            workflows[idx] = { ...update, name: update.name ?? name };
+            // The name is the primary key. PUT must never rename — that would
+            // bypass the collision check + reference migration that only
+            // POST /api/workflows/:name/rename performs. Force the route's
+            // name regardless of what the body carries.
+            workflows[idx] = { ...update, name };
             config.workflows = workflows;
             return { found: true as const, workflow: workflows[idx] };
         });
@@ -502,7 +506,18 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
             if (typeof target._libraryItem === 'string') libraryItem = target._libraryItem;
             const filtered = workflows.filter((w) => w.name !== name);
             config.workflows = filtered;
-            if (libraryItem) stillReferenced = filtered.some((w) => w._libraryItem === libraryItem);
+            // A remaining sibling counts whether it carries the `_libraryItem`
+            // tag or only matches the legacy name convention (`my-<id>` / `<id>`),
+            // mirroring the dashboard's libraryInstanceNames — so deleting a
+            // tagged instance never strips deck/presets out from under an older
+            // untagged one created from the same recipe.
+            if (libraryItem) {
+                stillReferenced = filtered.some((w) =>
+                    w._libraryItem === libraryItem ||
+                    w.name === `my-${libraryItem}` ||
+                    w.name === libraryItem,
+                );
+            }
             return true;
         });
 
