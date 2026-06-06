@@ -320,6 +320,17 @@ function clearToken() {
     try { localStorage.removeItem(TOKEN_STORAGE_KEY); } catch {}
 }
 
+// ─── UI preferences ─────────────────────────────────────────────────────────
+// Small localStorage-backed store for view preferences (e.g. the Workflows
+// page view mode). Namespaced under `sokuza:ui:` and resilient to private-mode
+// localStorage throwing.
+function getUiPref(key, fallback) {
+    try { return localStorage.getItem(`sokuza:ui:${key}`) ?? fallback; } catch { return fallback; }
+}
+function setUiPref(key, value) {
+    try { localStorage.setItem(`sokuza:ui:${key}`, value); } catch {}
+}
+
 let dashboardToken = loadToken();
 
 function authedFetch(url, init = {}) {
@@ -1237,28 +1248,69 @@ async function renderWorkflows(el) {
         return recent.map(r => `<div style="font-size:11px;line-height:1.6">${runBadge(r)} <span style="color:var(--text-muted)">${timeAgo(r.enqueuedAt || r.startedAt)}</span>${r.error ? ` <span title="${esc(r.error)}" style="color:#ef4444;cursor:help">!</span>` : ''}</div>`).join('');
     }
 
-    el.innerHTML = `
-        <div class="page-header">
-            <div class="page-header-left">
-                <h1 class="page-title">Workflows</h1>
-                <p class="page-subtitle">${workflows.length} workflow${workflows.length !== 1 ? 's' : ''} configured</p>
-            </div>
-            <div class="btn-group">
-                <button class="btn btn-ghost" onclick="navigate('library')">📚 Browse Library</button>
-                <button class="btn btn-primary" onclick="openWorkflowEditor()">+ New Workflow</button>
-            </div>
-        </div>
-        ${workflows.length > 0 ? `<div class="table-wrap"><table>
+    const viewMode = getWorkflowViewMode();
+
+    // Shared bits so the three view modes stay consistent.
+    const wfSources = (wf) => Array.isArray(wf.trigger?.source) ? wf.trigger.source : [wf.trigger?.source || 'github'];
+    const wfTriggerText = (wf) => {
+        const evts = Array.isArray(wf.trigger?.event) ? wf.trigger.event : [wf.trigger?.event].filter(Boolean);
+        return evts.map(e => eventLabelMap[e] || e).join(', ');
+    };
+    const wfTypeBadge = (wf) => `${wf.template ? `<span class="badge badge-action">${esc(wf.template)}</span>` : '<span style="font-size:12px;color:var(--text-muted)">custom</span>'}${wf.enabled === false ? ' <span class="badge" style="background:rgba(239,68,68,0.15);color:#ef4444;border:1px solid rgba(239,68,68,0.3);font-size:10px">disabled</span>' : ''}`;
+    const wfStepCount = (wf) => wf.graph?.nodes?.length ?? wf.steps?.length ?? (wf.template ? '<span style="color:var(--text-muted);font-size:11px">(from template)</span>' : '—');
+    const wfActions = (wf) => {
+        const hasInputs = wf.inputs?.length > 0;
+        return `
+            <button class="btn ${hasInputs ? 'btn-primary' : 'btn-ghost'} btn-sm" onclick="openRunModal('${escJs(wf.name)}')" title="Run workflow manually">${hasInputs ? '▶ Run' : '▶'}</button>
+            <button class="btn btn-ghost btn-sm" onclick="toggleWorkflow('${escJs(wf.name)}', ${wf.enabled === false})" title="${wf.enabled === false ? 'Enable — resume processing events' : 'Pause — stop processing events'}">${wf.enabled === false ? '▶' : '⏸'}</button>
+            <button class="btn btn-ghost btn-sm" onclick="openWorkflowEditor('${escJs(wf.name)}')">Edit</button>
+            <button class="btn btn-ghost btn-sm" onclick="duplicateWorkflow('${escJs(wf.name)}')" title="Duplicate">⧉</button>
+            <button class="btn btn-danger-outline btn-sm" onclick="deleteWorkflow('${escJs(wf.name)}')" title="Delete">🗑</button>`;
+    };
+
+    const viewToggle = `
+        <div class="btn-group" role="group" aria-label="View mode" style="margin-right:8px">
+            ${[['list', '☰', 'List'], ['grid', '▦', 'Tiles'], ['compact', '≡', 'Compact']].map(([m, icon, label]) =>
+        `<button class="btn ${viewMode === m ? 'btn-primary' : 'btn-ghost'} btn-sm" title="${label} view" onclick="setWorkflowViewMode('${m}')">${icon}</button>`).join('')}
+        </div>`;
+
+    let bodyHtml;
+    if (workflows.length === 0) {
+        bodyHtml = `<div class="empty-state"><div class="empty-icon">⚡</div><p class="empty-text">No workflows yet</p><button class="btn btn-primary" onclick="openWorkflowEditor()">Create Your First Workflow</button></div>`;
+    } else if (viewMode === 'grid') {
+        bodyHtml = `<div class="card-grid card-grid-3">${workflows.map((wf) => `
+            <div class="card" style="flex-direction:column;align-items:stretch;gap:8px">
+                <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px">
+                    <strong style="cursor:pointer;color:var(--accent-hover)" onclick="openWorkflowEditor('${escJs(wf.name)}')">${esc(wf.name)}</strong>
+                    ${wf.inputs?.length > 0 ? '<span title="Has inputs — run from dashboard">🎮</span>' : ''}
+                </div>
+                <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">${sourceBadge(wfSources(wf)[0])}${wfSources(wf).length > 1 ? `<span style="font-size:10px;color:var(--text-muted)">+${wfSources(wf).length - 1}</span>` : ''} ${wfTypeBadge(wf)}</div>
+                <code style="font-size:11px;color:var(--text-secondary)">${esc(wfTriggerText(wf))}</code>
+                <div style="font-size:11px;color:var(--text-muted)">${wfStepCount(wf)} step(s)</div>
+                <div style="border-top:1px solid var(--border-color);padding-top:6px">${renderHistory(wf.name)}</div>
+                <div class="btn-group" style="flex-wrap:wrap">${wfActions(wf)}</div>
+            </div>`).join('')}</div>`;
+    } else if (viewMode === 'compact') {
+        bodyHtml = `<div class="card" style="flex-direction:column;align-items:stretch;padding:0">${workflows.map((wf, i) => `
+            <div style="display:flex;align-items:center;gap:10px;padding:7px 12px;${i > 0 ? 'border-top:1px solid var(--border-color)' : ''}">
+                <strong style="flex:1;min-width:0;cursor:pointer;color:var(--accent-hover);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" onclick="openWorkflowEditor('${escJs(wf.name)}')">${esc(wf.name)}</strong>
+                ${sourceBadge(wfSources(wf)[0])}
+                <code style="font-size:11px;color:var(--text-muted);max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(wfTriggerText(wf))}</code>
+                ${wf.enabled === false ? '<span class="badge" style="background:rgba(239,68,68,0.15);color:#ef4444;font-size:10px">off</span>' : ''}
+                <div class="btn-group">${wfActions(wf)}</div>
+            </div>`).join('')}</div>`;
+    } else {
+        bodyHtml = `<div class="table-wrap"><table>
             <thead><tr><th>Name</th><th>Source</th><th>Trigger</th><th>Type</th><th>Steps</th><th>Last Runs</th><th style="text-align:right">Actions</th></tr></thead>
             <tbody>${workflows.map((wf) => {
-                const hasInputs = wf.inputs?.length > 0;
-                const sources = Array.isArray(wf.trigger?.source) ? wf.trigger.source : [wf.trigger?.source || 'github'];
-                return `<tr>
+            const hasInputs = wf.inputs?.length > 0;
+            const sources = wfSources(wf);
+            return `<tr>
                 <td><strong style="cursor:pointer;color:var(--accent-hover)" onclick="openWorkflowEditor('${escJs(wf.name)}')">${esc(wf.name)}</strong>${hasInputs ? '<br><span style="font-size:10px;color:var(--text-muted)">🎮 has inputs — run from dashboard</span>' : ''}</td>
                 <td>${sourceBadge(sources[0])}${sources.length > 1 ? `<span style="font-size:10px;color:var(--text-muted)"> +${sources.length - 1}</span>` : ''}</td>
-                <td><code style="font-size:12px;color:var(--text-secondary)">${esc((() => { const evts = Array.isArray(wf.trigger?.event) ? wf.trigger.event : [wf.trigger?.event].filter(Boolean); return evts.map(e => eventLabelMap[e] || e).join(', '); })())}</code>${wf.trigger?.repo ? `<br><span style="font-size:11px;color:var(--text-muted)">${esc(Array.isArray(wf.trigger.repo) ? wf.trigger.repo.join(', ') : wf.trigger.repo)}</span>` : ''}</td>
-                <td>${wf.template ? `<span class="badge badge-action">${esc(wf.template)}</span>` : '<span style="font-size:12px;color:var(--text-muted)">custom</span>'}${wf.enabled === false ? ' <span class="badge" style="background:rgba(239,68,68,0.15);color:#ef4444;border:1px solid rgba(239,68,68,0.3);font-size:10px">disabled</span>' : ''}</td>
-                <td>${wf.graph?.nodes?.length ?? wf.steps?.length ?? (wf.template ? '<span style="color:var(--text-muted);font-size:11px">(from template)</span>' : '—')}</td>
+                <td><code style="font-size:12px;color:var(--text-secondary)">${esc(wfTriggerText(wf))}</code>${wf.trigger?.repo ? `<br><span style="font-size:11px;color:var(--text-muted)">${esc(Array.isArray(wf.trigger.repo) ? wf.trigger.repo.join(', ') : wf.trigger.repo)}</span>` : ''}</td>
+                <td>${wfTypeBadge(wf)}</td>
+                <td>${wfStepCount(wf)}</td>
                 <td>${renderHistory(wf.name)}</td>
                 <td style="text-align:right">
                     <div class="btn-group" style="justify-content:flex-end">
@@ -1270,9 +1322,34 @@ async function renderWorkflows(el) {
                     </div>
                 </td>
             </tr>`}).join('')}</tbody>
-        </table></div>` : `<div class="empty-state"><div class="empty-icon">⚡</div><p class="empty-text">No workflows yet</p><button class="btn btn-primary" onclick="openWorkflowEditor()">Create Your First Workflow</button></div>`}
+        </table></div>`;
+    }
+
+    el.innerHTML = `
+        <div class="page-header">
+            <div class="page-header-left">
+                <h1 class="page-title">Workflows</h1>
+                <p class="page-subtitle">${workflows.length} workflow${workflows.length !== 1 ? 's' : ''} configured</p>
+            </div>
+            <div class="btn-group">
+                ${viewToggle}
+                <button class="btn btn-ghost" onclick="navigate('library')">📚 Browse Library</button>
+                <button class="btn btn-primary" onclick="openWorkflowEditor()">+ New Workflow</button>
+            </div>
+        </div>
+        ${bodyHtml}
     `;
 }
+
+// Workflows page view mode (list / grid / compact), persisted per browser.
+function getWorkflowViewMode() {
+    const m = getUiPref('workflowView', 'list');
+    return ['list', 'grid', 'compact'].includes(m) ? m : 'list';
+}
+window.setWorkflowViewMode = function (mode) {
+    setUiPref('workflowView', mode);
+    if (currentPage === 'workflows') renderWorkflows($('#content'));
+};
 
 // ─── Workflow Editor ────────────────────────────────────────────────────────
 //
