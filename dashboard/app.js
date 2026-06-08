@@ -528,7 +528,12 @@ async function renderPage() {
             case 'issues': await renderIssues(el); break;
             case 'workflows': await renderWorkflows(el); break;
             case 'chat': await renderChat(el); break;
-            case 'terminal': await renderTerminal(el); break;
+            case 'terminal':
+                // terminal.js (loaded before app.js) defines this; guard anyway
+                // so a load-order regression degrades gracefully.
+                if (typeof window.renderTerminal === 'function') await window.renderTerminal(el);
+                else el.innerHTML = '<div class="empty-state"><p class="empty-text">Terminal module not loaded.</p></div>';
+                break;
 
             case 'library': await renderLibrary(el); break;
             case 'integrations': await renderIntegrations(el); break;

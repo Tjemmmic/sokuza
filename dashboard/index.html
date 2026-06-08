@@ -191,12 +191,15 @@
         </div>
     </div>
 
-    <script src="/dashboard/app.js"></script>
-    <script src="/dashboard/graph-logic.js"></script>
-    <script src="/dashboard/graph-editor.js"></script>
+    <!-- Terminal libs + terminal.js load BEFORE app.js so a direct load of
+         #terminal (app.js routes synchronously on load) finds renderTerminal
+         already defined. terminal.js only uses app.js globals at call time. -->
     <script src="/dashboard/vendor/xterm.js"></script>
     <script src="/dashboard/vendor/addon-fit.js"></script>
     <script src="/dashboard/terminal.js"></script>
+    <script src="/dashboard/app.js"></script>
+    <script src="/dashboard/graph-logic.js"></script>
+    <script src="/dashboard/graph-editor.js"></script>
 </body>
 
 </html>
