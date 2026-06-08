@@ -528,6 +528,7 @@ async function renderPage() {
             case 'issues': await renderIssues(el); break;
             case 'workflows': await renderWorkflows(el); break;
             case 'chat': await renderChat(el); break;
+            case 'terminal': await renderTerminal(el); break;
 
             case 'library': await renderLibrary(el); break;
             case 'integrations': await renderIntegrations(el); break;
@@ -5218,6 +5219,12 @@ function connectSSE() {
                 if (txt) txt.textContent = 'Connected';
                 return;
             }
+            // CLI transcripts + MCP bridge events are handled by terminal.js.
+            if (data.type === 'cli-transcript' || data.type === 'mcp-status'
+                || data.type === 'mcp-ask' || data.type === 'mcp-ask-answered') {
+                if (typeof window.handleTerminalEvent === 'function') window.handleTerminalEvent(data);
+                return;
+            }
             if (data.type === 'ai-review-run') {
                 if (currentPage === 'ai-reviews') {
                     // Coalesce bursts (e.g. label edits emit too) so we
@@ -5712,9 +5719,15 @@ async function renderAutoFix(el) {
 
         <h3 style="font-size:13px;color:var(--text-secondary);margin:24px 0 10px;letter-spacing:0.5px">WORKDIRS</h3>
         <div id="auto-fix-workdirs"></div>
+
+        <h3 style="font-size:13px;color:var(--text-secondary);margin:24px 0 10px;letter-spacing:0.5px">CLI TRANSCRIPTS</h3>
+        <div id="auto-fix-cli-transcripts"></div>
     `;
     await loadPricing();
     await Promise.all([loadAutoFixAddressRuns(), loadAutoFixWorkdirs()]);
+    if (typeof window.renderCliTranscriptsFeed === 'function') {
+        window.renderCliTranscriptsFeed($('#auto-fix-cli-transcripts'));
+    }
 }
 
 async function loadAutoFixAddressRuns() {
@@ -7939,7 +7952,7 @@ $$('.nav-link').forEach((link) => link.addEventListener('click', (e) => { e.prev
 window.navigate = navigate;
 
 // Hash routing: restore page from URL hash
-const validPages = ['dashboard', 'my-prs', 'issues', 'workflows', 'chat', 'library', 'integrations', 'ai-providers', 'events', 'queue', 'logs', 'system', 'settings'];
+const validPages = ['dashboard', 'my-prs', 'issues', 'workflows', 'chat', 'terminal', 'library', 'integrations', 'ai-providers', 'events', 'queue', 'logs', 'system', 'settings'];
 const hashPage = window.location.hash.replace('#', '');
 if (validPages.includes(hashPage)) currentPage = hashPage;
 window.addEventListener('hashchange', () => {
