@@ -63,6 +63,14 @@
             sessions = (await api.get('/api/pty/sessions')).sessions || [];
         } catch { /* engine may be momentarily unavailable */ }
 
+        // Re-seed pending human-in-the-loop questions so a page reload while
+        // an MCP `sokuza_ask_human` is long-polling doesn't strand it.
+        try {
+            const { asks } = await api.get('/api/mcp/asks');
+            pendingAsks.clear();
+            (asks || []).forEach((a) => pendingAsks.set(a.id, { prompt: a.prompt, source: a.source }));
+        } catch { /* ignore */ }
+
         el.innerHTML = `
             <div class="page-header">
                 <div class="page-header-left">

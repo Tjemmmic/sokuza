@@ -107,6 +107,22 @@ describe('SessionWatcher.ingest (byte-offset tailing)', () => {
         expect(events).toHaveLength(0);
     });
 
+    it('does not replay pre-existing content after start() seeds offsets', async () => {
+        const file = join(dir, 'pre.jsonl');
+        await writeFile(file, JSON.stringify({ message: { content: 'old' } }) + '\n');
+
+        watcher.start(); // seeds offset to the current file size
+        await watcher.ingest(file);
+        expect(events).toHaveLength(0); // nothing new since seed
+
+        await appendFile(file, JSON.stringify({ message: { content: 'fresh' } }) + '\n');
+        await watcher.ingest(file);
+        expect(events).toHaveLength(1);
+        expect(events[0].preview).toBe('fresh');
+
+        await watcher.stop();
+    });
+
     it('resets the offset when a file is truncated', async () => {
         const file = join(dir, 'rot.jsonl');
         await writeFile(file, JSON.stringify({ message: { content: 'first' } }) + '\n');

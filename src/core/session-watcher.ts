@@ -17,7 +17,7 @@
  */
 import chokidar, { type FSWatcher } from 'chokidar';
 import { readFile } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { existsSync, readdirSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, relative, basename, dirname } from 'node:path';
 import type { Logger } from 'pino';
@@ -76,6 +76,11 @@ export class SessionWatcher {
             );
             return;
         }
+        // Prime offsets for files that already exist so a restart only emits
+        // genuinely-new appends, not the entire backlog of in-flight sessions.
+        // Done synchronously before attaching handlers to avoid a race where a
+        // `change` fires before its offset is seeded.
+        this.seedOffsets();
         this.watcher = chokidar.watch(this.root, {
             ignoreInitial: true,
             persistent: true,
@@ -88,6 +93,26 @@ export class SessionWatcher {
         this.watcher.on('change', handle);
         this.watcher.on('error', (err) => this.logger.warn({ err }, 'Session watcher error'));
         this.logger.info({ root: this.root }, 'CLI session watcher started');
+    }
+
+    /** Record the current size of every existing `.jsonl` file so we tail from
+     *  the end on a restart rather than replaying historical entries. */
+    private seedOffsets(): void {
+        let entries: string[];
+        try {
+            entries = readdirSync(this.root, { recursive: true }) as string[];
+        } catch {
+            return;
+        }
+        for (const rel of entries) {
+            if (typeof rel !== 'string' || !rel.endsWith('.jsonl')) continue;
+            const abs = join(this.root, rel);
+            try {
+                this.offsets.set(abs, statSync(abs).size);
+            } catch {
+                /* file vanished mid-scan; ignore */
+            }
+        }
     }
 
     async stop(): Promise<void> {

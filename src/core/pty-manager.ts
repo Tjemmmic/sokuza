@@ -82,6 +82,11 @@ export class PTYManager extends EventEmitter {
 
     constructor(private readonly logger: Logger) {
         super();
+        // Each attached WebSocket adds a 'data' + 'exit' listener; with many
+        // concurrent terminal tabs that exceeds the default cap of 10 and logs
+        // a spurious MaxListenersExceededWarning. Listeners are cleaned up on
+        // socket close, so lifting the cap is safe.
+        this.setMaxListeners(0);
         const override = process.env.SOKUZA_PTY_ALLOWED_COMMANDS?.trim();
         if (override === '*') {
             this.allowed = null;

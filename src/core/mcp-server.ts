@@ -219,18 +219,20 @@ export class HttpEngineBridge implements EngineBridge {
         const { baseUrl, token } = await this.resolve();
         const create = await this.post('/api/mcp/ask', { prompt, source: opts.source });
         if (!create.ok) throw new Error(`engine returned ${create.status} for ask`);
-        const { id } = (await create.json()) as { id: string };
+        const { id } = (await create.json()) as { id?: string };
+        if (!id) throw new Error('engine did not return an ask id');
 
         const pollMs = opts.pollMs ?? 1500;
         const deadline = Date.now() + opts.timeoutMs;
         while (Date.now() < deadline) {
-            await delay(pollMs);
             const res = await fetch(`${baseUrl}/api/mcp/ask/${id}`, {
                 headers: { Authorization: `Bearer ${token}` },
             });
-            if (!res.ok) continue;
-            const data = (await res.json()) as { status: string; answer?: string };
-            if (data.status === 'answered') return data.answer ?? '';
+            if (res.ok) {
+                const data = (await res.json()) as { status: string; answer?: string };
+                if (data.status === 'answered') return data.answer ?? '';
+            }
+            await delay(pollMs);
         }
         throw new Error(
             'Timed out waiting for a human answer in the Sokuza dashboard. Open the dashboard and respond, then retry.',

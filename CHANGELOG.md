@@ -15,6 +15,13 @@ under a new `## [X.Y.Z] - YYYY-MM-DD` heading, bump `version` in
 `package.json`, commit, push to main. The release workflow tags +
 publishes automatically.
 
+### Added
+
+- **Interactive CLIs and MCP, brought into Sokuza.** Four parallel additions that don't touch existing headless workflows:
+  - **Terminal console.** A new **Terminal** page runs an interactive developer CLI (Claude Code, Gemini CLI, opencode, Codex, or a shell) in a real PTY on the Sokuza host and streams it to an xterm.js terminal over a WebSocket (`/api/pty/:id`). Spawn/list/kill via `POST /api/pty/spawn`, `GET /api/pty/sessions`, `DELETE /api/pty/:id`. The WebSocket upgrade and all PTY routes are gated by the existing bearer-token auth gate and DNS-rebinding Host guard; spawnable commands are restricted to an allow-list (override with `SOKUZA_PTY_ALLOWED_COMMANDS`). Requires the native `node-pty` dependency (a build toolchain at install time).
+  - **MCP server.** `sokuza mcp` runs a Model Context Protocol server over stdio (plug it into `~/.claude.json`). Tools: `sokuza_get_pr_context` (branch/repo/commit from local git), `sokuza_get_review_findings` (P1/P2/P3 issues from `~/.sokuza/runs/ai-review`), `sokuza_report_status` and `sokuza_ask_human` — the latter two bridge to a running engine via new authenticated `/api/mcp/*` endpoints, with `ask_human` parking the question in the dashboard and blocking until a human answers.
+  - **CLI session transcripts.** A watcher tails locally-run Claude Code transcripts (`~/.claude/projects/**/*.jsonl`, override with `SOKUZA_CLI_SESSIONS_DIR`) and mirrors entries live into the dashboard event stream — surfaced on the Terminal page and in an Auto-Fix "CLI Transcripts" feed.
+
 ### Fixed
 
 - **System page now reflects an applied update and offers a restart.** After "Update now" installs a new version, the running process keeps reporting the old version until it's restarted — so the page used to keep showing "Update now" (clickable indefinitely) with no sign anything had changed. The update snapshot now tracks the **installed** version (read from disk) separately from the **running** version: once they diverge it shows "restart to apply" and a **Restart to apply** button (reusing the service-restart flow), and stops offering "Update now" since the latest is already installed. The panel refreshes in place after an update so the state changes immediately without discarding the npm output. The `GET /api/system/update` response gains two additive fields for this: `installed` (the on-disk version) and `restartRequired`.
