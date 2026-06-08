@@ -15,6 +15,8 @@ under a new `## [X.Y.Z] - YYYY-MM-DD` heading, bump `version` in
 `package.json`, commit, push to main. The release workflow tags +
 publishes automatically.
 
+## [0.2.6] - 2026-06-08
+
 ### Added
 
 - **Workflows can be renamed.** A new **Rename** action (in every Workflows view) and a `POST /api/workflows/:name/rename` endpoint. Because the name is a workflow's primary key, the rename is a real migration: it collision-checks against existing names (409 on conflict), renames the config entry, and carries the references along — in-memory run history and webhook deliveries, plus persisted AI-review / address-review records on disk — so history no longer orphans under the old name.
