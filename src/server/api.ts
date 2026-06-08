@@ -9,10 +9,10 @@ import type { ConfigStore } from '../core/config-store.js';
 import { ARGS_STYLES } from '../core/args-styles.js';
 import { sanitizeProviderHeaders, maskProviderHeaders } from '../core/provider-headers.js';
 import type { LogStore } from '../core/log-store.js';
-import { VERSION } from '../version.js';
+import { VERSION, readInstalledVersion } from '../version.js';
 import { serviceStatus, installService, uninstallService, restartService, isServiceInstalled } from '../cli/service.js';
 import { runUpdateCommand, resolveEntryPath } from '../cli/update.js';
-import { readUpdateCache, refreshUpdateCache, isNewer } from '../cli/update-check.js';
+import { readUpdateCache, refreshUpdateCache, computeUpdateSnapshot } from '../cli/update-check.js';
 
 interface ApiDeps {
     logger: Logger;
@@ -1141,15 +1141,11 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
         return reply.status(202).send({ scheduled: true, platform: process.platform });
     });
 
-    /** Shape both `/update` GETs return so the UI can render one code path. */
+    /** Shape both `/update` GETs return so the UI can render one code path.
+     *  `VERSION` is the running process; `readInstalledVersion()` is what's on
+     *  disk now — they diverge after an in-place update before a restart. */
     function buildUpdateSnapshot(cache: { checkedAt: number; latest: string } | null) {
-        const latest = cache?.latest ?? null;
-        return {
-            current: VERSION,
-            latest,
-            checkedAt: cache?.checkedAt ?? null,
-            updateAvailable: latest ? isNewer(latest, VERSION) : false,
-        };
+        return computeUpdateSnapshot(VERSION, readInstalledVersion(), cache);
     }
 
     server.get('/api/system/update', async () => {

@@ -6439,6 +6439,53 @@ window.clearLogBuffer = function () {
 // ═════════════════════════════════════════════════════════════════════════════
 // SYSTEM (autostart + updates — mirrors `sokuza service` / `sokuza update`)
 // ═════════════════════════════════════════════════════════════════════════════
+
+// Render the body of the Updates panel from an /api/system/update snapshot.
+// Factored out so it can be re-rendered in place after "Update now" without
+// rebuilding the whole page (which would discard the npm output panel).
+//
+// Three states, driven by the snapshot's running (`current`) / `installed` /
+// `latest` versions:
+//   - restartRequired (installed > running): an update was applied to disk but
+//     the process is still on the old version — offer "Restart to apply".
+//   - updateAvailable (latest > installed): a newer release exists — "Update now".
+//   - otherwise: up to date.
+function updatePanelHtml(upd, serviceInstalled) {
+    if (upd?.error) {
+        return `<p style="color:var(--text-muted)">${esc(upd.error)}</p>`;
+    }
+    const mut = (s) => `<span style="color:var(--text-muted)">${s}</span>`;
+    const rows = [`<p>${mut('Running:')} <code>sokuza ${esc(upd.current ?? '')}</code></p>`];
+
+    if (upd.restartRequired) {
+        rows.push(`<p>${mut('Installed:')} <code>${esc(upd.installed ?? '')}</code> <span class="badge badge-warning">restart to apply</span></p>`);
+    }
+    rows.push(upd.latest
+        ? `<p>${mut('Latest:')} <code>${esc(upd.latest)}</code> ${upd.updateAvailable ? '<span class="badge badge-success">update available</span>' : '<span class="badge">up to date</span>'}</p>`
+        : `<p>${mut('Latest:')} ${mut('no check yet')}</p>`);
+    if (upd.checkedAt) {
+        rows.push(`<p>${mut('Checked:')} ${esc(new Date(upd.checkedAt).toLocaleString())}</p>`);
+    }
+    if (upd.restartRequired) {
+        rows.push(`<p style="color:var(--text-muted);font-size:12px">Update installed. Restart sokuza to run version ${esc(upd.installed ?? '')}.</p>`);
+    }
+
+    const buttons = [`<button class="btn btn-ghost" onclick="systemCheckUpdate()">Check for updates</button>`];
+    if (upd.restartRequired) {
+        // An update is already installed — restart is the one primary action.
+        // Don't also offer "Update now": running a second install on top of a
+        // pending-but-not-applied update is confusing and serves no purpose
+        // until the process is bounced onto what's already on disk.
+        buttons.push(serviceInstalled
+            ? `<button class="btn btn-primary" onclick="systemServiceRestart(this)">Restart to apply</button>`
+            : `<span style="font-size:12px;color:var(--text-muted)">Restart sokuza to apply</span>`);
+    } else if (upd.updateAvailable) {
+        buttons.push(`<button class="btn btn-primary" onclick="systemRunUpdate()">Update now</button>`);
+    }
+
+    return rows.join('') + `<div class="btn-group" style="margin-top:12px">${buttons.join('')}</div>`;
+}
+
 async function renderSystem(el) {
     const [info, svc, upd] = await Promise.all([
         api.get('/api/system/info').catch((e) => ({ error: e.message })),
@@ -6474,23 +6521,7 @@ async function renderSystem(el) {
             </div>
         `;
 
-    const updBlock = upd?.error
-        ? `<p style="color:var(--text-muted)">${esc(upd.error)}</p>`
-        : `
-            <p><span style="color:var(--text-muted)">Current:</span> <code>sokuza ${esc(upd.current ?? '')}</code></p>
-            ${upd.latest
-                ? `<p><span style="color:var(--text-muted)">Latest:</span> <code>${esc(upd.latest)}</code> ${upd.updateAvailable ? '<span class="badge badge-success">update available</span>' : '<span class="badge">up to date</span>'}</p>`
-                : `<p><span style="color:var(--text-muted)">Latest:</span> <span style="color:var(--text-muted)">no check yet</span></p>`
-            }
-            ${upd.checkedAt
-                ? `<p><span style="color:var(--text-muted)">Checked:</span> ${esc(new Date(upd.checkedAt).toLocaleString())}</p>`
-                : ''
-            }
-            <div class="btn-group" style="margin-top:12px">
-                <button class="btn btn-ghost" onclick="systemCheckUpdate()">Check for updates</button>
-                ${upd.updateAvailable ? `<button class="btn btn-primary" onclick="systemRunUpdate()">Update now</button>` : ''}
-            </div>
-        `;
+    const updBlock = updatePanelHtml(upd, !!svcStatus?.installed);
 
     el.innerHTML = `
         <div class="page-header">
@@ -6516,7 +6547,7 @@ async function renderSystem(el) {
 
             <div class="panel">
                 <div class="panel-header"><span class="panel-title">Updates</span></div>
-                <div class="panel-body" style="font-size:13px;line-height:1.8">${updBlock}</div>
+                <div class="panel-body" id="system-update-panel" style="font-size:13px;line-height:1.8">${updBlock}</div>
             </div>
         </div>
 
@@ -6635,6 +6666,23 @@ window.systemRunUpdate = async function () {
         }
         if (result.ok) {
             toast('Update complete. Restart sokuza to apply the new version.');
+            // Refresh just the Updates panel so it flips from "Update now" to
+            // "Restart to apply" (the installed version is now ahead of the
+            // running one). Re-rendering the whole page would discard the npm
+            // output panel above, so update in place.
+            try {
+                const [freshUpd, freshSvc] = await Promise.all([
+                    api.get('/api/system/update').catch(() => null),
+                    api.get('/api/system/service').catch(() => null),
+                ]);
+                // Normalize the service response the same way renderSystem does
+                // (`const svcStatus = svc?.status`) so both paths read identically.
+                const freshSvcStatus = freshSvc?.status;
+                const panel = document.getElementById('system-update-panel');
+                if (panel && freshUpd) {
+                    panel.innerHTML = updatePanelHtml(freshUpd, !!freshSvcStatus?.installed);
+                }
+            } catch { /* leave the panel as-is; the toast already conveyed success */ }
         } else if (result.reason === 'source') {
             toast('Update refused: this sokuza is running from a source checkout — use git pull && npm run build.', 'error');
         } else if (result.reason === 'missing-command') {
