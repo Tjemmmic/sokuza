@@ -62,6 +62,11 @@ interface PtySession {
 const DEFAULT_COLS = 80;
 const DEFAULT_ROWS = 24;
 
+/** Upper bound on exited sessions retained for late-attach exit-code reads.
+ *  A timer drops each ~30s after exit; this caps a rapid spawn/exit burst
+ *  that could otherwise outrun the timers. */
+const MAX_EXITED_RETAINED = 50;
+
 /** Built-in allow-list: the interactive CLIs this feature targets, plus the
  *  common shells a user might want a raw terminal for. */
 export const DEFAULT_ALLOWED_COMMANDS: readonly string[] = [
@@ -100,7 +105,13 @@ export class PTYManager extends EventEmitter {
     /** True if `command` is permitted to be spawned. */
     isAllowed(command: string): boolean {
         if (this.allowed === null) return true;
-        return this.allowed.has(basename(command));
+        // Reject anything path-qualified: only bare names resolved via PATH
+        // are accepted. Otherwise `/tmp/bash` would pass on its basename while
+        // executing an attacker-controlled binary — defeating the whole point
+        // of the allow-list. node-pty.spawn receives the original string, so
+        // the check must reject the string we'd actually run.
+        if (basename(command) !== command) return false;
+        return this.allowed.has(command);
     }
 
     /** The human-readable allow-list, for surfacing in API/UI errors. */
@@ -138,6 +149,7 @@ export class PTYManager extends EventEmitter {
             throw new Error(`cwd does not exist or is not a directory: ${opts.cwd}`);
         }
 
+        this.pruneExitedSessions();
         const pty = await this.loadPty();
         const cols = clampDimension(opts.cols, DEFAULT_COLS);
         const rows = clampDimension(opts.rows, DEFAULT_ROWS);
@@ -226,6 +238,16 @@ export class PTYManager extends EventEmitter {
         return [...this.sessions.values()]
             .map((s) => s.info)
             .filter((info) => info.status === 'running');
+    }
+
+    /** Drop the oldest exited sessions beyond MAX_EXITED_RETAINED. The Map
+     *  preserves insertion order, so the first matches are the oldest. */
+    private pruneExitedSessions(): void {
+        const exited = [...this.sessions.values()].filter((s) => s.info.status === 'exited');
+        const overflow = exited.length - MAX_EXITED_RETAINED;
+        for (let i = 0; i < overflow; i++) {
+            this.sessions.delete(exited[i].info.id);
+        }
     }
 
     private requireRunning(id: string): PtySession {

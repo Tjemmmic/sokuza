@@ -14,9 +14,18 @@ describe('PTYManager allow-list', () => {
         const m = new PTYManager(logger);
         for (const cmd of DEFAULT_ALLOWED_COMMANDS) expect(m.isAllowed(cmd)).toBe(true);
         expect(m.isAllowed('rm')).toBe(false);
-        // Allow-list checks the basename, not the full path.
-        expect(m.isAllowed('/usr/bin/bash')).toBe(true);
+        // Path-qualified commands are rejected even when the basename is
+        // allowed — otherwise /tmp/bash would bypass the allow-list.
+        expect(m.isAllowed('/usr/bin/bash')).toBe(false);
+        expect(m.isAllowed('./bash')).toBe(false);
+        expect(m.isAllowed('/tmp/bash')).toBe(false);
         expect(m.isAllowed('/usr/bin/rm')).toBe(false);
+    });
+
+    it('allows path-qualified commands only when the allow-list is "*"', () => {
+        process.env.SOKUZA_PTY_ALLOWED_COMMANDS = '*';
+        const m = new PTYManager(logger);
+        expect(m.isAllowed('/tmp/anything')).toBe(true);
     });
 
     it('honours an env override', () => {

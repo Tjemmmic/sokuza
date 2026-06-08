@@ -19,6 +19,7 @@
  *   GET    /api/pty/:id  (WS)  — attach: stream output, accept input/resize
  */
 import fastifyWebsocket from '@fastify/websocket';
+import { basename } from 'node:path';
 import type { FastifyInstance } from 'fastify';
 import type { Logger } from 'pino';
 import type { PTYManager } from '../core/pty-manager.js';
@@ -47,10 +48,12 @@ interface SpawnBody {
 }
 
 /** Default interactive command when the caller doesn't specify one — the
- *  user's login shell, falling back to bash. */
+ *  user's login shell, falling back to bash. Returns the BASENAME (PATH-
+ *  resolved) so it satisfies the allow-list, which rejects path-qualified
+ *  commands (e.g. SHELL=/bin/bash → "bash"). */
 function defaultCommand(): string {
-    const shell = process.env.SHELL;
-    if (shell && shell.trim()) return shell.trim();
+    const shell = process.env.SHELL?.trim();
+    if (shell) return basename(shell);
     return 'bash';
 }
 
