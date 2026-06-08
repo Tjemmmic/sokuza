@@ -4,6 +4,23 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import vm from 'node:vm';
 
+// Extract a top-level `function <name>(...) {...}` from source by counting
+// braces from its opening `{` to the matching close. More robust than a
+// non-greedy regex (which truncates at the first newline-then-`}`); fine here
+// because neither target function has an unbalanced brace inside a string.
+function extractFunction(src: string, name: string): string {
+    const start = src.indexOf(`function ${name}(`);
+    if (start === -1) throw new Error(`function ${name} not found in app.js`);
+    const open = src.indexOf('{', start);
+    if (open === -1) throw new Error(`opening brace not found for ${name}`);
+    let depth = 0;
+    for (let i = open; i < src.length; i++) {
+        if (src[i] === '{') depth++;
+        else if (src[i] === '}' && --depth === 0) return src.slice(start, i + 1);
+    }
+    throw new Error(`unbalanced braces for ${name}`);
+}
+
 // updatePanelHtml lives in app.js (a bundler-less browser file full of DOM
 // globals we can't evaluate wholesale). Extract just that function plus its
 // lone dependency `esc` and run them in a vm — exercising exactly the bytes
@@ -11,11 +28,10 @@ import vm from 'node:vm';
 function loadUpdatePanelHtml(): (upd: unknown, serviceInstalled: boolean) => string {
     const here = dirname(fileURLToPath(import.meta.url));
     const src = readFileSync(join(here, '../../dashboard/app.js'), 'utf8');
-    const escM = src.match(/function esc\(s\) \{[\s\S]*?\n\}/);
-    const fnM = src.match(/function updatePanelHtml\(upd, serviceInstalled\) \{[\s\S]*?\n\}/);
-    if (!escM || !fnM) throw new Error('updatePanelHtml/esc not found in app.js');
+    const esc = extractFunction(src, 'esc');
+    const fn = extractFunction(src, 'updatePanelHtml');
     const sandbox: { updatePanelHtml?: (u: unknown, s: boolean) => string } = {};
-    vm.runInNewContext(`${escM[0]}; ${fnM[0]}; this.updatePanelHtml = updatePanelHtml;`, sandbox);
+    vm.runInNewContext(`${esc}; ${fn}; this.updatePanelHtml = updatePanelHtml;`, sandbox);
     return sandbox.updatePanelHtml!;
 }
 
@@ -66,11 +82,14 @@ describe('updatePanelHtml', () => {
         expect(html).toContain('Restart sokuza to apply');
     });
 
-    it('both states: installed ahead of running AND a newer release → both buttons', () => {
+    it('restartRequired takes priority over updateAvailable: shows Restart, hides Update now', () => {
+        // Installed is ahead of running AND an even newer release exists. Restart
+        // is the single primary action — offering "Update now" on a pending,
+        // not-yet-applied update would just stack another install.
         const html = updatePanelHtml(
             { current: '0.2.6', installed: '0.3.0', latest: '0.4.0', updateAvailable: true, restartRequired: true, checkedAt: 1 }, true);
-        expect(html).toContain(UPDATE_NOW);
         expect(html).toContain(RESTART_BUTTON);
+        expect(html).not.toContain(UPDATE_NOW);
     });
 
     it('always offers a Check for updates button, even with no prior check', () => {

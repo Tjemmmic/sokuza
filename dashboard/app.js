@@ -6471,13 +6471,16 @@ function updatePanelHtml(upd, serviceInstalled) {
     }
 
     const buttons = [`<button class="btn btn-ghost" onclick="systemCheckUpdate()">Check for updates</button>`];
-    if (upd.updateAvailable) {
-        buttons.push(`<button class="btn btn-primary" onclick="systemRunUpdate()">Update now</button>`);
-    }
     if (upd.restartRequired) {
+        // An update is already installed — restart is the one primary action.
+        // Don't also offer "Update now": running a second install on top of a
+        // pending-but-not-applied update is confusing and serves no purpose
+        // until the process is bounced onto what's already on disk.
         buttons.push(serviceInstalled
             ? `<button class="btn btn-primary" onclick="systemServiceRestart(this)">Restart to apply</button>`
             : `<span style="font-size:12px;color:var(--text-muted)">Restart sokuza to apply</span>`);
+    } else if (upd.updateAvailable) {
+        buttons.push(`<button class="btn btn-primary" onclick="systemRunUpdate()">Update now</button>`);
     }
 
     return rows.join('') + `<div class="btn-group" style="margin-top:12px">${buttons.join('')}</div>`;
@@ -6672,9 +6675,12 @@ window.systemRunUpdate = async function () {
                     api.get('/api/system/update').catch(() => null),
                     api.get('/api/system/service').catch(() => null),
                 ]);
+                // Normalize the service response the same way renderSystem does
+                // (`const svcStatus = svc?.status`) so both paths read identically.
+                const freshSvcStatus = freshSvc?.status;
                 const panel = document.getElementById('system-update-panel');
                 if (panel && freshUpd) {
-                    panel.innerHTML = updatePanelHtml(freshUpd, !!freshSvc?.status?.installed);
+                    panel.innerHTML = updatePanelHtml(freshUpd, !!freshSvcStatus?.installed);
                 }
             } catch { /* leave the panel as-is; the toast already conveyed success */ }
         } else if (result.reason === 'source') {
