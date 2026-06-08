@@ -13,6 +13,7 @@ import { VERSION, readInstalledVersion } from '../version.js';
 import { serviceStatus, installService, uninstallService, restartService, isServiceInstalled } from '../cli/service.js';
 import { runUpdateCommand, resolveEntryPath } from '../cli/update.js';
 import { readUpdateCache, refreshUpdateCache, computeUpdateSnapshot } from '../cli/update-check.js';
+import { McpAskStore } from '../core/mcp-ask-store.js';
 
 interface ApiDeps {
     logger: Logger;
@@ -2052,6 +2053,55 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
         });
 
         try { reply.raw.end(); } catch { /* already closed */ }
+    });
+
+    // ─── MCP bridge ─────────────────────────────────────────────────────
+    // Endpoints the `sokuza mcp` stdio server calls to reach this running
+    // engine: push a status line to the dashboard, and ask a human a
+    // question (parked here, answered from the dashboard, long-polled by
+    // the MCP tool). State is process-local and ephemeral.
+    const mcpAsks = new McpAskStore();
+
+    server.post('/api/mcp/status', async (request, reply) => {
+        const body = (request.body ?? {}) as { message?: unknown; level?: unknown; source?: unknown };
+        const message = typeof body.message === 'string' ? body.message.trim() : '';
+        if (!message) return reply.status(400).send({ error: 'message is required' });
+        const level = body.level === 'warn' || body.level === 'error' ? body.level : 'info';
+        const source = typeof body.source === 'string' ? body.source : 'mcp';
+        deps.broadcastEvent({ type: 'mcp-status', source, level, message, timestamp: new Date().toISOString() });
+        logger.info({ source, level, message }, 'MCP status report');
+        return { ok: true };
+    });
+
+    server.post('/api/mcp/ask', async (request, reply) => {
+        const body = (request.body ?? {}) as { prompt?: unknown; source?: unknown };
+        const prompt = typeof body.prompt === 'string' ? body.prompt.trim() : '';
+        if (!prompt) return reply.status(400).send({ error: 'prompt is required' });
+        const source = typeof body.source === 'string' ? body.source : undefined;
+        const ask = mcpAsks.create(prompt, source);
+        deps.broadcastEvent({ type: 'mcp-ask', id: ask.id, prompt: ask.prompt, source, timestamp: ask.createdAt });
+        return reply.status(201).send({ id: ask.id });
+    });
+
+    server.get('/api/mcp/asks', async () => {
+        return { asks: mcpAsks.listPending() };
+    });
+
+    server.get('/api/mcp/ask/:id', async (request, reply) => {
+        const { id } = request.params as { id: string };
+        const ask = mcpAsks.get(id);
+        if (!ask) return reply.status(404).send({ error: 'unknown ask' });
+        return { status: ask.status, prompt: ask.prompt, answer: ask.answer };
+    });
+
+    server.post('/api/mcp/ask/:id/answer', async (request, reply) => {
+        const { id } = request.params as { id: string };
+        const body = (request.body ?? {}) as { answer?: unknown };
+        const answer = typeof body.answer === 'string' ? body.answer : '';
+        const ask = mcpAsks.answer(id, answer);
+        if (!ask) return reply.status(404).send({ error: 'unknown ask' });
+        deps.broadcastEvent({ type: 'mcp-ask-answered', id, timestamp: new Date().toISOString() });
+        return { ok: true, ask };
     });
 
     // ─── Queue ──────────────────────────────────────────────────────────
