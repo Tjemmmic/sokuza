@@ -15,6 +15,10 @@ under a new `## [X.Y.Z] - YYYY-MM-DD` heading, bump `version` in
 `package.json`, commit, push to main. The release workflow tags +
 publishes automatically.
 
+### Fixed
+
+- **System page now reflects an applied update and offers a restart.** After "Update now" installs a new version, the running process keeps reporting the old version until it's restarted — so the page used to keep showing "Update now" (clickable indefinitely) with no sign anything had changed. The update snapshot now tracks the **installed** version (read from disk) separately from the **running** version: once they diverge it shows "restart to apply" and a **Restart to apply** button (reusing the service-restart flow), and stops offering "Update now" since the latest is already installed. The panel refreshes in place after an update so the state changes immediately without discarding the npm output.
+
 ## [0.2.6] - 2026-06-08
 
 ### Added

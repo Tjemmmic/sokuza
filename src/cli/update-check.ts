@@ -125,6 +125,45 @@ export function isNewer(latest: string, current: string): boolean {
     return compareSemver(latest, current) > 0;
 }
 
+export interface UpdateSnapshot {
+    /** Version of the running process. */
+    current: string;
+    /** Version installed on disk right now (may be ahead of `current`). */
+    installed: string;
+    /** Latest published version per the cache, or null if never checked. */
+    latest: string | null;
+    checkedAt: number | null;
+    /** A newer release than what's installed is available to fetch. */
+    updateAvailable: boolean;
+    /** The installed package is newer than the running process — restart applies it. */
+    restartRequired: boolean;
+}
+
+/**
+ * Build the update snapshot the dashboard's System page renders. Pure — the
+ * caller passes the running and on-disk installed versions explicitly so the
+ * branching logic is testable without touching the filesystem or the registry.
+ *
+ * `updateAvailable` compares the registry's latest against what's *installed*
+ * (not what's running), so once an update has been fetched the button stops
+ * offering it; `restartRequired` then takes over until the process is bounced.
+ */
+export function computeUpdateSnapshot(
+    running: string,
+    installed: string,
+    cache: { checkedAt: number; latest: string } | null,
+): UpdateSnapshot {
+    const latest = cache?.latest ?? null;
+    return {
+        current: running,
+        installed,
+        latest,
+        checkedAt: cache?.checkedAt ?? null,
+        updateAvailable: latest ? isNewer(latest, installed) : false,
+        restartRequired: isNewer(installed, running),
+    };
+}
+
 /**
  * Compare two semver-ish strings. Positive result means `a` is newer than
  * `b`. Handles `X.Y.Z` and `X.Y.Z-prerelease`; not spec-complete — we treat

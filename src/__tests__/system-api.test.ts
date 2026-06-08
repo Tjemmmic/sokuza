@@ -94,6 +94,10 @@ describe('/api/system/* routes', () => {
         expect(body).toHaveProperty('latest');
         expect(body).toHaveProperty('checkedAt');
         expect(typeof body.updateAvailable).toBe('boolean');
+        // The running process and the on-disk install are the same package in
+        // the test, so there's nothing to restart-to-apply.
+        expect(body.installed).toBe(VERSION);
+        expect(body.restartRequired).toBe(false);
     });
 });
 
