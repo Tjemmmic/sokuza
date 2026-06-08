@@ -668,7 +668,7 @@ export class SokuzaEngine {
                 for (const cb of this.eventSubscribers) cb(event);
             },
         });
-        this.sessionWatcher.start();
+        await this.sessionWatcher.start();
 
         const { port: preferredPort } = this.config.server;
         const host = this.config.server.host ?? '127.0.0.1';

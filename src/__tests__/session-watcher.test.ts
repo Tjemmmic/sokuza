@@ -111,7 +111,7 @@ describe('SessionWatcher.ingest (byte-offset tailing)', () => {
         const file = join(dir, 'pre.jsonl');
         await writeFile(file, JSON.stringify({ message: { content: 'old' } }) + '\n');
 
-        watcher.start(); // seeds offset to the current file size
+        await watcher.start(); // seeds offset to the current file size
         await watcher.ingest(file);
         expect(events).toHaveLength(0); // nothing new since seed
 

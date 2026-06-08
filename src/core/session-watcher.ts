@@ -16,8 +16,8 @@
  * tailed by byte offset so only newly-appended, complete lines are emitted.
  */
 import chokidar, { type FSWatcher } from 'chokidar';
-import { readFile } from 'node:fs/promises';
-import { existsSync, readdirSync, statSync } from 'node:fs';
+import { open, readdir, stat } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, relative, basename, dirname } from 'node:path';
 import type { Logger } from 'pino';
@@ -57,6 +57,9 @@ export function defaultTranscriptRoot(): string {
 export class SessionWatcher {
     private watcher: FSWatcher | null = null;
     private offsets = new Map<string, number>();
+    /** Per-file ingest chains so two rapid events for the same file can't both
+     *  read the same offset and emit duplicate entries. */
+    private chains = new Map<string, Promise<void>>();
     private readonly root: string;
     private readonly logger: Logger;
     private readonly onEvent: TranscriptListener;
@@ -67,7 +70,7 @@ export class SessionWatcher {
         this.onEvent = opts.onEvent;
     }
 
-    start(): void {
+    async start(): Promise<void> {
         if (this.watcher) return;
         if (!existsSync(this.root)) {
             this.logger.info(
@@ -78,9 +81,9 @@ export class SessionWatcher {
         }
         // Prime offsets for files that already exist so a restart only emits
         // genuinely-new appends, not the entire backlog of in-flight sessions.
-        // Done synchronously before attaching handlers to avoid a race where a
-        // `change` fires before its offset is seeded.
-        this.seedOffsets();
+        // Awaited before attaching handlers so a `change` can't fire before
+        // its offset is seeded.
+        await this.seedOffsets();
         this.watcher = chokidar.watch(this.root, {
             ignoreInitial: true,
             persistent: true,
@@ -96,11 +99,12 @@ export class SessionWatcher {
     }
 
     /** Record the current size of every existing `.jsonl` file so we tail from
-     *  the end on a restart rather than replaying historical entries. */
-    private seedOffsets(): void {
+     *  the end on a restart rather than replaying historical entries.
+     *  Async so it never blocks the event loop during engine startup. */
+    private async seedOffsets(): Promise<void> {
         let entries: string[];
         try {
-            entries = readdirSync(this.root, { recursive: true }) as string[];
+            entries = await readdir(this.root, { recursive: true }) as string[];
         } catch {
             return;
         }
@@ -108,7 +112,7 @@ export class SessionWatcher {
             if (typeof rel !== 'string' || !rel.endsWith('.jsonl')) continue;
             const abs = join(this.root, rel);
             try {
-                this.offsets.set(abs, statSync(abs).size);
+                this.offsets.set(abs, (await stat(abs)).size);
             } catch {
                 /* file vanished mid-scan; ignore */
             }
@@ -120,41 +124,67 @@ export class SessionWatcher {
         await this.watcher.close();
         this.watcher = null;
         this.offsets.clear();
+        this.chains.clear();
     }
 
     /**
      * Tail `filePath` from the last byte offset and emit one event per newly
-     * appended, complete JSONL line. Public for direct testing (no chokidar).
+     * appended, complete JSONL line. Serialized per file so concurrent
+     * filesystem events can't double-read the same offset. Public for direct
+     * testing (no chokidar).
      */
-    async ingest(filePath: string): Promise<void> {
+    ingest(filePath: string): Promise<void> {
+        const prev = this.chains.get(filePath) ?? Promise.resolve();
+        const next = prev
+            .catch(() => undefined)
+            .then(() => this.ingestOnce(filePath));
+        this.chains.set(filePath, next);
+        // Drop the chain entry once it's the settled tail, so the map doesn't
+        // grow unbounded across many files.
+        void next.finally(() => {
+            if (this.chains.get(filePath) === next) this.chains.delete(filePath);
+        });
+        return next;
+    }
+
+    /** One tail pass: read only the bytes appended since the last offset. */
+    private async ingestOnce(filePath: string): Promise<void> {
         if (!filePath.endsWith('.jsonl')) return;
-        let buf: Buffer;
+        let handle;
         try {
-            buf = await readFile(filePath);
+            handle = await open(filePath, 'r');
         } catch {
             return; // file vanished between event and read
         }
-        let offset = this.offsets.get(filePath) ?? 0;
-        if (offset > buf.length) offset = 0; // truncated / rotated
+        try {
+            const { size } = await handle.stat();
+            let offset = this.offsets.get(filePath) ?? 0;
+            if (offset > size) offset = 0; // truncated / rotated
+            if (offset >= size) return; // nothing new
 
-        const slice = buf.subarray(offset);
-        const lastNl = slice.lastIndexOf(0x0a);
-        if (lastNl < 0) return; // no complete line appended yet
-        this.offsets.set(filePath, offset + lastNl + 1);
+            const buf = Buffer.allocUnsafe(size - offset);
+            const { bytesRead } = await handle.read(buf, 0, buf.length, offset);
+            const slice = buf.subarray(0, bytesRead);
+            const lastNl = slice.lastIndexOf(0x0a);
+            if (lastNl < 0) return; // no complete line appended yet
+            this.offsets.set(filePath, offset + lastNl + 1);
 
-        const text = slice.subarray(0, lastNl + 1).toString('utf8');
-        const project = relativeProject(this.root, filePath);
-        const sessionId = basename(filePath, '.jsonl');
-        for (const line of text.split('\n')) {
-            const trimmed = line.trim();
-            if (!trimmed) continue;
-            let parsed: unknown;
-            try {
-                parsed = JSON.parse(trimmed);
-            } catch {
-                continue; // skip non-JSON / partially-written lines defensively
+            const text = slice.subarray(0, lastNl + 1).toString('utf8');
+            const project = relativeProject(this.root, filePath);
+            const sessionId = basename(filePath, '.jsonl');
+            for (const line of text.split('\n')) {
+                const trimmed = line.trim();
+                if (!trimmed) continue;
+                let parsed: unknown;
+                try {
+                    parsed = JSON.parse(trimmed);
+                } catch {
+                    continue; // skip non-JSON / partially-written lines defensively
+                }
+                this.onEvent(buildEvent(parsed, project, sessionId));
             }
-            this.onEvent(buildEvent(parsed, project, sessionId));
+        } finally {
+            await handle.close();
         }
     }
 }
