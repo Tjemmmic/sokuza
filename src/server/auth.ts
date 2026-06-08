@@ -196,17 +196,22 @@ export function registerAuthGate(server: FastifyInstance, token: string, logger:
         // The exemption is deliberately narrow: ONLY a GET WebSocket upgrade
         // to the attach route /api/pty/:id. It must NOT cover the other pty
         // routes — POST /api/pty/spawn|ticket and DELETE /api/pty/:id are
-        // excluded by the GET check, and the GET /api/pty/sessions list is
-        // excluded explicitly — otherwise a forged `Upgrade: websocket`
-        // header could slip those past the token. The unmatched attach route
-        // still requires a valid ticket in-handler, so a forged upgrade buys
-        // nothing. The DNS-rebinding Host guard already ran (onRequest).
-        const isWsUpgrade =
-            req.method === 'GET'
-            && String(req.headers.upgrade ?? '').toLowerCase() === 'websocket'
-            && url.startsWith('/api/pty/')
-            && !url.startsWith('/api/pty/sessions');
-        if (isWsUpgrade) return;
+        // excluded by the GET check; the GET /api/pty/sessions list and the
+        // reserved sub-routes are excluded by name — otherwise a forged
+        // `Upgrade: websocket` header could slip them past the token. Matching
+        // is segment-based (not prefix), so the path must be EXACTLY
+        // /api/pty/<id> (4 segments). The attach route still requires a valid
+        // single-use ticket in-handler, so even an exempted forged upgrade
+        // buys nothing. The DNS-rebinding Host guard already ran (onRequest).
+        if (req.method === 'GET'
+            && String(req.headers.upgrade ?? '').toLowerCase() === 'websocket') {
+            const segs = url.split('?')[0].split('/'); // ['', 'api', 'pty', '<id>']
+            const reserved = new Set(['sessions', 'ticket', 'spawn']);
+            if (segs.length === 4 && segs[1] === 'api' && segs[2] === 'pty'
+                && segs[3].length > 0 && !reserved.has(segs[3])) {
+                return;
+            }
+        }
 
         // API routes require the token.
         const provided = extractBearer(req);

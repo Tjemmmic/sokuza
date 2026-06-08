@@ -210,6 +210,24 @@ describe('registerAuthGate', () => {
         });
         expect(res.statusCode).toBe(401);
     });
+
+    it('does NOT exempt reserved sub-routes (ticket) on a forged Upgrade', async () => {
+        const s = newServer();
+        const res = await s.inject({
+            method: 'GET', url: '/api/pty/ticket',
+            headers: { upgrade: 'websocket', connection: 'Upgrade' },
+        });
+        expect(res.statusCode).toBe(401);
+    });
+
+    it('does NOT exempt deeper paths than /api/pty/:id (segment-based match)', async () => {
+        const s = newServer();
+        const res = await s.inject({
+            method: 'GET', url: '/api/pty/abc/extra',
+            headers: { upgrade: 'websocket', connection: 'Upgrade' },
+        });
+        expect(res.statusCode).toBe(401);
+    });
 });
 
 describe('parseHostHeader', () => {
