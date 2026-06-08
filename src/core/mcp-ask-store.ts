@@ -36,7 +36,6 @@ export class McpAskStore {
     ) {}
 
     create(prompt: string, source?: string): McpAsk {
-        this.prune();
         const id = randomBytes(9).toString('base64url');
         const ask: McpAsk = {
             id,
@@ -46,6 +45,9 @@ export class McpAskStore {
             status: 'pending',
         };
         this.asks.set(id, ask);
+        // Prune AFTER inserting so the size cap holds for the post-create
+        // state (size <= maxEntries), including the entry we just added.
+        this.prune();
         return ask;
     }
 
