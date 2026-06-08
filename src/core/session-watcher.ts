@@ -91,7 +91,10 @@ export class SessionWatcher {
             ignored: (p: string, stats?: { isFile(): boolean }) =>
                 stats?.isFile() === true && !p.endsWith('.jsonl'),
         });
-        const handle = (p: string) => { void this.ingest(p); };
+        const handle = (p: string) => {
+            void this.ingest(p).catch((err) =>
+                this.logger.warn({ err, path: p }, 'Failed to ingest CLI transcript'));
+        };
         this.watcher.on('add', handle);
         this.watcher.on('change', handle);
         this.watcher.on('error', (err) => this.logger.warn({ err }, 'Session watcher error'));
@@ -197,7 +200,12 @@ function relativeProject(root: string, filePath: string): string {
 
 /** Extract a compact, display-friendly event from a raw transcript line. */
 export function buildEvent(parsed: unknown, project: string, sessionId: string): TranscriptEvent {
-    const entry = (parsed ?? {}) as Record<string, any>;
+    // A JSONL line could be a primitive or array; only objects carry the
+    // fields we read. Anything else yields a minimal, well-formed event.
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+        return { type: 'cli-transcript', project, sessionId, timestamp: new Date().toISOString() };
+    }
+    const entry = parsed as Record<string, any>;
     const entryType = typeof entry.type === 'string' ? entry.type : undefined;
     const role: string | undefined = entry.message?.role ?? (typeof entry.role === 'string' ? entry.role : undefined);
     const timestamp = typeof entry.timestamp === 'string' ? entry.timestamp : new Date().toISOString();

@@ -36,6 +36,17 @@ describe('buildEvent / preview extraction', () => {
         expect(e.preview).toBe('session recap');
     });
 
+    it('returns a minimal, well-formed event for non-object JSON lines', () => {
+        for (const v of [42, 'a bare string', [1, 2, 3], true]) {
+            const e = buildEvent(v, 'proj', 'sess');
+            expect(e.type).toBe('cli-transcript');
+            expect(e.project).toBe('proj');
+            expect(e.sessionId).toBe('sess');
+            expect(e.preview).toBeUndefined();
+            expect(e.role).toBeUndefined();
+        }
+    });
+
     it('truncates long previews', () => {
         const long = 'x'.repeat(2000);
         const e = buildEvent({ message: { content: long } }, 'proj', 'sess');
