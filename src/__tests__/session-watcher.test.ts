@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, rm, writeFile, appendFile, mkdir } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import pino from 'pino';
@@ -116,6 +117,15 @@ describe('SessionWatcher.ingest (byte-offset tailing)', () => {
         await writeFile(file, '{"a":1}\n');
         await watcher.ingest(file);
         expect(events).toHaveLength(0);
+    });
+
+    it('creates the transcript root if it does not exist yet (first-run path)', async () => {
+        const sub = join(dir, 'nested', 'projects');
+        expect(existsSync(sub)).toBe(false);
+        const w = new SessionWatcher({ logger, rootDir: sub, onEvent: (e) => events.push(e) });
+        await w.start();
+        expect(existsSync(sub)).toBe(true);
+        await w.stop();
     });
 
     it('does not replay pre-existing content after start() seeds offsets', async () => {

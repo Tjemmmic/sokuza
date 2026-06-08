@@ -16,8 +16,7 @@
  * tailed by byte offset so only newly-appended, complete lines are emitted.
  */
 import chokidar, { type FSWatcher } from 'chokidar';
-import { open, readdir, stat } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { open, readdir, stat, mkdir } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join, relative, basename, dirname } from 'node:path';
 import type { Logger } from 'pino';
@@ -72,10 +71,17 @@ export class SessionWatcher {
 
     async start(): Promise<void> {
         if (this.watcher) return;
-        if (!existsSync(this.root)) {
+        // Create the root if it doesn't exist yet. On a fresh machine
+        // ~/.claude/projects may not exist until Claude Code runs for the first
+        // time; pre-creating it means we start watching immediately instead of
+        // staying idle until the next engine restart. Best-effort: if we can't
+        // create it (perms), fall back to idle rather than crash startup.
+        try {
+            await mkdir(this.root, { recursive: true });
+        } catch (err) {
             this.logger.info(
-                { root: this.root },
-                'CLI transcript dir not found — session watcher idle (set SOKUZA_CLI_SESSIONS_DIR to override)',
+                { root: this.root, err },
+                'CLI transcript dir unavailable — session watcher idle (set SOKUZA_CLI_SESSIONS_DIR to override)',
             );
             return;
         }
