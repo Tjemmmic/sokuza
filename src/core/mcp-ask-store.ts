@@ -90,16 +90,16 @@ export class McpAskStore {
         // blocked `sokuza_ask_human` caller. Only if the store is somehow full
         // of pending asks do we evict the oldest pending as a last resort.
         if (this.asks.size > this.maxEntries) {
-            const evict: string[] = [];
+            const evict = new Set<string>(); // Set for O(1) membership checks
             let over = this.asks.size - this.maxEntries;
             for (const [id, ask] of this.asks) {
                 if (over <= 0) break;
-                if (ask.status === 'answered') { evict.push(id); over--; }
+                if (ask.status === 'answered') { evict.add(id); over--; }
             }
             if (over > 0) {
                 for (const id of this.asks.keys()) {
                     if (over <= 0) break;
-                    if (!evict.includes(id)) { evict.push(id); over--; }
+                    if (!evict.has(id)) { evict.add(id); over--; }
                 }
             }
             for (const id of evict) this.asks.delete(id);
