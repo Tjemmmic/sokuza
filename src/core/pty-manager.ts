@@ -67,6 +67,10 @@ const DEFAULT_ROWS = 24;
  *  that could otherwise outrun the timers. */
 const MAX_EXITED_RETAINED = 50;
 
+/** Default cap on concurrently-running sessions, to bound resource use.
+ *  Override with SOKUZA_PTY_MAX_SESSIONS. */
+const DEFAULT_MAX_SESSIONS = 50;
+
 /** Built-in allow-list: the interactive CLIs this feature targets, plus the
  *  common shells a user might want a raw terminal for. */
 export const DEFAULT_ALLOWED_COMMANDS: readonly string[] = [
@@ -84,6 +88,7 @@ export class PTYManager extends EventEmitter {
     private sessions = new Map<string, PtySession>();
     private ptyModule: NodePty | null = null;
     private readonly allowed: ReadonlySet<string> | null; // null = allow all
+    private readonly maxSessions: number;
 
     constructor(private readonly logger: Logger) {
         super();
@@ -100,6 +105,8 @@ export class PTYManager extends EventEmitter {
         } else {
             this.allowed = new Set(DEFAULT_ALLOWED_COMMANDS);
         }
+        const maxRaw = Number.parseInt(process.env.SOKUZA_PTY_MAX_SESSIONS ?? '', 10);
+        this.maxSessions = Number.isFinite(maxRaw) && maxRaw > 0 ? maxRaw : DEFAULT_MAX_SESSIONS;
     }
 
     /** True if `command` is permitted to be spawned. */
@@ -150,6 +157,13 @@ export class PTYManager extends EventEmitter {
         }
 
         this.pruneExitedSessions();
+        const running = this.list().length;
+        if (running >= this.maxSessions) {
+            throw new Error(
+                `maximum concurrent PTY sessions reached (${this.maxSessions}). ` +
+                'Close a session or raise SOKUZA_PTY_MAX_SESSIONS.',
+            );
+        }
         const pty = await this.loadPty();
         const cols = clampDimension(opts.cols, DEFAULT_COLS);
         const rows = clampDimension(opts.rows, DEFAULT_ROWS);

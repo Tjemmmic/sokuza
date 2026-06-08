@@ -103,6 +103,25 @@ describe('PTYManager lifecycle (real PTY)', () => {
         expect(m.kill(info.id)).toBe(true);
         expect(m.get(info.id)).toBeUndefined();
     });
+
+    it('caps concurrent running sessions (SOKUZA_PTY_MAX_SESSIONS)', async () => {
+        process.env.SOKUZA_PTY_MAX_SESSIONS = '2';
+        try {
+            const m = new PTYManager(logger);
+            const a = await m.createSession({ command: 'bash', args: ['-i'], cwd: dir });
+            const b = await m.createSession({ command: 'bash', args: ['-i'], cwd: dir });
+            await expect(m.createSession({ command: 'bash', args: ['-i'], cwd: dir }))
+                .rejects.toThrow(/maximum concurrent/);
+            // Killing one frees a slot.
+            m.kill(a.id);
+            const c = await m.createSession({ command: 'bash', args: ['-i'], cwd: dir });
+            expect(c.id).toBeTruthy();
+            m.killAll();
+            void b;
+        } finally {
+            delete process.env.SOKUZA_PTY_MAX_SESSIONS;
+        }
+    });
 });
 
 function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {

@@ -13,6 +13,9 @@
 import { randomBytes } from 'node:crypto';
 
 const DEFAULT_TTL_MS = 15_000;
+/** Hard cap so unconsumed tickets can't grow without bound if minting
+ *  outpaces consumption + expiry. */
+const MAX_TICKETS = 1_000;
 
 export class PtyTicketStore {
     private tickets = new Map<string, number>(); // ticket -> expiry epoch ms
@@ -24,6 +27,13 @@ export class PtyTicketStore {
         this.prune();
         const ticket = randomBytes(24).toString('base64url');
         this.tickets.set(ticket, Date.now() + this.ttlMs);
+        // Last-resort cap if minting outpaces expiry (Map is insertion-ordered,
+        // so the first keys are the oldest).
+        while (this.tickets.size > MAX_TICKETS) {
+            const oldest = this.tickets.keys().next().value;
+            if (oldest === undefined) break;
+            this.tickets.delete(oldest);
+        }
         return ticket;
     }
 
@@ -33,6 +43,9 @@ export class PtyTicketStore {
      * replayed.
      */
     consume(ticket: string | undefined | null): boolean {
+        // Also sweep expired tickets here so they don't linger in a
+        // long-running process that has stopped minting.
+        this.prune();
         if (!ticket) return false;
         const expiry = this.tickets.get(ticket);
         if (expiry === undefined) return false;
