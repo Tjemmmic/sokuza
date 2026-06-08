@@ -42,4 +42,15 @@ describe('McpAskStore', () => {
         const surviving = ids.filter((id) => store.get(id));
         expect(surviving).toEqual(ids.slice(-3));
     });
+
+    it('evicts answered asks before pending ones when over the cap', () => {
+        const store = new McpAskStore(2);
+        const a1 = store.create('q1');
+        store.answer(a1.id, 'done'); // a1 is answered
+        const a2 = store.create('q2'); // pending
+        const a3 = store.create('q3'); // pending → over cap, must evict a1 (answered)
+        expect(store.get(a1.id)).toBeUndefined();
+        expect(store.get(a2.id)?.status).toBe('pending');
+        expect(store.get(a3.id)?.status).toBe('pending');
+    });
 });

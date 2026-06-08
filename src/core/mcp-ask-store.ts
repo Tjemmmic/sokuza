@@ -85,11 +85,24 @@ export class McpAskStore {
         }
         for (const id of expired) this.asks.delete(id);
 
-        // Map preserves insertion order, so the first key is the oldest.
-        while (this.asks.size > this.maxEntries) {
-            const oldest = this.asks.keys().next().value;
-            if (oldest === undefined) break;
-            this.asks.delete(oldest);
+        // Hard cap. Evict ANSWERED entries first (oldest → newest) so a burst
+        // of new questions can't drop a still-pending ask out from under a
+        // blocked `sokuza_ask_human` caller. Only if the store is somehow full
+        // of pending asks do we evict the oldest pending as a last resort.
+        if (this.asks.size > this.maxEntries) {
+            const evict: string[] = [];
+            let over = this.asks.size - this.maxEntries;
+            for (const [id, ask] of this.asks) {
+                if (over <= 0) break;
+                if (ask.status === 'answered') { evict.push(id); over--; }
+            }
+            if (over > 0) {
+                for (const id of this.asks.keys()) {
+                    if (over <= 0) break;
+                    if (!evict.includes(id)) { evict.push(id); over--; }
+                }
+            }
+            for (const id of evict) this.asks.delete(id);
         }
     }
 }
