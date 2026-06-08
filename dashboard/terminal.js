@@ -75,7 +75,7 @@
             ${librariesReady() ? '' : `
                 <div class="empty-state">
                     <div class="empty-icon">⚠️</div>
-                    <p class="empty-text">Terminal libraries failed to load (offline?). The xterm.js assets are loaded from a CDN.</p>
+                    <p class="empty-text">Terminal libraries failed to load. The xterm.js assets are served locally from the Sokuza dashboard — this usually indicates a build or server problem.</p>
                 </div>`}
 
             <div class="term-toolbar">
