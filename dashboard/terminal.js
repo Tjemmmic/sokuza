@@ -38,16 +38,9 @@
         ));
     }
 
-    function token() {
-        try {
-            if (typeof dashboardToken === 'string' && dashboardToken) return dashboardToken;
-        } catch { /* not in scope yet */ }
-        try { return localStorage.getItem('sokuza:dashboardToken') || ''; } catch { return ''; }
-    }
-
-    function wsUrl(id) {
+    function wsUrl(id, ticket) {
         const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-        return `${proto}://${location.host}/api/pty/${encodeURIComponent(id)}?t=${encodeURIComponent(token())}`;
+        return `${proto}://${location.host}/api/pty/${encodeURIComponent(id)}?ticket=${encodeURIComponent(ticket)}`;
     }
 
     function librariesReady() {
@@ -187,15 +180,27 @@
         return true;
     }
 
-    function attach(id) {
+    async function attach(id) {
         if (!id) return;
         if (!ensureTerminal()) return;
+
+        // Mint a single-use ticket over the authenticated HTTP API (bearer
+        // token in the Authorization header, never the URL), then open the
+        // socket with only that ticket.
+        let ticket;
+        try {
+            ticket = (await api.post('/api/pty/ticket')).ticket;
+        } catch (err) {
+            alert(`Failed to authorize terminal: ${err.message || err}`);
+            return;
+        }
+
         detachSocket();
         activeSessionId = id;
         term.reset();
         term.focus();
 
-        socket = new WebSocket(wsUrl(id));
+        socket = new WebSocket(wsUrl(id, ticket));
         socket.onopen = () => sendResize();
         socket.onmessage = (ev) => {
             let msg;

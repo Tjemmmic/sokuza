@@ -185,6 +185,29 @@ export function registerAuthGate(server: FastifyInstance, token: string, logger:
         // and follow the same rule.
         if (isDashboard) return;
 
+        // PTY terminal attach is a WebSocket upgrade. Browsers can't set an
+        // Authorization header on a WebSocket, and we deliberately keep the
+        // long-lived bearer token OUT of the URL for this shell-granting
+        // endpoint (query strings leak into logs/history). Instead the route
+        // authenticates a short-lived, single-use ticket in-handler — that
+        // ticket is itself minted by an authenticated POST /api/pty/ticket
+        // (which still passes through this gate).
+        //
+        // The exemption is deliberately narrow: ONLY a GET WebSocket upgrade
+        // to the attach route /api/pty/:id. It must NOT cover the other pty
+        // routes — POST /api/pty/spawn|ticket and DELETE /api/pty/:id are
+        // excluded by the GET check, and the GET /api/pty/sessions list is
+        // excluded explicitly — otherwise a forged `Upgrade: websocket`
+        // header could slip those past the token. The unmatched attach route
+        // still requires a valid ticket in-handler, so a forged upgrade buys
+        // nothing. The DNS-rebinding Host guard already ran (onRequest).
+        const isWsUpgrade =
+            req.method === 'GET'
+            && String(req.headers.upgrade ?? '').toLowerCase() === 'websocket'
+            && url.startsWith('/api/pty/')
+            && !url.startsWith('/api/pty/sessions');
+        if (isWsUpgrade) return;
+
         // API routes require the token.
         const provided = extractBearer(req);
         if (!tokensEqual(provided, token)) {

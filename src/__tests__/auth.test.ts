@@ -93,6 +93,10 @@ describe('registerAuthGate', () => {
         registerAuthGate(s, TOKEN, logger);
         s.get('/health', async () => ({ ok: true }));
         s.get('/api/ping', async () => ({ pong: true }));
+        // Stand-ins for the PTY routes the WS-upgrade exemption must reason about.
+        s.get('/api/pty/abc', async () => ({ attach: true }));
+        s.get('/api/pty/sessions', async () => ({ sessions: [] }));
+        s.post('/api/pty/spawn', async () => ({ spawned: true }));
         s.get('/webhooks/foo', async () => ({ received: true }));
         s.get('/', async (_req, reply) => reply.type('text/html').send('<html>dashboard</html>'));
         s.get('/dashboard/app.js', async (_req, reply) => reply.type('application/javascript').send('// app'));
@@ -165,6 +169,44 @@ describe('registerAuthGate', () => {
             method: 'GET',
             url: '/api/ping',
             headers: { Authorization: `Bearer ${'e'.repeat(64)}` },
+        });
+        expect(res.statusCode).toBe(401);
+    });
+
+    // ─── PTY WebSocket-upgrade exemption (ticket-authenticated) ──────────────
+
+    it('exempts a GET WebSocket upgrade to the PTY attach route (ticket-auth in-handler)', async () => {
+        const s = newServer();
+        const res = await s.inject({
+            method: 'GET',
+            url: '/api/pty/abc',
+            headers: { upgrade: 'websocket', connection: 'Upgrade' },
+        });
+        expect(res.statusCode).toBe(200); // passed the gate; handler does ticket auth
+    });
+
+    it('still gates the PTY attach route when it is NOT a WebSocket upgrade', async () => {
+        const s = newServer();
+        const res = await s.inject({ method: 'GET', url: '/api/pty/abc' });
+        expect(res.statusCode).toBe(401);
+    });
+
+    it('does NOT exempt POST /api/pty/spawn even with a forged Upgrade header', async () => {
+        const s = newServer();
+        const res = await s.inject({
+            method: 'POST',
+            url: '/api/pty/spawn',
+            headers: { upgrade: 'websocket', connection: 'Upgrade' },
+        });
+        expect(res.statusCode).toBe(401);
+    });
+
+    it('does NOT exempt GET /api/pty/sessions even with a forged Upgrade header', async () => {
+        const s = newServer();
+        const res = await s.inject({
+            method: 'GET',
+            url: '/api/pty/sessions',
+            headers: { upgrade: 'websocket', connection: 'Upgrade' },
         });
         expect(res.statusCode).toBe(401);
     });

@@ -3,10 +3,16 @@
  *
  * Registered as an encapsulated plugin that loads `@fastify/websocket` first,
  * so the `{ websocket: true }` route below is recognised. The parent registers
- * the Host guard and bearer-token auth gate BEFORE this plugin, so both apply
- * to every route here (including the WebSocket upgrade, which carries the token
- * via the `?t=` query param since browsers can't set headers on a WS).
+ * the Host guard and bearer-token auth gate BEFORE this plugin.
  *
+ * Auth: the HTTP routes are gated by the bearer token via the parent auth gate.
+ * The WebSocket attach can't carry an Authorization header (browser limit) and
+ * must not carry the long-lived token in its URL (it grants shell access), so
+ * it authenticates a short-lived single-use TICKET instead — minted by the
+ * authenticated `POST /api/pty/ticket` and verified in-handler. The auth gate
+ * exempts only the WS upgrade to /api/pty/* for this reason.
+ *
+ *   POST   /api/pty/ticket     — mint a single-use WebSocket ticket
  *   POST   /api/pty/spawn      — start a session (optionally for a repo/PR)
  *   GET    /api/pty/sessions   — list active sessions
  *   DELETE /api/pty/:id        — kill a session
@@ -17,6 +23,7 @@ import type { FastifyInstance } from 'fastify';
 import type { Logger } from 'pino';
 import type { PTYManager } from '../core/pty-manager.js';
 import type { WorkdirManager } from '../core/workdir-store.js';
+import { PtyTicketStore } from '../core/pty-ticket-store.js';
 
 export interface PtyRoutesDeps {
     ptyManager: PTYManager;
@@ -53,9 +60,23 @@ function defaultCommand(): string {
  */
 export function registerPtyRoutes(server: FastifyInstance, deps: PtyRoutesDeps): void {
     const { ptyManager, logger } = deps;
+    const tickets = new PtyTicketStore();
+
+    // Mint a single-use WebSocket ticket. Gated by the bearer token via the
+    // parent auth gate (this is a normal POST, not a WS upgrade).
+    server.post('/api/pty/ticket', async () => {
+        return { ticket: tickets.mint() };
+    });
 
     server.post('/api/pty/spawn', async (request, reply) => {
-        const body = (request.body ?? {}) as SpawnBody;
+        const raw = request.body;
+        // Defend against a misconfigured body parser handing us a string,
+        // Buffer, or array: a type assertion would let property access silently
+        // yield undefined, and this route resolves a filesystem cwd from it.
+        if (raw !== null && raw !== undefined && (typeof raw !== 'object' || Array.isArray(raw))) {
+            return reply.status(400).send({ error: 'request body must be a JSON object' });
+        }
+        const body = (raw ?? {}) as SpawnBody;
 
         // Resolve cwd: an explicit repo/PR triple wins (spawn inside the
         // persistent auto-fix workdir), otherwise an explicit cwd, otherwise
@@ -105,10 +126,16 @@ export function registerPtyRoutes(server: FastifyInstance, deps: PtyRoutesDeps):
     });
 
     // ─── WebSocket attach ───────────────────────────────────────────────────
-    server.get<{ Params: { id: string } }>(
+    server.get<{ Params: { id: string }; Querystring: { ticket?: string } }>(
         '/api/pty/:id',
         { websocket: true },
         (socket, request) => {
+            // Explicit per-route auth: this route is exempt from the bearer
+            // gate (see auth.ts), so it MUST verify the single-use ticket here.
+            if (!tickets.consume(request.query.ticket)) {
+                socket.close(1008, 'unauthorized');
+                return;
+            }
             const { id } = request.params;
             const info = ptyManager.get(id);
             if (!info) {
