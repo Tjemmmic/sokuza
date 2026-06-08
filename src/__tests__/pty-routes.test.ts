@@ -111,7 +111,34 @@ describe('PTY routes — ticket + spawn validation', () => {
     });
 });
 
+function wsCollect(url: string): Promise<{ msgs: any[]; closeCode?: number }> {
+    return new Promise((resolve) => {
+        const ws = new WebSocket(url);
+        const msgs: any[] = [];
+        ws.on('message', (d) => { try { msgs.push(JSON.parse(d.toString())); } catch { /* */ } });
+        ws.on('close', (code) => resolve({ msgs, closeCode: code }));
+        ws.on('error', () => { /* close follows */ });
+        setTimeout(() => { try { ws.close(); } catch { /* */ } resolve({ msgs, closeCode: -1 }); }, 4000);
+    });
+}
+
+const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 describe('PTY routes — session lifecycle + WebSocket attach', () => {
+    it('reports exit and closes when attaching to an already-exited session', async () => {
+        const spawn = await server.inject({
+            method: 'POST', url: '/api/pty/spawn', headers: AUTH,
+            payload: { command: 'bash', args: ['-c', 'exit 0'], cwd: process.cwd() },
+        });
+        const id = JSON.parse(spawn.payload).session.id;
+        await delay(600); // let the fast command exit (retained for late attach)
+
+        const ticket = await mintTicket();
+        const { msgs, closeCode } = await wsCollect(`ws://127.0.0.1:${port}/api/pty/${id}?ticket=${ticket}`);
+        expect(msgs.some((m) => m.type === 'exit')).toBe(true);
+        expect(closeCode).toBe(1000);
+    });
+
     it('spawns, lists, attaches with a valid ticket, then deletes', async () => {
         // spawn
         const spawn = await server.inject({

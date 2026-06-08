@@ -148,6 +148,15 @@ export function registerPtyRoutes(server: FastifyInstance, deps: PtyRoutesDeps):
                 socket.close(1008, 'unknown session');
                 return;
             }
+            if (info.status === 'exited') {
+                // The session already exited (retained briefly for late
+                // attaches). The 'exit' event has already fired and won't fire
+                // again, so report it now and close rather than hang.
+                trySend(socket, { type: 'ready', session: info });
+                trySend(socket, { type: 'exit', exitCode: info.exitCode ?? null });
+                try { socket.close(1000, 'session exited'); } catch { /* already closing */ }
+                return;
+            }
 
             const onData = (sid: string, chunk: string) => {
                 if (sid !== id) return;
