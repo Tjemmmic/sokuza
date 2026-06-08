@@ -80,6 +80,11 @@ describe('PTYManager lifecycle (real PTY)', () => {
         const code = await withTimeout(exited, 8000);
         expect(code).toBe(3);
         expect(output.join('')).toContain('SOKUZA_OK');
+
+        // After exit the session is excluded from list() (no stale rows) but
+        // remains readable via get() for a late attach to read the exit code.
+        expect(m.list().some((s) => s.id === info.id)).toBe(false);
+        expect(m.get(info.id)?.status).toBe('exited');
     });
 
     it('writes input to a session and kills it', async () => {

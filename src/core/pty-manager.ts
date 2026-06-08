@@ -218,8 +218,14 @@ export class PTYManager extends EventEmitter {
         return this.sessions.get(id)?.info;
     }
 
+    /** Active (running) sessions. Exited sessions linger in the map for a short
+     *  grace period so a late WebSocket attach can read the exit code via
+     *  get(), but they're excluded here so the dashboard list shows no stale
+     *  entries. */
     list(): PtySessionInfo[] {
-        return [...this.sessions.values()].map((s) => s.info);
+        return [...this.sessions.values()]
+            .map((s) => s.info)
+            .filter((info) => info.status === 'running');
     }
 
     private requireRunning(id: string): PtySession {
