@@ -108,12 +108,11 @@ export function registerPtyRoutes(server: FastifyInstance, deps: PtyRoutesDeps):
             });
             return reply.status(201).send({ session: info });
         } catch (err: any) {
-            // A disallowed command / missing cwd is a client error; hitting the
-            // session cap is a 429; a missing native binding is a server error.
+            // PTYManager tags client errors (bad command / cwd / session cap)
+            // with an HTTP status; anything else (e.g. missing native binding)
+            // is a 500 we log.
+            const status = typeof err?.status === 'number' ? err.status : 500;
             const msg = err?.message ?? 'failed to spawn PTY';
-            const status = /maximum concurrent/.test(msg) ? 429
-                : /not allowed|cwd does not exist|command is required/.test(msg) ? 400
-                : 500;
             if (status === 500) logger.error({ err, command, cwd }, 'PTY spawn failed');
             return reply.status(status).send({ error: msg });
         }

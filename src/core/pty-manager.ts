@@ -62,6 +62,15 @@ interface PtySession {
 const DEFAULT_COLS = 80;
 const DEFAULT_ROWS = 24;
 
+/** Error carrying the HTTP status the route should return, so the route layer
+ *  doesn't have to regex-match message strings to pick a status code. */
+export class PtySpawnError extends Error {
+    constructor(message: string, readonly status: number) {
+        super(message);
+        this.name = 'PtySpawnError';
+    }
+}
+
 /** Upper bound on exited sessions retained for late-attach exit-code reads.
  *  A timer drops each ~30s after exit; this caps a rapid spawn/exit burst
  *  that could otherwise outrun the timers. */
@@ -144,24 +153,26 @@ export class PTYManager extends EventEmitter {
 
     async createSession(opts: CreateSessionOptions): Promise<PtySessionInfo> {
         const command = opts.command?.trim();
-        if (!command) throw new Error('command is required');
+        if (!command) throw new PtySpawnError('command is required', 400);
         if (!this.isAllowed(command)) {
             const list = this.allowedCommands();
-            throw new Error(
+            throw new PtySpawnError(
                 `command "${command}" is not allowed. Permitted: ${list === '*' ? '*' : list.join(', ')}. ` +
                 'Set SOKUZA_PTY_ALLOWED_COMMANDS to change this.',
+                400,
             );
         }
         if (!opts.cwd || !existsSync(opts.cwd) || !statSync(opts.cwd).isDirectory()) {
-            throw new Error(`cwd does not exist or is not a directory: ${opts.cwd}`);
+            throw new PtySpawnError(`cwd does not exist or is not a directory: ${opts.cwd}`, 400);
         }
 
         this.pruneExitedSessions();
         const running = this.list().length;
         if (running >= this.maxSessions) {
-            throw new Error(
+            throw new PtySpawnError(
                 `maximum concurrent PTY sessions reached (${this.maxSessions}). ` +
                 'Close a session or raise SOKUZA_PTY_MAX_SESSIONS.',
+                429,
             );
         }
         const pty = await this.loadPty();
