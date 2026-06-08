@@ -42,6 +42,7 @@ import { WorkdirManager } from './workdir-store.js';
 import { PresetStore } from './preset-store.js';
 import { PTYManager } from './pty-manager.js';
 import { ptyPlugin } from '../server/pty-routes.js';
+import { SessionWatcher } from './session-watcher.js';
 import pretty from 'pino-pretty';
 
 const MAX_RECENT_EVENTS = 100;
@@ -89,6 +90,7 @@ export class SokuzaEngine {
     private workdirManager: WorkdirManager;
     private presetStore: PresetStore;
     private ptyManager: PTYManager;
+    private sessionWatcher: SessionWatcher | null = null;
 
     constructor(config: SokuzaConfig, configPath?: string) {
         this.config = config;
@@ -657,6 +659,17 @@ export class SokuzaEngine {
 
         this.startCronSchedules();
 
+        // Mirror locally-run Claude Code session transcripts into the
+        // dashboard event stream. Best-effort: a missing transcript dir just
+        // leaves the watcher idle.
+        this.sessionWatcher = new SessionWatcher({
+            logger: this.logger,
+            onEvent: (event) => {
+                for (const cb of this.eventSubscribers) cb(event);
+            },
+        });
+        this.sessionWatcher.start();
+
         const { port: preferredPort } = this.config.server;
         const host = this.config.server.host ?? '127.0.0.1';
         const actualPort = await listenWithFallback(
@@ -713,6 +726,10 @@ export class SokuzaEngine {
         this.stopCronSchedules();
         this.stopPollingIntegrations();
         this.ptyManager.killAll();
+        if (this.sessionWatcher) {
+            await this.sessionWatcher.stop().catch(() => undefined);
+            this.sessionWatcher = null;
+        }
 
         await this.queue.shutdown();
         if (this.server) {
