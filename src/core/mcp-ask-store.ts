@@ -75,12 +75,16 @@ export class McpAskStore {
 
     private prune(): void {
         const now = Date.now();
+        // Collect-then-delete rather than mutating the Map mid-iteration.
+        const expired: string[] = [];
         for (const [id, ask] of this.asks) {
             if (ask.status === 'answered' && ask.answeredAt
                 && now - Date.parse(ask.answeredAt) > this.ttlMs) {
-                this.asks.delete(id);
+                expired.push(id);
             }
         }
+        for (const id of expired) this.asks.delete(id);
+
         // Map preserves insertion order, so the first key is the oldest.
         while (this.asks.size > this.maxEntries) {
             const oldest = this.asks.keys().next().value;

@@ -42,8 +42,11 @@ export class PtyTicketStore {
 
     private prune(): void {
         const now = Date.now();
+        // Collect-then-delete rather than mutating the Map mid-iteration.
+        const expired: string[] = [];
         for (const [ticket, expiry] of this.tickets) {
-            if (expiry <= now) this.tickets.delete(ticket);
+            if (expiry <= now) expired.push(ticket);
         }
+        for (const ticket of expired) this.tickets.delete(ticket);
     }
 }
