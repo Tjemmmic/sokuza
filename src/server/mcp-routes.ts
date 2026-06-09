@@ -9,6 +9,13 @@
  * Extracted from api.ts so the contract (validation + broadcast shapes) is
  * directly testable without constructing the full ApiDeps surface.
  *
+ * Auth: these are normal `/api/` routes, so the bearer-token gate applies. The
+ * `sokuza mcp` stdio bridge authenticates by reading the dashboard token from
+ * `~/.sokuza/dashboard-token` (0600, same-user) and sending it as
+ * `Authorization: Bearer …` — see HttpEngineBridge in core/mcp-server.ts. So
+ * the human-in-the-loop trust boundary is "can read the local token file",
+ * i.e. the same user that owns the dashboard. They are NOT unauthenticated.
+ *
  *   POST /api/mcp/status         — broadcast a status line
  *   POST /api/mcp/ask            — create a pending question → { id }
  *   GET  /api/mcp/asks           — list pending questions
