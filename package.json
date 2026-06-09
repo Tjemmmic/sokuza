@@ -55,9 +55,11 @@
     "dotenv": "^17.3.1",
     "fastify": "^5.2.1",
     "js-yaml": "^4.1.0",
-    "node-pty": "^1.1.0",
     "pino": "^9.6.0",
     "pino-pretty": "^13.0.0"
+  },
+  "optionalDependencies": {
+    "node-pty": "^1.1.0"
   },
   "devDependencies": {
     "@types/js-yaml": "^4.0.9",
