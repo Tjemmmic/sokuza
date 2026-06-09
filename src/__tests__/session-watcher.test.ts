@@ -146,6 +146,15 @@ describe('SessionWatcher.ingest (byte-offset tailing)', () => {
         await w.stop();
     });
 
+    it('stop() drains an in-flight ingest before resolving', async () => {
+        const file = join(dir, 'inflight.jsonl');
+        await writeFile(file, JSON.stringify({ message: { content: 'drain-me' } }) + '\n');
+        const inflight = watcher.ingest(file); // start it, don't await
+        await watcher.stop();                   // must await the in-flight ingest
+        expect(events.some((e) => e.preview === 'drain-me')).toBe(true);
+        await inflight;
+    });
+
     it('does not replay pre-existing content after start() seeds offsets', async () => {
         const file = join(dir, 'pre.jsonl');
         await writeFile(file, JSON.stringify({ message: { content: 'old' } }) + '\n');

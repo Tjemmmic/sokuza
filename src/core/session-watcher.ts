@@ -134,11 +134,16 @@ export class SessionWatcher {
     }
 
     async stop(): Promise<void> {
-        if (!this.watcher) return;
-        await this.watcher.close();
-        this.watcher = null;
-        this.offsets.clear();
+        // Close chokidar first so no new ingests are queued, then drain any
+        // in-flight ones so we never call onEvent after teardown has begun.
+        if (this.watcher) {
+            await this.watcher.close();
+            this.watcher = null;
+        }
+        const pending = [...this.chains.values()];
         this.chains.clear();
+        await Promise.allSettled(pending);
+        this.offsets.clear();
     }
 
     /**
