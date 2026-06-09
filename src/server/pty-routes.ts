@@ -63,6 +63,11 @@ function defaultCommand(): string {
  */
 export function registerPtyRoutes(server: FastifyInstance, deps: PtyRoutesDeps): void {
     const { ptyManager, logger } = deps;
+    // Single ticket store per server: tickets are minted and consumed within
+    // this closure, and the auth gate's WS exemption relies on the attach
+    // handler consuming from the same store. ptyPlugin is registered exactly
+    // once by the engine, so this is a coherent singleton — do not register
+    // the plugin more than once.
     const tickets = new PtyTicketStore();
 
     // Mint a single-use WebSocket ticket. Gated by the bearer token via the
