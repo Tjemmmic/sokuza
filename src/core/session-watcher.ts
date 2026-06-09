@@ -16,6 +16,7 @@
  * tailed by byte offset so only newly-appended, complete lines are emitted.
  */
 import chokidar, { type FSWatcher } from 'chokidar';
+import { once } from 'node:events';
 import { open, readdir, stat, mkdir } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join, relative, basename, dirname } from 'node:path';
@@ -104,6 +105,10 @@ export class SessionWatcher {
         this.watcher.on('add', handle);
         this.watcher.on('change', handle);
         this.watcher.on('error', (err) => this.logger.warn({ err }, 'Session watcher error'));
+        // Resolve only once chokidar's initial scan is done and it's actively
+        // watching, so files created right after start() aren't swallowed by
+        // the ignoreInitial scan window.
+        await once(this.watcher, 'ready');
         this.logger.info({ root: this.root }, 'CLI session watcher started');
     }
 

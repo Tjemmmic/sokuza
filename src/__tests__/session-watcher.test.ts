@@ -119,6 +119,24 @@ describe('SessionWatcher.ingest (byte-offset tailing)', () => {
         expect(events).toHaveLength(0);
     });
 
+    it('wires chokidar so a newly written .jsonl file emits an event', async () => {
+        await watcher.start();
+        try {
+            const proj = join(dir, 'proj');
+            await mkdir(proj, { recursive: true });
+            await writeFile(join(proj, 'live.jsonl'),
+                JSON.stringify({ message: { content: 'live-line' } }) + '\n');
+
+            const deadline = Date.now() + 4000;
+            while (Date.now() < deadline && !events.some((e) => e.preview === 'live-line')) {
+                await new Promise((r) => setTimeout(r, 50));
+            }
+            expect(events.some((e) => e.preview === 'live-line')).toBe(true);
+        } finally {
+            await watcher.stop();
+        }
+    });
+
     it('creates the transcript root if it does not exist yet (first-run path)', async () => {
         const sub = join(dir, 'nested', 'projects');
         expect(existsSync(sub)).toBe(false);
