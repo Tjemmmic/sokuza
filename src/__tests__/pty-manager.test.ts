@@ -7,6 +7,11 @@ import { PTYManager, DEFAULT_ALLOWED_COMMANDS } from '../core/pty-manager.js';
 
 const logger = pino({ level: 'silent' });
 
+// node-pty is an OPTIONAL dependency (no build toolchain → not installed).
+// The lifecycle tests below spawn real PTYs, so skip them when it's absent
+// rather than fail on a supported toolchain-less host.
+const hasNodePty = await import('node-pty').then(() => true, () => false);
+
 describe('PTYManager allow-list', () => {
     afterEach(() => { delete process.env.SOKUZA_PTY_ALLOWED_COMMANDS; });
 
@@ -63,7 +68,7 @@ describe('PTYManager.createSession validation', () => {
     });
 });
 
-describe('PTYManager lifecycle (real PTY)', () => {
+describe.skipIf(!hasNodePty)('PTYManager lifecycle (real PTY)', () => {
     let dir: string;
     beforeEach(async () => { dir = await mkdtemp(join(tmpdir(), 'sokuza-pty-')); });
     afterEach(async () => { await rm(dir, { recursive: true, force: true }); });

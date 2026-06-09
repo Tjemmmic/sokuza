@@ -7,6 +7,8 @@ import { PTYManager } from '../core/pty-manager.js';
 import { registerAuthGate, registerHostGuard, DEFAULT_ALLOWED_HOSTS } from '../server/auth.js';
 
 const logger = pino({ level: 'silent' });
+// node-pty is optional; skip tests that spawn a real PTY when it's absent.
+const hasNodePty = await import('node-pty').then(() => true, () => false);
 const TOKEN = 'a'.repeat(64);
 const AUTH = { authorization: `Bearer ${TOKEN}` };
 
@@ -93,7 +95,7 @@ describe('PTY routes — ticket + spawn validation', () => {
         expect(res.statusCode).toBe(400);
     });
 
-    it('defaults to the login shell basename (no command) — survives the allow-list', async () => {
+    it.skipIf(!hasNodePty)('defaults to the login shell basename (no command) — survives the allow-list', async () => {
         const prev = process.env.SHELL;
         process.env.SHELL = '/bin/bash'; // path-qualified $SHELL must still work
         try {
@@ -124,7 +126,7 @@ function wsCollect(url: string): Promise<{ msgs: any[]; closeCode?: number }> {
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-describe('PTY routes — session lifecycle + WebSocket attach', () => {
+describe.skipIf(!hasNodePty)('PTY routes — session lifecycle + WebSocket attach', () => {
     it('reports exit and closes when attaching to an already-exited session', async () => {
         const spawn = await server.inject({
             method: 'POST', url: '/api/pty/spawn', headers: AUTH,
