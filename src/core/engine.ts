@@ -40,6 +40,9 @@ import { LogStore } from './log-store.js';
 import { ChatStore } from './chat-store.js';
 import { WorkdirManager } from './workdir-store.js';
 import { PresetStore } from './preset-store.js';
+import { PTYManager } from './pty-manager.js';
+import { ptyPlugin } from '../server/pty-routes.js';
+import { SessionWatcher } from './session-watcher.js';
 import pretty from 'pino-pretty';
 
 const MAX_RECENT_EVENTS = 100;
@@ -86,6 +89,8 @@ export class SokuzaEngine {
     private chatStore: ChatStore;
     private workdirManager: WorkdirManager;
     private presetStore: PresetStore;
+    private ptyManager: PTYManager;
+    private sessionWatcher: SessionWatcher | null = null;
 
     constructor(config: SokuzaConfig, configPath?: string) {
         this.config = config;
@@ -117,6 +122,10 @@ export class SokuzaEngine {
         // version of an `ai.agent` onto the canvas; uninstalls
         // auto-clean the corresponding presets.
         this.presetStore = new PresetStore(this.logger);
+        // Interactive PTY sessions for the dashboard terminal console. Native
+        // (node-pty) binding is loaded lazily on first spawn, so constructing
+        // the manager here is cheap and safe on boxes without a toolchain.
+        this.ptyManager = new PTYManager(this.logger);
         this.queue.setExecutor(this.createJobExecutor(), {
             integrationConfigs: config.integrations,
             ai: config.ai,
@@ -631,6 +640,19 @@ export class SokuzaEngine {
             getPresetStore: () => this.presetStore,
         });
 
+        // Interactive PTY terminals. Registered as an encapsulated plugin so
+        // @fastify/websocket loads (and installs its onRoute hook) before the
+        // `{ websocket: true }` route is added. The Host guard + auth gate
+        // registered above propagate into this child context, so the WS
+        // upgrade is gated by the same bearer token (passed via `?t=`).
+        this.server.register(async (instance) => {
+            await ptyPlugin(instance, {
+                ptyManager: this.ptyManager,
+                logger: this.logger,
+                getWorkdirManager: () => this.workdirManager,
+            });
+        });
+
         for (const integration of this.integrations.values()) {
             integration.registerRoutes(this.server, this.handleEvent);
         }
@@ -643,6 +665,23 @@ export class SokuzaEngine {
             this.server, host, preferredPort, this.logger,
         );
         this.config.server.port = actualPort;
+
+        // Mirror locally-run Claude Code session transcripts into the dashboard
+        // event stream. OPT-IN ONLY (SOKUZA_CLI_TRANSCRIPTS=true): the default
+        // Claude transcript root holds sessions from every local project —
+        // potentially secrets/private code — and the feed is readable by any
+        // dashboard-token holder, so we never expose it without explicit
+        // consent. Started AFTER the server is listening so a bind failure
+        // can't leak chokidar handles.
+        if (process.env.SOKUZA_CLI_TRANSCRIPTS === 'true') {
+            this.sessionWatcher = new SessionWatcher({
+                logger: this.logger,
+                onEvent: (event) => {
+                    for (const cb of this.eventSubscribers) cb(event);
+                },
+            });
+            await this.sessionWatcher.start();
+        }
 
         // Clean up state files left by previous processes that crashed.
         // Never load-bearing — it's housekeeping, failures are non-fatal.
@@ -692,6 +731,11 @@ export class SokuzaEngine {
 
         this.stopCronSchedules();
         this.stopPollingIntegrations();
+        this.ptyManager.killAll();
+        if (this.sessionWatcher) {
+            await this.sessionWatcher.stop().catch(() => undefined);
+            this.sessionWatcher = null;
+        }
 
         await this.queue.shutdown();
         if (this.server) {

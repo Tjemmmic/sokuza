@@ -12,3 +12,11 @@ sokuza.config.yaml
 .playwright-mcp
 # Playwright/manual smoke-test screenshots
 *.png
+
+# Local editor / tooling state (accidentally committable from the repo root)
+.vscode/
+.claude/
+
+# Internal planning docs — not shipped to users
+/TODO.md
+/SOKUZA_CLI_INTEGRATION.md

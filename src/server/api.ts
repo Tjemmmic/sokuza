@@ -13,6 +13,7 @@ import { VERSION, readInstalledVersion } from '../version.js';
 import { serviceStatus, installService, uninstallService, restartService, isServiceInstalled } from '../cli/service.js';
 import { runUpdateCommand, resolveEntryPath } from '../cli/update.js';
 import { readUpdateCache, refreshUpdateCache, computeUpdateSnapshot } from '../cli/update-check.js';
+import { registerMcpRoutes } from './mcp-routes.js';
 
 interface ApiDeps {
     logger: Logger;
@@ -2053,6 +2054,11 @@ export function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): void 
 
         try { reply.raw.end(); } catch { /* already closed */ }
     });
+
+    // ─── MCP bridge ─────────────────────────────────────────────────────
+    // Endpoints the `sokuza mcp` stdio server calls to reach this running
+    // engine. Extracted to mcp-routes.ts for direct route-level testing.
+    registerMcpRoutes(server, { logger, broadcastEvent: deps.broadcastEvent });
 
     // ─── Queue ──────────────────────────────────────────────────────────
 

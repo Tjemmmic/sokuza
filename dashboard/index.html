@@ -11,6 +11,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/dashboard/vendor/xterm.css">
     <link rel="stylesheet" href="/dashboard/styles.css">
 </head>
 
@@ -68,6 +69,13 @@
                             <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
                         </svg>
                         Chat
+                    </a></li>
+                <li><a href="#terminal" class="nav-link" data-page="terminal" id="nav-terminal">
+                        <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <polyline points="4 17 10 11 4 5" />
+                            <line x1="12" y1="19" x2="20" y2="19" />
+                        </svg>
+                        Terminal
                     </a></li>
                 <li><a href="#library" class="nav-link" data-page="library" id="nav-library">
                         <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -183,6 +191,12 @@
         </div>
     </div>
 
+    <!-- Terminal libs + terminal.js load BEFORE app.js so a direct load of
+         #terminal (app.js routes synchronously on load) finds renderTerminal
+         already defined. terminal.js only uses app.js globals at call time. -->
+    <script src="/dashboard/vendor/xterm.js"></script>
+    <script src="/dashboard/vendor/addon-fit.js"></script>
+    <script src="/dashboard/terminal.js"></script>
     <script src="/dashboard/app.js"></script>
     <script src="/dashboard/graph-logic.js"></script>
     <script src="/dashboard/graph-editor.js"></script>

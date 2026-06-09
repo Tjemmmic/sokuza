@@ -15,6 +15,7 @@ import { runStatus } from './cli/status.js';
 import { runLogs } from './cli/logs.js';
 import { runToken } from './cli/token.js';
 import { runUpdate } from './cli/update.js';
+import { runMcp } from './cli/mcp.js';
 import { maybeNotifyUpdate, refreshUpdateCache } from './cli/update-check.js';
 import { installService, uninstallService, restartService, serviceStatus, type ServiceStatus } from './cli/service.js';
 
@@ -53,7 +54,7 @@ interface ParsedArgs {
 function parseArgs(argv: string[]): ParsedArgs {
     const rest = argv.slice(2);
     const KNOWN_COMMANDS = new Set([
-        'start', 'init', 'status', 'logs', 'token', 'service', 'update',
+        'start', 'init', 'status', 'logs', 'token', 'service', 'update', 'mcp',
         'version', '--version', '-v', 'help', '--help', '-h',
     ]);
 
@@ -144,6 +145,7 @@ Usage:
   sokuza service restart           Bounce the autostart service (kicks a stuck instance)
   sokuza service status            Report autostart installation and state
   sokuza update                    Upgrade sokuza via its installer (npm, brew, …)
+  sokuza mcp                       Run the MCP server over stdio (for Claude Code et al.)
   sokuza version                   Print version and exit
   sokuza help                      Show this message
 
@@ -231,7 +233,8 @@ async function main(): Promise<void> {
     // Print a cached "update available" notice for interactive invocations.
     // Non-TTY contexts (systemd/launchd service, piped output, CI) stay
     // silent. Runs before the command so the notice always appears first.
-    await maybeNotifyUpdate();
+    // `mcp` owns stdout for the protocol, so it's exempt unconditionally.
+    if (args.command !== 'mcp') await maybeNotifyUpdate();
 
     // Populate the update-check cache from the long-running engine process.
     // Short commands exit too quickly to safely hit the network themselves,
@@ -279,6 +282,10 @@ async function main(): Promise<void> {
 
         case 'update':
             await runUpdate();
+            return;
+
+        case 'mcp':
+            await runMcp();
             return;
 
         default:

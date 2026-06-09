@@ -92,6 +92,11 @@ function extractBearer(req: FastifyRequest): string | undefined {
  * loopback names a local sokuza is reachable as. Any deployment that binds
  * to a non-loopback hostname must add it via the explicit allow-list arg.
  */
+/** PTY sub-routes that must NEVER be exempted from the bearer gate — only the
+ *  `/api/pty/:id` WebSocket attach is. Module-scoped so it isn't reallocated
+ *  per request. */
+const PTY_RESERVED_SEGMENTS = new Set(['sessions', 'ticket', 'spawn']);
+
 export const DEFAULT_ALLOWED_HOSTS: readonly string[] = [
     'localhost',
     '127.0.0.1',
@@ -184,6 +189,44 @@ export function registerAuthGate(server: FastifyInstance, token: string, logger:
         // Static assets (app.js, styles.css) are served under /dashboard/*
         // and follow the same rule.
         if (isDashboard) return;
+
+        // PTY terminal attach is a WebSocket upgrade. Browsers can't set an
+        // Authorization header on a WebSocket, and we deliberately keep the
+        // long-lived bearer token OUT of the URL for this shell-granting
+        // endpoint (query strings leak into logs/history). Instead the route
+        // authenticates a short-lived, single-use ticket in-handler — that
+        // ticket is itself minted by an authenticated POST /api/pty/ticket
+        // (which still passes through this gate).
+        //
+        // The exemption is deliberately narrow: ONLY a GET WebSocket upgrade
+        // to the attach route /api/pty/:id. It must NOT cover the other pty
+        // routes — POST /api/pty/spawn|ticket and DELETE /api/pty/:id are
+        // excluded by the GET check; the GET /api/pty/sessions list and the
+        // reserved sub-routes are excluded by name — otherwise a forged
+        // `Upgrade: websocket` header could slip them past the token. Matching
+        // is segment-based (not prefix), so the path must be EXACTLY
+        // /api/pty/<id> (4 segments). The attach route still requires a valid
+        // single-use ticket in-handler, so even an exempted forged upgrade
+        // buys nothing. The DNS-rebinding Host guard already ran (onRequest).
+        if (req.method === 'GET'
+            && String(req.headers.upgrade ?? '').toLowerCase() === 'websocket') {
+            // Decode before matching: the router decodes percent-encoding, so
+            // `/api/pty/%73essions` reaches the sessions handler — the raw
+            // string must be decoded here too, else it would slip past the
+            // reserved-segment check and skip the bearer token. Malformed
+            // encodings (`%ZZ`) throw; treat those as non-exempt.
+            let path: string;
+            try {
+                path = decodeURIComponent(url.split('?')[0]);
+            } catch {
+                path = '';
+            }
+            const segs = path.split('/'); // ['', 'api', 'pty', '<id>']
+            if (segs.length === 4 && segs[1] === 'api' && segs[2] === 'pty'
+                && segs[3].length > 0 && !PTY_RESERVED_SEGMENTS.has(segs[3])) {
+                return;
+            }
+        }
 
         // API routes require the token.
         const provided = extractBearer(req);
