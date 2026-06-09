@@ -18,10 +18,16 @@ describe('PtyTicketStore', () => {
         expect(store.consume('')).toBe(false);
     });
 
-    it('rejects an expired ticket and consumes it', () => {
-        const store = new PtyTicketStore(-1); // already expired on mint
+    it('rejects an expired ticket', async () => {
+        const store = new PtyTicketStore(5); // 5ms TTL
         const ticket = store.mint();
+        await new Promise((r) => setTimeout(r, 25)); // well past expiry
         expect(store.consume(ticket)).toBe(false);
+    });
+
+    it('rejects a non-positive TTL', () => {
+        expect(() => new PtyTicketStore(0)).toThrow(RangeError);
+        expect(() => new PtyTicketStore(-1)).toThrow(RangeError);
     });
 
     it('mints unique tickets', () => {

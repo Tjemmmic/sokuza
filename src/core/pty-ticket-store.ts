@@ -20,7 +20,11 @@ const MAX_TICKETS = 1_000;
 export class PtyTicketStore {
     private tickets = new Map<string, number>(); // ticket -> expiry epoch ms
 
-    constructor(private readonly ttlMs: number = DEFAULT_TTL_MS) {}
+    constructor(private readonly ttlMs: number = DEFAULT_TTL_MS) {
+        // A non-positive TTL would make every ticket expire on mint, silently
+        // breaking the terminal attach flow — fail loudly instead.
+        if (ttlMs <= 0) throw new RangeError('PtyTicketStore ttlMs must be positive');
+    }
 
     /** Mint a fresh single-use ticket. */
     mint(): string {
