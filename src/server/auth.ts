@@ -92,6 +92,11 @@ function extractBearer(req: FastifyRequest): string | undefined {
  * loopback names a local sokuza is reachable as. Any deployment that binds
  * to a non-loopback hostname must add it via the explicit allow-list arg.
  */
+/** PTY sub-routes that must NEVER be exempted from the bearer gate — only the
+ *  `/api/pty/:id` WebSocket attach is. Module-scoped so it isn't reallocated
+ *  per request. */
+const PTY_RESERVED_SEGMENTS = new Set(['sessions', 'ticket', 'spawn']);
+
 export const DEFAULT_ALLOWED_HOSTS: readonly string[] = [
     'localhost',
     '127.0.0.1',
@@ -205,10 +210,20 @@ export function registerAuthGate(server: FastifyInstance, token: string, logger:
         // buys nothing. The DNS-rebinding Host guard already ran (onRequest).
         if (req.method === 'GET'
             && String(req.headers.upgrade ?? '').toLowerCase() === 'websocket') {
-            const segs = url.split('?')[0].split('/'); // ['', 'api', 'pty', '<id>']
-            const reserved = new Set(['sessions', 'ticket', 'spawn']);
+            // Decode before matching: the router decodes percent-encoding, so
+            // `/api/pty/%73essions` reaches the sessions handler — the raw
+            // string must be decoded here too, else it would slip past the
+            // reserved-segment check and skip the bearer token. Malformed
+            // encodings (`%ZZ`) throw; treat those as non-exempt.
+            let path: string;
+            try {
+                path = decodeURIComponent(url.split('?')[0]);
+            } catch {
+                path = '';
+            }
+            const segs = path.split('/'); // ['', 'api', 'pty', '<id>']
             if (segs.length === 4 && segs[1] === 'api' && segs[2] === 'pty'
-                && segs[3].length > 0 && !reserved.has(segs[3])) {
+                && segs[3].length > 0 && !PTY_RESERVED_SEGMENTS.has(segs[3])) {
                 return;
             }
         }

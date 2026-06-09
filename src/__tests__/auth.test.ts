@@ -228,6 +228,16 @@ describe('registerAuthGate', () => {
         });
         expect(res.statusCode).toBe(401);
     });
+
+    it('does NOT exempt a percent-encoded reserved segment (decodes before matching)', async () => {
+        const s = newServer();
+        // %73 decodes to 's', i.e. /api/pty/sessions — must still require auth.
+        const res = await s.inject({
+            method: 'GET', url: '/api/pty/%73essions',
+            headers: { upgrade: 'websocket', connection: 'Upgrade' },
+        });
+        expect(res.statusCode).toBe(401);
+    });
 });
 
 describe('parseHostHeader', () => {
