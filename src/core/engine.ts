@@ -659,23 +659,29 @@ export class SokuzaEngine {
 
         this.startCronSchedules();
 
-        // Mirror locally-run Claude Code session transcripts into the
-        // dashboard event stream. Best-effort: a missing transcript dir just
-        // leaves the watcher idle.
-        this.sessionWatcher = new SessionWatcher({
-            logger: this.logger,
-            onEvent: (event) => {
-                for (const cb of this.eventSubscribers) cb(event);
-            },
-        });
-        await this.sessionWatcher.start();
-
         const { port: preferredPort } = this.config.server;
         const host = this.config.server.host ?? '127.0.0.1';
         const actualPort = await listenWithFallback(
             this.server, host, preferredPort, this.logger,
         );
         this.config.server.port = actualPort;
+
+        // Mirror locally-run Claude Code session transcripts into the dashboard
+        // event stream. OPT-IN ONLY (SOKUZA_CLI_TRANSCRIPTS=true): the default
+        // Claude transcript root holds sessions from every local project —
+        // potentially secrets/private code — and the feed is readable by any
+        // dashboard-token holder, so we never expose it without explicit
+        // consent. Started AFTER the server is listening so a bind failure
+        // can't leak chokidar handles.
+        if (process.env.SOKUZA_CLI_TRANSCRIPTS === 'true') {
+            this.sessionWatcher = new SessionWatcher({
+                logger: this.logger,
+                onEvent: (event) => {
+                    for (const cb of this.eventSubscribers) cb(event);
+                },
+            });
+            await this.sessionWatcher.start();
+        }
 
         // Clean up state files left by previous processes that crashed.
         // Never load-bearing — it's housekeeping, failures are non-fatal.
