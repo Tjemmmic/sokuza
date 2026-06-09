@@ -43,6 +43,31 @@ describe('McpAskStore', () => {
         expect(surviving).toEqual(ids.slice(-3));
     });
 
+    it('expires an abandoned pending ask via its TTL (pruned on get/listPending)', () => {
+        // pending-TTL = -1 → any positive age counts as expired (deterministic,
+        // avoids same-millisecond flakiness of a 0 TTL).
+        const store = new McpAskStore(200, 60_000, -1);
+        const ask = store.create('abandoned?');
+        // get() prunes first; the negative pending TTL means it's already expired.
+        expect(store.get(ask.id)).toBeUndefined();
+        expect(store.listPending()).toHaveLength(0);
+    });
+
+    it('does not expire a fresh pending ask', () => {
+        const store = new McpAskStore(200, 60_000, 60_000);
+        const ask = store.create('still waiting?');
+        expect(store.get(ask.id)?.status).toBe('pending');
+        expect(store.listPending().map((a) => a.id)).toContain(ask.id);
+    });
+
+    it('prunes expired answered entries even without new create() calls', () => {
+        const store = new McpAskStore(200, -1); // answered-TTL = -1 (immediate)
+        const ask = store.create('q');
+        store.answer(ask.id, 'a');
+        // No further create(); get() must still prune the now-expired answer.
+        expect(store.get(ask.id)).toBeUndefined();
+    });
+
     it('evicts answered asks before pending ones when over the cap', () => {
         const store = new McpAskStore(2);
         const a1 = store.create('q1');

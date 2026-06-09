@@ -25,7 +25,11 @@ export interface McpAsk {
 }
 
 const DEFAULT_MAX_ENTRIES = 200;
-const DEFAULT_TTL_MS = 60 * 60 * 1000; // 1h
+const DEFAULT_TTL_MS = 60 * 60 * 1000; // 1h — answered entries
+// Pending asks also expire so an abandoned dashboard can't grow the store
+// forever. Comfortably longer than the MCP ask tool's max wait (1800s), so a
+// question that's actively being polled is never pruned out from under it.
+const DEFAULT_PENDING_TTL_MS = 60 * 60 * 1000; // 1h — unanswered entries
 
 export class McpAskStore {
     private asks = new Map<string, McpAsk>();
@@ -33,6 +37,7 @@ export class McpAskStore {
     constructor(
         private readonly maxEntries: number = DEFAULT_MAX_ENTRIES,
         private readonly ttlMs: number = DEFAULT_TTL_MS,
+        private readonly pendingTtlMs: number = DEFAULT_PENDING_TTL_MS,
     ) {}
 
     create(prompt: string, source?: string): McpAsk {
@@ -52,6 +57,7 @@ export class McpAskStore {
     }
 
     get(id: string): McpAsk | undefined {
+        this.prune();
         return this.asks.get(id);
     }
 
@@ -70,6 +76,7 @@ export class McpAskStore {
     }
 
     listPending(): McpAsk[] {
+        this.prune();
         return [...this.asks.values()].filter((a) => a.status === 'pending');
     }
 
@@ -80,7 +87,10 @@ export class McpAskStore {
         for (const [id, ask] of this.asks) {
             if (ask.status === 'answered' && ask.answeredAt
                 && now - Date.parse(ask.answeredAt) > this.ttlMs) {
-                expired.push(id);
+                expired.push(id); // answered → TTL after answer
+            } else if (ask.status === 'pending'
+                && now - Date.parse(ask.createdAt) > this.pendingTtlMs) {
+                expired.push(id); // pending → TTL after creation (abandoned)
             }
         }
         for (const id of expired) this.asks.delete(id);
